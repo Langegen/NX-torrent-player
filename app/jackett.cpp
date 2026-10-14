@@ -270,12 +270,16 @@ void saveToLocalAsync(const Item& item,
 {
     mkdir(APPDATA_TORRENTS, 0777);
 
-    if (!item.link.empty())
+    std::string link = item.link;
+    std::string magnet = (!link.empty() && link.rfind("magnet:", 0) == 0) ? link : item.magnetUri;
+    bool isHttp = !link.empty() && link.rfind("magnet:", 0) != 0;
+
+    if (isHttp)
     {
         std::string filename = sanitizeFilename(item.title) + ".torrent";
         std::string destPath = std::string(APPDATA_TORRENTS) + "/" + filename;
 
-        downloadTorrentAsync(item.link, destPath, [item, destPath, cb](bool ok, const std::string& err) {
+        downloadTorrentAsync(item.link, destPath, [item, destPath, magnet, cb](bool ok, const std::string& err) {
             if (ok)
             {
                 brls::Logger::info("[jackett] saved torrent to {}", destPath);
@@ -284,8 +288,8 @@ void saveToLocalAsync(const Item& item,
             }
 
             // If .torrent download failed, fallback to saving magnetUri if present
-            if (!item.magnetUri.empty() &&
-                appendMagnetToFile(APPDATA_MAGNETS, item.magnetUri))
+            if (!magnet.empty() &&
+                appendMagnetToFile(APPDATA_MAGNETS, magnet))
             {
                 brls::Logger::info("[jackett] fallback saved magnet to {}", APPDATA_MAGNETS);
                 cb(true, tr("Saved magnet link to Local library"));
@@ -298,9 +302,9 @@ void saveToLocalAsync(const Item& item,
         return;
     }
 
-    if (!item.magnetUri.empty())
+    if (!magnet.empty())
     {
-        if (appendMagnetToFile(APPDATA_MAGNETS, item.magnetUri))
+        if (appendMagnetToFile(APPDATA_MAGNETS, magnet))
         {
             brls::Logger::info("[jackett] saved magnet to {}", APPDATA_MAGNETS);
             cb(true, tr("Saved magnet link to Local library"));
@@ -312,7 +316,7 @@ void saveToLocalAsync(const Item& item,
         return;
     }
 
-    cb(false, tr("No link or magnet URI found for this torrent."));
+    cb(false, tr("No playable link or magnet URI found for this torrent."));
 }
 
 } // namespace jackett

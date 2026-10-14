@@ -18,6 +18,46 @@
 #include "theme.hpp"
 #include "i18n.hpp"
 
+bool naturalCompare(const std::string& a, const std::string& b)
+{
+    size_t ia = 0, ib = 0;
+    while (ia < a.size() && ib < b.size())
+    {
+        if (std::isdigit((unsigned char)a[ia]) && std::isdigit((unsigned char)b[ib]))
+        {
+            size_t startA = ia, startB = ib;
+            while (ia < a.size() && std::isdigit((unsigned char)a[ia])) ia++;
+            while (ib < b.size() && std::isdigit((unsigned char)b[ib])) ib++;
+
+            size_t numStartA = startA, numStartB = startB;
+            while (numStartA < ia && a[numStartA] == '0') numStartA++;
+            while (numStartB < ib && b[numStartB] == '0') numStartB++;
+
+            size_t lenA = ia - numStartA;
+            size_t lenB = ib - numStartB;
+            if (lenA != lenB)
+                return lenA < lenB;
+
+            int diff = a.compare(numStartA, lenA, b, numStartB, lenB);
+            if (diff != 0)
+                return diff < 0;
+
+            if ((ia - startA) != (ib - startB))
+                return (ia - startA) < (ib - startB);
+        }
+        else
+        {
+            char ca = (char)std::tolower((unsigned char)a[ia]);
+            char cb = (char)std::tolower((unsigned char)b[ib]);
+            if (ca != cb)
+                return ca < cb;
+            ia++;
+            ib++;
+        }
+    }
+    return ia == a.size() && ib < b.size();
+}
+
 namespace
 {
 

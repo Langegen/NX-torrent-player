@@ -361,6 +361,7 @@ const Entry kFr[] = {
     { "Failed to save torrent", "Échec de l'enregistrement du torrent" },
     { "Preparing torrent...", "Préparation du torrent..." },
     { "Could not download torrent: ", "Impossible de télécharger le torrent : " },
+    { "Could not resolve torrent metadata: ", "Impossible de récupérer les métadonnées du torrent : " },
     { "Server URL", "URL du serveur" },
     { "API Key", "Clé API" },
     { "Test connection", "Tester la connexion" },

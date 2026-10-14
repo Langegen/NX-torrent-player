@@ -13,6 +13,9 @@
 // Each level is an Activity so B walks back up one step, which is what the
 // Switch's back button is expected to do.
 
+// Natural/alphabetical string comparison (e.g. S01E01 < S01E02 < S01E10).
+bool naturalCompare(const std::string& a, const std::string& b);
+
 struct Row
 {
     std::string label;

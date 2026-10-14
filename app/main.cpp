@@ -552,7 +552,7 @@ std::vector<VideoFile> torrentVideoFiles(const std::string& path)
     }
     std::free(m);
     std::sort(out.begin(), out.end(), [](const VideoFile& a, const VideoFile& b) {
-        return a.length > b.length;
+        return naturalCompare(a.name, b.name);
     });
     return out;
 }
@@ -650,7 +650,7 @@ std::vector<VideoFile> magnetCachedFiles(const std::string& hash)
         out.push_back({ index, nm, size });
     }
     std::sort(out.begin(), out.end(), [](const VideoFile& a, const VideoFile& b) {
-        return a.length > b.length;
+        return naturalCompare(a.name, b.name);
     });
     return out;
 }
