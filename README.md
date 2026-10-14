@@ -1,133 +1,197 @@
-<img src="https://github.com/shodowlo/NX-torrent-player/blob/main/assets/NX-torrent-player-banner.png?raw=true" alt="NX Torrent Player" width="640">
+<div align="center">
+  <img src="assets/NX-torrent-player-banner.png" alt="NX Torrent Player" width="640">
 
-# NX Torrent Player
+  # NX Torrent Player
 
-**NX Torrent Player: Stremio on Nintendo Switch**
+  **A modern BitTorrent streaming video player for Nintendo Switch**
+  
+  *Featuring Stremio, Jackett, Playback History, and Local Torrents*
 
-A homebrew video player with a BitTorrent engine built in. It does not download
-a file and then play it: it downloads the pieces it is about to need, in order,
-and starts playing after a few seconds of buffer. Sign in to a Stremio account
-and your library, addons and sources are included too.
+  [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+  [![Platform](https://img.shields.io/badge/Platform-Nintendo_Switch-red.svg)](https://www.nintendo.com/)
+  [![Upstream](https://img.shields.io/badge/Forked_From-shodowlo%2FNX--torrent--player-green.svg)](https://github.com/shodowlo/NX-torrent-player)
 
-> Requires a Switch running custom firmware (Atmosphère).
+  [English](README.md) • [Русский](README.ru.md)
+</div>
 
 ---
 
-## Features
+> [!NOTE]
+> ### ℹ️ Attribution & Upstream Acknowledgement
+> This repository is an independent continuation and fork of the original [**NX-torrent-player**](https://github.com/shodowlo/NX-torrent-player) created by [**shodow** (@shodowlo)](https://github.com/shodowlo).
+>
+> Sincere thanks and full credit go to **shodow** for designing and implementing the foundational architecture, custom BitTorrent streaming engine, and sleek Horizon-style interface. This fork is maintained by [**Langegen**](https://github.com/Langegen) to introduce additional features (such as Jackett integration, watch history, improved multi-file management, enhanced tracker pooling, and PC testing) while honoring and preserving the quality of the original project.
 
-- **Streams torrents** — playback starts on the first pieces; the engine keeps
-  downloading ahead of the playhead, and re-centres on it when you seek.
-- **Stremio integration** — sign in, browse your library, drill down through
-  seasons → episodes → addons → sources, artwork and all.
-- **Jackett integration** — search torrents directly across all your configured
-  trackers with category filters (Movies, Series, Anime), stream instantly or save to Local.
-- **Local torrents & magnets** — drop `.torrent` files on the SD card, or add
-  magnet links (a `magnet.txt` file, or the on-screen keyboard). A magnet's name
-  and file list are resolved and cached so you can pick which video to stream.
-- **Player** — audio/subtitle track menu, analog scrubbing (either stick), touch
-  controls, a control lock (Y), and auto-resume where you left off.
-- **borealis** UI: Horizon look, controller-first, touch works too.
+---
 
-## Screenshots
+## 📖 Overview
+
+**NX Torrent Player** is a homebrew video player for Nintendo Switch running custom firmware (Atmosphère). Unlike traditional downloaders, it incorporates an on-device BitTorrent streaming engine that requests and buffers pieces sequentially: playback begins within seconds, continuously downloading ahead of the playhead.
+
+Whether you stream through **Stremio** catalogs and addons, search across dozens of trackers with **Jackett**, or play local `.torrent` files and magnet links from your SD card, NX Torrent Player delivers a smooth, native console experience powered by `mpv` and the `borealis` UI framework.
+
+---
+
+## ✨ Features
+
+### 🌟 Added in this Fork
+- 🔍 **Jackett Search & Streaming** — Search across all your configured Jackett trackers directly from your Switch. Filter by category (*All, Movies, Series, Anime*), sort by seeders/size/date, stream instantly, or save `.torrent` files to your SD card.
+- 🕒 **Watch History & Resume Playback** — Dedicated **History** tab tracking your recently watched videos across all sources (Local, Jackett, Stremio). Automatically remembers your playback position so you can resume right where you left off.
+- 📂 **Multi-File Selection & Natural Sorting** — Smart file picker for torrents and magnets containing multiple videos with natural alphanumeric episode sorting (e.g., Episode 1, 2, ..., 10 instead of 1, 10, 2).
+- ⚡ **Enhanced Engine & Tracker Pooling** — Background announce worker pool supporting concurrent announces across 30+ trackers, asynchronous metadata resolution with cancelable progress dialogs, and robust DHT peer search fallback.
+- 🧪 **Desktop Test Suite** — Standalone PC test suite (`pctest/`) with custom SHA-1 compatibility layer to validate the torrent engine without needing a physical Switch or devkitPro toolchain.
+
+### 🎬 Core Features
+- **True Sequential Streaming** — Starts playing almost immediately; the engine streams ahead of the playhead and automatically re-centers when you seek.
+- **Stremio Integration** — Sign in with your Stremio account to browse your library, catalogs, addons, Cinemeta descriptions, and BitTorrent streams.
+- **Local Torrents & Magnets** — Drop `.torrent` files into `/switch/NX-torrent-player/torrents/` or add magnet links via the on-screen keyboard or `magnet.txt`.
+- **Advanced Player** — Built on `mpv` with hardware acceleration, audio/subtitle track selection (including Stremio external subtitles), analog scrubbing (thumbsticks), playback speed controls, and handheld audio boost.
+- **Console-Native UI** — Built with `borealis`, providing a fast, responsive Nintendo Switch Horizon-style interface with full controller and touchscreen support.
+
+---
+
+## 📸 Screenshots
 
 <table>
   <tr>
-    <td><img src="assets/image1.webp" alt="Local torrents tab" width="100%"></td>
-    <td><img src="assets/image2.webp" alt="Stremio library" width="100%"></td>
+    <td width="50%"><img src="assets/image1.webp" alt="Local torrents tab" width="100%"><br><em>Local Torrents & Magnets</em></td>
+    <td width="50%"><img src="assets/image2.webp" alt="Stremio library" width="100%"><br><em>Stremio Library & Catalogs</em></td>
   </tr>
   <tr>
-    <td><img src="assets/image4.webp" alt="Episode picker" width="100%"></td>
-    <td><img src="assets/image3.webp" alt="Player" width="100%"></td>
+    <td width="50%"><img src="assets/image4.webp" alt="Episode picker" width="100%"><br><em>Episode & File Picker</em></td>
+    <td width="50%"><img src="assets/image3.webp" alt="Player" width="100%"><br><em>Video Player with Audio/Subtitles</em></td>
   </tr>
 </table>
 
-## Install
+---
 
-1. Download `NX-torrent-player.nro` from the [releases](../../releases), or
-   build it (below).
-2. Put it on your SD card in `/switch/NX-torrent-player/` (create the folder).
-3. Launch it from the **Homebrew Menu**.
+## 📥 Installation
 
-Updating is done from inside the app (Options → Check on startup is on by
-default); it replaces its own .nro and restarts.
+### Requirements
+- A Nintendo Switch running custom firmware (**Atmosphère**).
+- Sufficient free space on your microSD card for stream caching.
+- Internet connection (Wi-Fi or LAN) with correct console date and time.
 
-## Usage
+### Steps
+1. Download the latest `NX-torrent-player.nro` from the [**Releases**](https://github.com/Langegen/NX-torrent-player/releases) page.
+2. Place the file onto your microSD card into:
+   ```text
+   sdmc:/switch/NX-torrent-player/NX-torrent-player.nro
+   ```
+3. Insert the SD card into your console and launch the **Homebrew Menu**.
+4. **Important**: Launch the Homebrew Menu via **Title Override** (hold **R** while launching any installed game) to allocate full RAM to the application. Running in applet mode (via the Album) has strict memory limits and is deliberately blocked to prevent crashes.
 
-### Local torrents & magnets
+> [!TIP]
+> **In-App Updates**: Updating can be done directly from within the app (**Options → Check on startup**). When a new release is available, it downloads and replaces the `.nro` automatically upon exiting.
 
-Drop `.torrent` files into `sdmc:/switch/NX-torrent-player/torrents/`
-(sub-folders are scanned too) and they appear in the **Local** tab with the
-torrent's total size.
+---
 
-Magnet links show up in the same list. Add them either by editing
-`torrents/magnet.txt` (one magnet link or bare info-hash per line) or with the
-**Add magnet** button at the top of the tab (on-screen keyboard). A magnet's
-name and file list are fetched in the background — a spinner shows which one is
-resolving — and cached, so next time it lists and opens instantly.
+## 🎮 Controls
 
-Press **Y** on an entry to remove it (a magnet is dropped from the list; a
-`.torrent` file is deleted from the SD card). When a torrent — local or magnet —
-holds several videos, you get to pick which one; if it has no video, it says so.
+| Button / Input | Context | Action |
+| :--- | :--- | :--- |
+| **A** | Menus / Lists | Select / Play video |
+| **B** | Menus / Dialogs | Back / Cancel / Dismiss dialog |
+| **X** | Stremio | Toggle library membership / Clear "Continue Watching" tile |
+| **Y** | Local / History | Delete `.torrent` or remove entry from list / history |
+| **Y** | Jackett | Save `.torrent` or magnet to Local library |
+| **Y** | Player | Lock controls (prevent accidental inputs during playback) |
+| **L / R** | Browser | Cycle Stremio view / filters |
+| **L / R** | Player | Adjust playback speed (or adjust subtitle delay in track menu) |
+| **Left / Right Stick** | Player | Smooth analog scrubbing (seek backward / forward) |
+| **Touchscreen** | Anywhere | Tap to select, drag to scroll, on-screen player controls |
+| **ZR** | Player | Toggle real-time engine statistics and diagnostic HUD |
 
+---
 
-### Stremio
+## 🧭 Usage Guide
 
-In the **Stremio** tab, sign in with your email and password. The session is
-kept and survives a restart (sign out from Options).
+### 1. 🕒 Watch History
+The **History** tab keeps track of your recently watched media across all sources (Local, Jackett, Stremio).
+- Each item shows title, source type, watched duration, and progress bar.
+- Selecting an item (**A**) automatically resumes playback where you left off (valid for items watched for more than 15 seconds and under 95% completion).
+- Press **Y** on any history item to remove it, or use the **Clear History** button at the top.
 
-Pick a title → for a show, a season, then an episode → an addon → a source.
-Sources are whatever your addons return; only BitTorrent ones can be 
-played, and the ones that can't say so up front. 4K sources
-are hidden by default — the Switch outputs 1080p docked, so they cost bandwidth
-for pixels it cannot show. Turn that off in Options.
+### 2. 🔍 Jackett Integration
+In the **Jackett** tab (or via **Options → Jackett**), set up your Jackett server:
+- **Server URL**: Enter your Jackett URL (e.g. `http://192.168.1.100:9117`).
+- **API Key**: Enter your Jackett API key (optional; leave blank if your Jackett instance does not require one).
+- **Features**:
+  - Search across all configured trackers with instant category filtering (**All**, **Movies**, **Series**, **Anime**).
+  - Sort results by **Seeders**, **Size**, or **Date**.
+  - Press **A** to stream directly. For multi-file releases, an episode picker is displayed with naturally sorted files.
+  - Press **Y** to download and save the `.torrent` file to your local library (`/switch/NX-torrent-player/torrents/`).
 
-### Jackett
+### 3. 📺 Stremio Integration
+In the **Stremio** tab, log in with your Stremio email and password:
+- Your Stremio session persists across restarts (sign out anytime from Options).
+- Browse your library, discover popular media, and browse seasons and episodes.
+- Sources provided by your configured BitTorrent addons will be displayed.
+- **4K Filtering**: 4K streams are hidden by default because the Switch outputs up to 1080p docked (saving significant bandwidth). You can re-enable 4K streams in Options if desired.
+- Supports external subtitles provided by Stremio subtitle addons alongside embedded subtitles.
 
-In the **Jackett** tab or in **Options → Jackett**, configure your Jackett Server URL
-(e.g. `http://192.168.1.100:9117`) and API Key.
+### 4. 📁 Local Torrents & Magnets
+- Place `.torrent` files into `sdmc:/switch/NX-torrent-player/torrents/` (nested subdirectories are supported).
+- Add magnet links by editing `sdmc:/switch/NX-torrent-player/torrents/magnet.txt` (one magnet link or info-hash per line) or press **Add magnet** in the Local tab to type/paste using the on-screen keyboard.
+- Magnet metadata (name and file structure) is resolved in the background and cached for instantaneous access next time.
+- Press **Y** on any entry to delete the `.torrent` file from the SD card or remove the magnet link.
 
-- Search across all configured indexers with instant category filtering (All, Movies, Series, Anime).
-- Sort results by seeders (default), file size, or date.
-- Press **A** on any result to stream it directly (multi-file torrents present an episode/video picker).
-- Press **Y** on any result to save the `.torrent` file to your **Local** library (`/switch/NX-torrent-player/torrents/`).
+---
 
-## Building
+## 🛠️ Building from Source
 
-devkitPro is not needed locally — build in the official Docker image, keeping
-the build tree in a named volume so it survives between runs:
+### Nintendo Switch (.nro)
+The build environment runs inside the official devkitPro Docker container, so local toolchain installation is not required.
 
 ```sh
-# configure once, on a fresh volume
+# 1. Create a persistent named volume and configure (run once)
 docker run --rm -v st_build:/build -v "$PWD":/project -w /build \
     devkitpro/devkita64:latest sh -c "cmake /project"
 
-# build
+# 2. Build the NX-torrent-player.nro binary
 docker run --rm -v st_build:/build -v "$PWD":/project -w /build \
     devkitpro/devkita64:latest \
     sh -c "cmake --build . --target NX-torrent-player.nro"
 
-# copy the .nro out of the volume
+# 3. Copy the compiled .nro back to your project directory
 docker run --rm -v st_build:/build -v "$PWD":/project \
     devkitpro/devkita64:latest sh -c "cp /build/NX-torrent-player.nro /project/"
 ```
 
-On Windows/Git Bash, prefix each command with `MSYS_NO_PATHCONV=1`, or the
-container paths get rewritten. Adding or removing a source file needs a `cmake .`
-pass first, since the sources are globbed.
+> [!NOTE]
+> On Windows (using Git Bash or MSYS2), prefix docker commands with `MSYS_NO_PATHCONV=1` to prevent path conversions.
 
-Dependencies come from devkitPro's portlibs (`switch-mpv`, `switch-curl`,
-`switch-libwebp`, `switch-mbedtls`…) and are already in the image. borealis is
-vendored under `library/`.
+### Desktop Engine Tests (PC)
+You can build and run the standalone torrent engine tests on Linux/macOS or WSL:
+```sh
+# Requires gcc, libcurl, libmbedtls, and zlib development packages
+cd pctest
+./build.sh
+./enginetest
+```
 
-## Credits
+---
 
-- [borealis](https://github.com/xfangfang/borealis) — UI framework (vendored,
-  with one local patch: see `library/borealis/VENDORED.md`)
-- [mpv](https://mpv.io/) — playback
-- [libutp](https://github.com/bittorrent/libutp) — uTP transport
-- [Stremio](https://www.stremio.com/) — account, library and addon protocol. This
-  project is not affiliated with Stremio.
-- [curl](https://curl.se/docs/caextract.html) — the CA bundle in
-  `assets/cacert.pem`, Mozilla's root store, which is what certificates get
-  checked against on a console that mounts none
-- devkitPro / libnx — toolchain
+## 👏 Credits & Acknowledgements
+
+This project would not be possible without the remarkable work of the open-source community:
+
+- **[shodow (@shodowlo)](https://github.com/shodowlo)** — Original creator and primary architect of [NX Torrent Player](https://github.com/shodowlo/NX-torrent-player).
+- **[borealis](https://github.com/xfangfang/borealis)** by @xfangfang — Hardware-accelerated Switch Horizon UI framework.
+- **[mpv](https://mpv.io/)** — Fast, versatile video playback engine.
+- **[libutp](https://github.com/bittorrent/libutp)** — BitTorrent uTP transport protocol implementation.
+- **[Stremio](https://www.stremio.com/)** — Media catalog, library, and addon protocols (*NX Torrent Player is not affiliated with or endorsed by Stremio*).
+- **[Jackett](https://github.com/Jackett/Jackett)** — Torrent indexer proxy API (*NX Torrent Player is not affiliated with or endorsed by Jackett*).
+- **[curl](https://curl.se/) & Mozilla CA Store** — HTTP/TLS engine and root certificate verification bundle.
+- **[devkitPro](https://devkitpro.org/) & [libnx](https://github.com/switchbrew/libnx)** — Nintendo Switch homebrew toolchain and runtime libraries.
+
+---
+
+## 📜 License
+
+This project is licensed under the **Apache License 2.0**.
+
+- Original work Copyright © 2024–2026 shodowlo.
+- Modifications and additions Copyright © 2026 Langegen and contributors.
+
+See the [LICENSE](LICENSE) file for complete details.
