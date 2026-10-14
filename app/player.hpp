@@ -71,6 +71,15 @@ struct WatchInfo
     int endPop = 1;
 };
 
+// Formats seconds into "M:SS" or "H:MM:SS"
+std::string fmtTime(double s);
+
+// Prompts the user with a dialog to resume from saved position if valid history exists,
+// or starts from the beginning if requested or if no history exists.
+void startPlaybackPrompt(const std::string& source, const PlayerArt& art = {},
+                         const std::string& title = "", int fileIndex = -1,
+                         WatchInfo watch = {}, const std::string& sourceType = "");
+
 class MpvView : public brls::Box
 {
   public:
@@ -80,7 +89,7 @@ class MpvView : public brls::Box
     // stream; -1 (the default) streams the largest one.
     explicit MpvView(const std::string& source, const PlayerArt& art = {},
                      const std::string& title = "", int fileIndex = -1,
-                     WatchInfo watch = {});
+                     WatchInfo watch = {}, const std::string& sourceType = "");
     ~MpvView() override;
 
     void draw(NVGcontext* vg, float x, float y, float width, float height,
@@ -305,6 +314,15 @@ class MpvView : public brls::Box
     double lastPosSec = 0.0, lastDurSec = 0.0;
     std::chrono::steady_clock::time_point watchPushLast;
     bool watchPushValid = false;
+
+    // Local watch history persistence
+    void maybeUpdateHistory(bool force);
+    std::string currentSource;
+    int currentFileIndex = -1;
+    std::string currentTitle;
+    std::string currentSourceType;
+    std::chrono::steady_clock::time_point historyUpdateLast;
+    bool historyUpdateValid = false;
 };
 
 // Full-screen activity hosting an MpvView. Pops (and tears mpv down) on B.
@@ -313,7 +331,7 @@ class PlayerActivity : public brls::Activity
   public:
     explicit PlayerActivity(std::string source, PlayerArt art = {},
                             std::string title = "", int fileIndex = -1,
-                            WatchInfo watch = {});
+                            WatchInfo watch = {}, std::string sourceType = "");
     brls::View* createContentView() override;
 
     // Opaque: borealis stops the activity-stack draw here and does NOT composite
@@ -327,4 +345,5 @@ class PlayerActivity : public brls::Activity
     std::string title;
     int fileIndex;
     WatchInfo watch;
+    std::string sourceType;
 };

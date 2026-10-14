@@ -38,6 +38,8 @@
 #include "update.hpp"
 #include "stremio.hpp"
 #include "jackett_tab.hpp"
+#include "history.hpp"
+#include "history_tab.hpp"
 
 extern "C" {
 #include "torrent.h"
@@ -676,10 +678,10 @@ void pickAndPlay(const std::string& source, const std::string& title,
         d->open();
         return;
     }
+    std::string srcType = (source.find(".torrent") != std::string::npos || source.rfind("magnet:", 0) == 0) ? "Torrent" : "Local";
     if (vids.size() == 1)
     {
-        brls::Application::pushActivity(
-            new PlayerActivity(source, {}, vids[0].name, vids[0].index));
+        startPlaybackPrompt(source, {}, vids[0].name, vids[0].index, {}, srcType);
         return;
     }
     std::vector<Row> rows;
@@ -691,11 +693,10 @@ void pickAndPlay(const std::string& source, const std::string& title,
         rows.push_back(row);
     }
     brls::Application::pushActivity(new ListActivity(
-        title, tr("Pick a file"), rows, [source, vids](int i) {
+        title, tr("Pick a file"), rows, [source, vids, srcType](int i) {
             brls::Logger::info("Playing {} file {} ({})", source, vids[i].index,
                                vids[i].name);
-            brls::Application::pushActivity(
-                new PlayerActivity(source, {}, vids[i].name, vids[i].index));
+            startPlaybackPrompt(source, {}, vids[i].name, vids[i].index, {}, srcType);
         }));
 }
 
@@ -1284,6 +1285,8 @@ brls::View* buildTab(config::Tab tab)
         return (brls::View*)new StremioTab();
     if (tab == config::Tab::JACKETT)
         return buildJackettTab();
+    if (tab == config::Tab::HISTORY)
+        return buildHistoryTab();
     return buildLocalTab();
 }
 
@@ -1320,6 +1323,7 @@ void attachTopTabBar(brls::AppletFrame* frame, brls::Box* content)
     auto* localBtn   = new brls::Button();
     auto* stremioBtn = new brls::Button();
     auto* jackettBtn = new brls::Button();
+    auto* historyBtn = new brls::Button();
 
     // Which tab is up, held in a shared cell rather than a capture so the
     // repaint hook below can restyle without knowing how we got here.
@@ -1328,7 +1332,7 @@ void attachTopTabBar(brls::AppletFrame* frame, brls::Box* content)
     // The style carries the accent: a Button copies it out of the theme when a
     // style is applied and keeps it, so this has to be re-run (not the tab
     // rebuilt) when the colour changes.
-    auto restyleTabs = [localBtn, stremioBtn, jackettBtn, curTab]() {
+    auto restyleTabs = [localBtn, stremioBtn, jackettBtn, historyBtn, curTab]() {
         localBtn->setStyle(*curTab == config::Tab::LOCAL
                                ? &brls::BUTTONSTYLE_PRIMARY
                                : &brls::BUTTONSTYLE_BORDERLESS);
@@ -1338,9 +1342,12 @@ void attachTopTabBar(brls::AppletFrame* frame, brls::Box* content)
         jackettBtn->setStyle(*curTab == config::Tab::JACKETT
                                  ? &brls::BUTTONSTYLE_PRIMARY
                                  : &brls::BUTTONSTYLE_BORDERLESS);
+        historyBtn->setStyle(*curTab == config::Tab::HISTORY
+                                 ? &brls::BUTTONSTYLE_PRIMARY
+                                 : &brls::BUTTONSTYLE_BORDERLESS);
     };
 
-    auto select = [content, localBtn, stremioBtn, jackettBtn, frame, curTab,
+    auto select = [content, localBtn, stremioBtn, jackettBtn, historyBtn, frame, curTab,
                    restyleTabs](config::Tab tab) {
         *curTab = tab;
         restyleTabs();
@@ -1361,7 +1368,8 @@ void attachTopTabBar(brls::AppletFrame* frame, brls::Box* content)
         // while the list can still scroll up, so a deep tab (Stremio's library
         // sits under two more boxes than the local list) never hands it over.
         brls::Button* active = tab == config::Tab::STREMIO ? stremioBtn :
-                               (tab == config::Tab::JACKETT ? jackettBtn : localBtn);
+                               (tab == config::Tab::JACKETT ? jackettBtn :
+                               (tab == config::Tab::HISTORY ? historyBtn : localBtn));
         v->registerAction(
             tr("Back"), brls::BUTTON_B,
             [active](brls::View*) {
@@ -1396,6 +1404,14 @@ void attachTopTabBar(brls::AppletFrame* frame, brls::Box* content)
         return true;
     });
     bar->addView(jackettBtn);
+
+    historyBtn->setText(tr("History"));
+    historyBtn->setStyle(&brls::BUTTONSTYLE_BORDERLESS);
+    historyBtn->registerClickAction([select](brls::View*) {
+        select(config::Tab::HISTORY);
+        return true;
+    });
+    bar->addView(historyBtn);
 
     // The Stremio sub-view switcher, centred in the header: one button per view
     // (Continue / Movies / Shows / Library). It says where you are and clicking
@@ -1725,6 +1741,7 @@ int main(int argc, char* argv[])
     ensureAppDataDir();
 
     config::load();
+    history::load();
     // Straight after the config it reads, and before anything can build a view:
     // tr() is resolved when a string is handed to a view, and the header, the
     // tab bar and the browser are built once and never again.

@@ -244,7 +244,8 @@ void load()
 
     std::string sTab = readStr(body, "startupTab", "local");
     cfg.startupTab = (sTab == "stremio") ? Tab::STREMIO :
-                     (sTab == "jackett") ? Tab::JACKETT : Tab::LOCAL;
+                     (sTab == "jackett") ? Tab::JACKETT :
+                     (sTab == "history") ? Tab::HISTORY : Tab::LOCAL;
     cfg.jackettUrl    = readStr(body, "jackettUrl", cfg.jackettUrl);
     cfg.jackettApiKey = readStr(body, "jackettApiKey", cfg.jackettApiKey);
     cfg.logging = readBool(body, "logging", cfg.logging);
@@ -285,7 +286,8 @@ bool save()
         return false;
     }
     const char* sTabStr = (cfg.startupTab == Tab::STREMIO) ? "stremio" :
-                          (cfg.startupTab == Tab::JACKETT) ? "jackett" : "local";
+                          (cfg.startupTab == Tab::JACKETT) ? "jackett" :
+                          (cfg.startupTab == Tab::HISTORY) ? "history" : "local";
     std::fprintf(f,
                  "{\n"
                  "  \"startupTab\": \"%s\",\n"

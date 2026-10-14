@@ -21,3 +21,6 @@
 // in the player. Kept so re-picking the same one costs nothing; they are a few
 // tens of KB each.
 #define APPDATA_SUBS     APPDATA_DIR "/subtitles"
+// Watch history and saved playback positions.
+#define APPDATA_HISTORY  APPDATA_DIR "/history.json"
+

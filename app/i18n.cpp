@@ -397,6 +397,21 @@ const Entry kFr[] = {
       "Aucun pair joignable : délais dépassés ou connexions refusées (aucun seed actif)" },
     { "peers connected but refused to share metadata",
       "Pairs connectés mais refusant de partager les métadonnées" },
+    { "History", "Historique" },
+    { "Watch History", "Historique de lecture" },
+    { "No watch history yet", "Aucun historique de lecture pour le moment" },
+    { "Resume playback?", "Reprendre la lecture ?" },
+    { "Resume", "Reprendre" },
+    { "Start over", "Recommencer" },
+    { "Remove", "Supprimer" },
+    { "Clear", "Effacer" },
+    { "Clear all history", "Effacer tout l'historique" },
+    { "Remove this item from watch history?",
+      "Supprimer cet élément de l'historique de lecture ?" },
+    { "Are you sure you want to clear your entire watch history?",
+      "Voulez-vous vraiment effacer tout votre historique de lecture ?" },
+    { "Completed", "Terminé" },
+    { "Watched", "Vu" },
 };
 
 std::string g_lang = "en";

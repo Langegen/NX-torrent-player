@@ -145,12 +145,14 @@ brls::View* generalPane()
 
     auto* startup = new brls::SelectorCell();
     int curStartupIdx = (cfg.startupTab == config::Tab::STREMIO) ? 1 :
-                        (cfg.startupTab == config::Tab::JACKETT) ? 2 : 0;
-    startup->init(tr("Category on startup"), { tr("Local"), tr("Stremio"), "Jackett" },
+                        (cfg.startupTab == config::Tab::JACKETT) ? 2 :
+                        (cfg.startupTab == config::Tab::HISTORY) ? 3 : 0;
+    startup->init(tr("Category on startup"), { tr("Local"), tr("Stremio"), "Jackett", tr("History") },
                   curStartupIdx, [](int sel) {
                       config::get().startupTab =
                           (sel == 1) ? config::Tab::STREMIO :
-                          (sel == 2) ? config::Tab::JACKETT : config::Tab::LOCAL;
+                          (sel == 2) ? config::Tab::JACKETT :
+                          (sel == 3) ? config::Tab::HISTORY : config::Tab::LOCAL;
                       config::save();
                   });
     list->addView(startup);

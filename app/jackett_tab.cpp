@@ -657,8 +657,7 @@ class JackettView
 
         if (vids.size() == 1)
         {
-            brls::Application::pushActivity(
-                new PlayerActivity(source, {}, vids[0].name, vids[0].index));
+            startPlaybackPrompt(source, {}, vids[0].name, vids[0].index, {}, "Jackett");
             return;
         }
 
@@ -672,8 +671,7 @@ class JackettView
         }
         brls::Application::pushActivity(new ListActivity(
             title, tr("Pick a file"), rows, [source, vids](int i) {
-                brls::Application::pushActivity(
-                    new PlayerActivity(source, {}, vids[i].name, vids[i].index));
+                startPlaybackPrompt(source, {}, vids[i].name, vids[i].index, {}, "Jackett");
             }));
     }
 

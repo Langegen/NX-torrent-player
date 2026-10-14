@@ -572,8 +572,7 @@ void showStreams(const stremio::Addon& addon, const std::string& type,
                     w.endPop    = 3;
                     // The addon's file index picks the right episode inside a
                     // season pack (or all-seasons torrent); -1 = largest file.
-                    brls::Application::pushActivity(
-                        new PlayerActivity(magnet, art, label, s.fileIdx, w));
+                    startPlaybackPrompt(magnet, art, label, s.fileIdx, w, "Stremio");
                 },
                 art.posterPath));
         });
@@ -1029,8 +1028,7 @@ class AddonSourcePicker : public brls::Activity
                 if (lw.itemId == w.itemId && lw.progress() >= 0.0 &&
                     (w.videoId.empty() || lw.videoId == w.videoId))
                     w.resumeSec = resumeFrom(lw.offsetMs, lw.durationMs);
-                brls::Application::pushActivity(new PlayerActivity(
-                    magnet, cardArt, cardLabel, stream.fileIdx, w));
+                startPlaybackPrompt(magnet, cardArt, cardLabel, stream.fileIdx, w, "Stremio");
                 return true;
             });
         card->addGestureRecognizer(new brls::TapGestureRecognizer(card));

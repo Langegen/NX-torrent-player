@@ -23,6 +23,7 @@
 #include "appdata.hpp"
 #include "browse.hpp"  // openEpisodeById, for the next-episode card
 #include "config.hpp"
+#include "history.hpp"
 #include "stremio.hpp"  // cached artwork -> blurred background
 #include "theme.hpp"    // muted text for the in-menu hints
 
@@ -159,20 +160,6 @@ class PlayPauseButton : public brls::Box
 };
 } // namespace
 
-// Seconds -> "M:SS" (or "H:MM:SS" past an hour).
-std::string fmtTime(double s)
-{
-    if (s < 0 || s != s)  // clamp negatives / NaN
-        s = 0;
-    int t = (int)s, h = t / 3600, m = (t % 3600) / 60, sec = t % 60;
-    char buf[16];
-    if (h > 0)
-        std::snprintf(buf, sizeof(buf), "%d:%02d:%02d", h, m, sec);
-    else
-        std::snprintf(buf, sizeof(buf), "%d:%02d", m, sec);
-    return buf;
-}
-
 // Pops `n` activities back-to-back. A free function, not a member: the first pop
 // destroys the player view, so `this` cannot drive the rest. Each pop chains the
 // next from its completion callback, so they run in order without animation.
@@ -200,12 +187,44 @@ void popActivitiesThen(int n, std::function<void()> then)
 
 } // namespace
 
+// Seconds -> "M:SS" (or "H:MM:SS" past an hour).
+std::string fmtTime(double s)
+{
+    if (s < 0 || s != s)  // clamp negatives / NaN
+        s = 0;
+    int t = (int)s, h = t / 3600, m = (t % 3600) / 60, sec = t % 60;
+    char buf[16];
+    if (h > 0)
+        std::snprintf(buf, sizeof(buf), "%d:%02d:%02d", h, m, sec);
+    else
+        std::snprintf(buf, sizeof(buf), "%d:%02d", m, sec);
+    return buf;
+}
+
 MpvView::MpvView(const std::string& source, const PlayerArt& art,
                  const std::string& titleOverride, int fileIndex,
-                 WatchInfo watchInfo)
+                 WatchInfo watchInfo, const std::string& sourceType)
     : art(art)
     , watch(std::move(watchInfo))
+    , currentSource(source)
+    , currentFileIndex(fileIndex)
+    , currentTitle(titleOverride)
+    , currentSourceType(sourceType)
 {
+    if (currentSourceType.empty())
+    {
+        if (!this->watch.itemId.empty())
+            currentSourceType = "Stremio";
+        else if (source.find(".torrent") != std::string::npos)
+            currentSourceType = "Torrent";
+        else if (source.rfind("magnet:", 0) == 0)
+            currentSourceType = "Torrent";
+        else if (source.rfind("http://", 0) == 0 || source.rfind("https://", 0) == 0)
+            currentSourceType = "Jackett";
+        else
+            currentSourceType = "Local";
+    }
+
     // Tell the OS a video is playing, so it does not dim the screen or sleep
     // during a long film -- there is no controller input while watching, which
     // is exactly what the idle timer counts. Cleared in the destructor.
@@ -1376,6 +1395,7 @@ MpvView::~MpvView()
     // sampled during playback (see logStats) -- mpv is about to be destroyed,
     // and the push itself runs on a background thread with no reference to us.
     maybePushWatchState(true);
+    maybeUpdateHistory(true);
 
     // Tell any in-flight startEngine() that we are gone, so it closes the engine
     // it opened instead of writing into a destroyed view.
@@ -2692,6 +2712,40 @@ void MpvView::maybePushWatchState(bool force)
                                  lastPosSec, lastDurSec);
 }
 
+void MpvView::maybeUpdateHistory(bool force)
+{
+    // Need at least 15 seconds of playback or finished video
+    if (lastPosSec < 15.0 && !ended)
+        return;
+
+    auto now = std::chrono::steady_clock::now();
+    if (!force && historyUpdateValid &&
+        std::chrono::duration<double>(now - historyUpdateLast).count() < 15.0)
+        return;
+    historyUpdateLast  = now;
+    historyUpdateValid = true;
+
+    bool finished = ended || (lastDurSec > 0.0 && lastPosSec >= lastDurSec * 0.95);
+
+    history::Item it;
+    it.source = currentSource;
+    it.fileIndex = currentFileIndex;
+    it.title = !currentTitle.empty() ? currentTitle :
+               (!watch.displayTitle.empty() ? watch.displayTitle : currentSource);
+    it.sourceType = currentSourceType;
+    it.posterPath = art.posterPath;
+    it.positionSec = finished ? 0.0 : lastPosSec;
+    it.durationSec = lastDurSec;
+    it.completed = finished;
+    it.stremioAuthKey = watch.authKey;
+    it.stremioItemId = watch.itemId;
+    it.stremioVideoId = watch.videoId;
+    it.stremioType = watch.type;
+    it.id = history::makeId(it.source, it.fileIndex, it.stremioVideoId);
+
+    history::record(it);
+}
+
 // Enter scrub mode: pause and pin the cursor to where playback currently is.
 void MpvView::beginSeek()
 {
@@ -2944,21 +2998,79 @@ void MpvView::draw(NVGcontext* vg, float x, float y, float width, float height,
     updateInfoOverlay();
     logStats();  // always, even with the ZR panel closed
 
+    if (obsPos > 0) lastPosSec = obsPos;
+    if (obsDur > 0) lastDurSec = obsDur;
+    maybeUpdateHistory(false);
+
     brls::Box::draw(vg, x, y, width, height, style, ctx);
 }
 
 PlayerActivity::PlayerActivity(std::string source, PlayerArt art,
                                std::string title, int fileIndex,
-                               WatchInfo watch)
+                               WatchInfo watch, std::string sourceType)
     : source(std::move(source))
     , art(std::move(art))
     , title(std::move(title))
     , fileIndex(fileIndex)
     , watch(std::move(watch))
+    , sourceType(std::move(sourceType))
 {
 }
 
 brls::View* PlayerActivity::createContentView()
 {
-    return new MpvView(source, art, title, fileIndex, watch);
+    return new MpvView(source, art, title, fileIndex, watch, sourceType);
+}
+
+void startPlaybackPrompt(const std::string& source, const PlayerArt& art,
+                         const std::string& title, int fileIndex,
+                         WatchInfo watch, const std::string& sourceType)
+{
+    const history::Item* item = history::find(source, fileIndex, watch.videoId);
+    double resumePos = 0.0;
+    double resumeDur = 0.0;
+    std::string itemTitle = title;
+
+    if (item)
+    {
+        if (history::hasValidResume(*item))
+        {
+            resumePos = item->positionSec;
+            resumeDur = item->durationSec;
+            if (itemTitle.empty()) itemTitle = item->title;
+        }
+    }
+    else if (watch.resumeSec > 15.0)
+    {
+        resumePos = watch.resumeSec;
+    }
+
+    if (resumePos >= 15.0)
+    {
+        if (itemTitle.empty()) itemTitle = source;
+        std::string posStr = fmtTime(resumePos);
+        std::string durStr = resumeDur > 0.0 ? (" / " + fmtTime(resumeDur)) : "";
+        std::string msg = std::string(tr("Resume playback?")) + "\n\n" + itemTitle + "\n" + posStr + durStr;
+
+        auto* dialog = new brls::Dialog(msg);
+        double targetSec = std::max(0.0, resumePos - 5.0);
+
+        dialog->addButton(tr("Resume"), [source, art, title, fileIndex, watch, sourceType, targetSec]() {
+            WatchInfo w = watch;
+            w.resumeSec = targetSec;
+            brls::Application::pushActivity(new PlayerActivity(source, art, title, fileIndex, w, sourceType));
+        });
+
+        dialog->addButton(tr("Start over"), [source, art, title, fileIndex, watch, sourceType]() {
+            WatchInfo w = watch;
+            w.resumeSec = 0.0;
+            brls::Application::pushActivity(new PlayerActivity(source, art, title, fileIndex, w, sourceType));
+        });
+
+        dialog->addButton(tr("Cancel"), []() {});
+        dialog->open();
+        return;
+    }
+
+    brls::Application::pushActivity(new PlayerActivity(source, art, title, fileIndex, watch, sourceType));
 }

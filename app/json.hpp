@@ -21,6 +21,7 @@ std::string str(const std::string& body, const char* key, size_t from = 0);
 
 // The number at `key`, or `dflt`.
 long integer(const std::string& body, const char* key, long dflt = 0);
+double number(const std::string& body, const char* key, double dflt = 0.0);
 
 // The bool at `key`, or `dflt`. Tolerates whitespace after the colon.
 bool boolean(const std::string& body, const char* key, bool dflt = false);

@@ -15,6 +15,7 @@ enum class Tab
     LOCAL   = 0,
     STREMIO = 1,
     JACKETT = 2,
+    HISTORY = 3,
 };
 
 // The default UI sizes, named so the Options screen can mark them in the list.

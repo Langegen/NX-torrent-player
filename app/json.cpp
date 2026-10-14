@@ -201,6 +201,34 @@ long integer(const std::string& body, const char* key, long dflt)
     return dflt;
 }
 
+double number(const std::string& body, const char* key, double dflt)
+{
+    std::string pat = std::string("\"") + key + "\"";
+    size_t from = 0;
+    while (from < body.size())
+    {
+        size_t k = body.find(pat, from);
+        if (k == std::string::npos) return dflt;
+        size_t colon = k + pat.size();
+        while (colon < body.size() && (body[colon] == ' ' || body[colon] == '\t' ||
+                                      body[colon] == '\r' || body[colon] == '\n'))
+            colon++;
+        if (colon < body.size() && body[colon] == ':')
+        {
+            size_t v = colon + 1;
+            while (v < body.size() && (body[v] == ' ' || body[v] == '\t' ||
+                                       body[v] == '\r' || body[v] == '\n')) v++;
+            if (v >= body.size()) return dflt;
+            char* end = nullptr;
+            double n = std::strtod(body.c_str() + v, &end);
+            if (end == body.c_str() + v) return dflt;
+            return n;
+        }
+        from = k + 1;
+    }
+    return dflt;
+}
+
 // Splits the top-level objects out of the array at `key` by brace depth, so each
 // item can be read on its own. Depth-counting (rather than searching for keys
 // across the whole body) is what keeps nested objects -- "state", "behaviorHints"
