@@ -303,14 +303,11 @@ class JackettView
                 brls::Application::getImeManager()->openForText(
                     [this, live](std::string key) {
                         if (!*live) return;
-                        if (!key.empty())
-                        {
-                            config::get().jackettApiKey = key;
-                            config::save();
-                        }
+                        config::get().jackettApiKey = key;
+                        config::save();
                         refresh();
                     },
-                    tr("Jackett API Key"), tr("32-character API key from Jackett"), 128,
+                    tr("Jackett API Key (optional)"), tr("Leave empty if disabled in Jackett"), 128,
                     config::get().jackettApiKey);
             },
             tr("Jackett Server URL"), tr("e.g. http://192.168.1.100:9117"), 256,
@@ -351,7 +348,7 @@ class JackettView
         contentContainer->clearViews();
 
         const auto& cfg = config::get();
-        if (cfg.jackettUrl.empty() || cfg.jackettApiKey.empty())
+        if (cfg.jackettUrl.empty())
         {
             renderUnconfigured();
             return;
@@ -401,7 +398,7 @@ class JackettView
         box->addView(title);
 
         auto* hint = new brls::Label();
-        hint->setText(tr("Set your Jackett Server URL and API Key in Options, or click below to configure now."));
+        hint->setText(tr("Set your Jackett Server URL in Options, or click below to configure now."));
         hint->setFontSize(20.0f);
         hint->setTextColor(theme::textMuted());
         hint->setHorizontalAlign(brls::HorizontalAlign::CENTER);

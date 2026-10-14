@@ -284,7 +284,7 @@ void MpvView::startEngine(const std::string& source, int fileIndex)
             if (!t)
             {
                 brls::Logger::error("torrentfs_open failed: {}", e);
-                if (statusLabel) statusLabel->setText(tr("Failed: ") + e);
+                if (statusLabel) statusLabel->setText(std::string(tr("Failed: ")) + tr(e.c_str()));
                 return;
             }
             tfs = t;
@@ -2108,12 +2108,19 @@ void MpvView::updateLoadingOverlay()
     {
         int tried = torrent_meta_peers_tried;
         int total = torrent_meta_peers_total;
-        if (statusLabel && total > 0)
+        if (statusLabel)
         {
-            char b[96];
-            std::snprintf(b, sizeof(b), "Metadata: peer %d / %d", tried,
-                          total);
-            statusLabel->setText(b);
+            if (torrent_meta_state == META_DHT)
+                statusLabel->setText(tr("Searching DHT for peers..."));
+            else if (torrent_meta_state == META_ANNOUNCE)
+                statusLabel->setText(tr("Announcing to trackers..."));
+            else if (total > 0)
+            {
+                char b[96];
+                std::snprintf(b, sizeof(b), "Metadata: peer %d / %d", tried,
+                              total);
+                statusLabel->setText(b);
+            }
         }
         return;
     }

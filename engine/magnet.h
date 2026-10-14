@@ -16,6 +16,7 @@ typedef struct {
 
 // Parse a magnet: URI. Returns 0 on success. Frees with magnet_free.
 int magnet_parse(const char *uri, magnet_info *m, char *err, size_t errlen);
+void magnet_add_tracker(magnet_info *m, const char *url);
 void magnet_free(magnet_info *m);
 
 #endif

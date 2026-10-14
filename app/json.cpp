@@ -14,99 +14,119 @@ namespace json
 std::string str(const std::string& body, const char* key, size_t from)
 {
     std::string pat = std::string("\"") + key + "\"";
-    size_t k        = body.find(pat, from);
-    if (k == std::string::npos) return "";
-    size_t colon = body.find(':', k + pat.size());
-    if (colon == std::string::npos) return "";
-    size_t q1 = body.find('"', colon);
-    if (q1 == std::string::npos) return "";
-
-    auto hex = [](char c) -> int {
-        if (c >= '0' && c <= '9') return c - '0';
-        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
-        if (c >= 'A' && c <= 'F') return c - 'A' + 10;
-        return -1;
-    };
-
-    std::string out;
-    for (size_t i = q1 + 1; i < body.size(); i++)
+    while (from < body.size())
     {
-        if (body[i] == '"') break;
-        if (body[i] != '\\' || i + 1 >= body.size())
-        {
-            out += body[i];
-            continue;
-        }
+        size_t k = body.find(pat, from);
+        if (k == std::string::npos) return "";
 
-        char esc = body[++i];
-        switch (esc)
+        size_t colon = k + pat.size();
+        while (colon < body.size() && (body[colon] == ' ' || body[colon] == '\t' ||
+                                      body[colon] == '\r' || body[colon] == '\n'))
+            colon++;
+
+        if (colon < body.size() && body[colon] == ':')
         {
-            case 'n': out += '\n'; break;
-            case 'r': out += '\r'; break;
-            case 't': out += '\t'; break;
-            case 'b': out += '\b'; break;
-            case 'f': out += '\f'; break;
-            case 'u':
+            size_t valStart = colon + 1;
+            while (valStart < body.size() && (body[valStart] == ' ' || body[valStart] == '\t' ||
+                                              body[valStart] == '\r' || body[valStart] == '\n'))
+                valStart++;
+
+            if (valStart >= body.size() || body[valStart] != '"')
+                return "";
+
+            size_t q1 = valStart;
+
+            auto hex = [](char c) -> int {
+                if (c >= '0' && c <= '9') return c - '0';
+                if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+                if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+                return -1;
+            };
+
+            std::string out;
+            for (size_t i = q1 + 1; i < body.size(); i++)
             {
-                // \uXXXX. Previously the backslash was dropped and the escape
-                // letter kept verbatim, so "&" (sent as &) surfaced as the
-                // literal text "u0026".
-                if (i + 4 >= body.size()) { out += esc; break; }
-                int cp = 0, ok = 1;
-                for (int d = 1; d <= 4; d++)
+                if (body[i] == '"') break;
+                if (body[i] != '\\' || i + 1 >= body.size())
                 {
-                    int h = hex(body[i + d]);
-                    if (h < 0) { ok = 0; break; }
-                    cp = cp * 16 + h;
-                }
-                if (!ok) { out += esc; break; }
-                i += 4;
-
-                // Surrogate pair: the high half alone is not a character.
-                if (cp >= 0xD800 && cp <= 0xDBFF && i + 6 < body.size() &&
-                    body[i + 1] == '\\' && body[i + 2] == 'u')
-                {
-                    int lo = 0, ok2 = 1;
-                    for (int d = 3; d <= 6; d++)
-                    {
-                        int h = hex(body[i + d]);
-                        if (h < 0) { ok2 = 0; break; }
-                        lo = lo * 16 + h;
-                    }
-                    if (ok2 && lo >= 0xDC00 && lo <= 0xDFFF)
-                    {
-                        cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
-                        i += 6;
-                    }
+                    out += body[i];
+                    continue;
                 }
 
-                // Encode as UTF-8; the UI's text stack expects it.
-                if (cp < 0x80)
-                    out += (char)cp;
-                else if (cp < 0x800)
+                char esc = body[++i];
+                switch (esc)
                 {
-                    out += (char)(0xC0 | (cp >> 6));
-                    out += (char)(0x80 | (cp & 0x3F));
+                    case 'n': out += '\n'; break;
+                    case 'r': out += '\r'; break;
+                    case 't': out += '\t'; break;
+                    case 'b': out += '\b'; break;
+                    case 'f': out += '\f'; break;
+                    case 'u':
+                    {
+                        // \uXXXX. Previously the backslash was dropped and the escape
+                        // letter kept verbatim, so "&" (sent as &) surfaced as the
+                        // literal text "u0026".
+                        if (i + 4 >= body.size()) { out += esc; break; }
+                        int cp = 0, ok = 1;
+                        for (int d = 1; d <= 4; d++)
+                        {
+                            int h = hex(body[i + d]);
+                            if (h < 0) { ok = 0; break; }
+                            cp = cp * 16 + h;
+                        }
+                        if (!ok) { out += esc; break; }
+                        i += 4;
+
+                        // Surrogate pair: the high half alone is not a character.
+                        if (cp >= 0xD800 && cp <= 0xDBFF && i + 6 < body.size() &&
+                            body[i + 1] == '\\' && body[i + 2] == 'u')
+                        {
+                            int lo = 0, ok2 = 1;
+                            for (int d = 3; d <= 6; d++)
+                            {
+                                int h = hex(body[i + d]);
+                                if (h < 0) { ok2 = 0; break; }
+                                lo = lo * 16 + h;
+                            }
+                            if (ok2 && lo >= 0xDC00 && lo <= 0xDFFF)
+                            {
+                                cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
+                                i += 6;
+                            }
+                        }
+
+                        // Encode as UTF-8; the UI's text stack expects it.
+                        if (cp < 0x80)
+                            out += (char)cp;
+                        else if (cp < 0x800)
+                        {
+                            out += (char)(0xC0 | (cp >> 6));
+                            out += (char)(0x80 | (cp & 0x3F));
+                        }
+                        else if (cp < 0x10000)
+                        {
+                            out += (char)(0xE0 | (cp >> 12));
+                            out += (char)(0x80 | ((cp >> 6) & 0x3F));
+                            out += (char)(0x80 | (cp & 0x3F));
+                        }
+                        else
+                        {
+                            out += (char)(0xF0 | (cp >> 18));
+                            out += (char)(0x80 | ((cp >> 12) & 0x3F));
+                            out += (char)(0x80 | ((cp >> 6) & 0x3F));
+                            out += (char)(0x80 | (cp & 0x3F));
+                        }
+                        break;
+                    }
+                    default: out += esc; break;  // \" \\ \/ and anything unknown
                 }
-                else if (cp < 0x10000)
-                {
-                    out += (char)(0xE0 | (cp >> 12));
-                    out += (char)(0x80 | ((cp >> 6) & 0x3F));
-                    out += (char)(0x80 | (cp & 0x3F));
-                }
-                else
-                {
-                    out += (char)(0xF0 | (cp >> 18));
-                    out += (char)(0x80 | ((cp >> 12) & 0x3F));
-                    out += (char)(0x80 | ((cp >> 6) & 0x3F));
-                    out += (char)(0x80 | (cp & 0x3F));
-                }
-                break;
             }
-            default: out += esc; break;  // \" \\ \/ and anything unknown
+            return out;
         }
+
+        from = k + 1;
     }
-    return out;
+    return "";
 }
 
 // A literal find of "\"key\":true" silently fails the moment a server pretty-
@@ -115,13 +135,28 @@ std::string str(const std::string& body, const char* key, size_t from)
 bool boolean(const std::string& body, const char* key, bool dflt)
 {
     std::string pat = std::string("\"") + key + "\"";
-    size_t k        = body.find(pat);
-    if (k == std::string::npos) return dflt;
-    size_t colon = body.find(':', k + pat.size());
-    if (colon == std::string::npos) return dflt;
-    size_t v = colon + 1;
-    while (v < body.size() && (body[v] == ' ' || body[v] == '\t')) v++;
-    return body.compare(v, 4, "true") == 0;
+    size_t from = 0;
+    while (from < body.size())
+    {
+        size_t k = body.find(pat, from);
+        if (k == std::string::npos) return dflt;
+        size_t colon = k + pat.size();
+        while (colon < body.size() && (body[colon] == ' ' || body[colon] == '\t' ||
+                                      body[colon] == '\r' || body[colon] == '\n'))
+            colon++;
+        if (colon < body.size() && body[colon] == ':')
+        {
+            size_t v = colon + 1;
+            while (v < body.size() && (body[v] == ' ' || body[v] == '\t' ||
+                                       body[v] == '\r' || body[v] == '\n')) v++;
+            if (v >= body.size()) return dflt;
+            if (body.compare(v, 4, "true") == 0) return true;
+            if (body.compare(v, 5, "false") == 0) return false;
+            return dflt;
+        }
+        from = k + 1;
+    }
+    return dflt;
 }
 
 std::string escape(const std::string& s)
@@ -138,20 +173,32 @@ std::string escape(const std::string& s)
 long integer(const std::string& body, const char* key, long dflt)
 {
     std::string pat = std::string("\"") + key + "\"";
-    size_t k        = body.find(pat);
-    if (k == std::string::npos) return dflt;
-    size_t colon = body.find(':', k + pat.size());
-    if (colon == std::string::npos) return dflt;
-    size_t v = colon + 1;
-    while (v < body.size() && (body[v] == ' ' || body[v] == '\t')) v++;
-    if (v >= body.size()) return dflt;
-    bool neg = body[v] == '-';
-    if (neg) v++;
-    if (v >= body.size() || body[v] < '0' || body[v] > '9') return dflt;
-    long n = 0;
-    while (v < body.size() && body[v] >= '0' && body[v] <= '9')
-        n = n * 10 + (body[v++] - '0');
-    return neg ? -n : n;
+    size_t from = 0;
+    while (from < body.size())
+    {
+        size_t k = body.find(pat, from);
+        if (k == std::string::npos) return dflt;
+        size_t colon = k + pat.size();
+        while (colon < body.size() && (body[colon] == ' ' || body[colon] == '\t' ||
+                                      body[colon] == '\r' || body[colon] == '\n'))
+            colon++;
+        if (colon < body.size() && body[colon] == ':')
+        {
+            size_t v = colon + 1;
+            while (v < body.size() && (body[v] == ' ' || body[v] == '\t' ||
+                                       body[v] == '\r' || body[v] == '\n')) v++;
+            if (v >= body.size()) return dflt;
+            bool neg = body[v] == '-';
+            if (neg) v++;
+            if (v >= body.size() || body[v] < '0' || body[v] > '9') return dflt;
+            long n = 0;
+            while (v < body.size() && body[v] >= '0' && body[v] <= '9')
+                n = n * 10 + (body[v++] - '0');
+            return neg ? -n : n;
+        }
+        from = k + 1;
+    }
+    return dflt;
 }
 
 // Splits the top-level objects out of the array at `key` by brace depth, so each
@@ -164,8 +211,13 @@ std::vector<std::string> objects(const std::string& body, const char* key)
     std::string pat = std::string("\"") + key + "\"";
     size_t r        = body.find(pat);
     if (r == std::string::npos) return out;
-    size_t open = body.find('[', r);
-    if (open == std::string::npos) return out;
+    size_t colon = body.find(':', r + pat.size());
+    if (colon == std::string::npos) return out;
+    size_t open = colon + 1;
+    while (open < body.size() && (body[open] == ' ' || body[open] == '\t' ||
+                                  body[open] == '\r' || body[open] == '\n'))
+        open++;
+    if (open >= body.size() || body[open] != '[') return out;
 
     int depth      = 0;
     bool inStr     = false;
@@ -209,8 +261,13 @@ std::vector<std::string> strings(const std::string& body, const char* key)
     std::string pat = std::string("\"") + key + "\"";
     size_t k        = body.find(pat);
     if (k == std::string::npos) return out;
-    size_t open = body.find('[', k);
-    if (open == std::string::npos) return out;
+    size_t colon = body.find(':', k + pat.size());
+    if (colon == std::string::npos) return out;
+    size_t open = colon + 1;
+    while (open < body.size() && (body[open] == ' ' || body[open] == '\t' ||
+                                  body[open] == '\r' || body[open] == '\n'))
+        open++;
+    if (open >= body.size() || body[open] != '[') return out;
     bool inStr = false;
     std::string cur;
     for (size_t i = open + 1; i < body.size(); i++)

@@ -139,19 +139,22 @@ void searchAsync(const std::string& query, Category category,
                  std::function<void(SearchResult)> cb)
 {
     const auto& cfg = config::get();
-    if (cfg.jackettUrl.empty() || cfg.jackettApiKey.empty())
+    if (cfg.jackettUrl.empty())
     {
         SearchResult res;
         res.ok    = false;
-        res.error = tr("Jackett is not configured. Set URL and API key in Options.");
+        res.error = tr("Jackett is not configured. Set URL in Options.");
         cb(std::move(res));
         return;
     }
 
     std::string base = cleanBaseUrl(cfg.jackettUrl);
-    std::string url  = base + "/api/v2.0/indexers/all/results?apikey=" +
-                      http::urlEncode(cfg.jackettApiKey) +
-                      "&Query=" + http::urlEncode(query);
+    std::string url  = base + "/api/v2.0/indexers/all/results?";
+    if (!cfg.jackettApiKey.empty())
+    {
+        url += "apikey=" + http::urlEncode(cfg.jackettApiKey) + "&";
+    }
+    url += "Query=" + http::urlEncode(query);
 
     if (category != Category::ALL)
     {
@@ -179,6 +182,8 @@ void searchAsync(const std::string& query, Category category,
         if (rawObjects.empty())
         {
             std::string apiErr = json::str(resp, "error");
+            if (apiErr.empty())
+                apiErr = json::str(resp, "message");
             if (!apiErr.empty())
             {
                 brls::Logger::error("[jackett] api error: {}", apiErr);
@@ -186,6 +191,19 @@ void searchAsync(const std::string& query, Category category,
                     SearchResult r;
                     r.ok    = false;
                     r.error = apiErr;
+                    cb(std::move(r));
+                });
+                return;
+            }
+
+            if (resp.find("\"Results\"") == std::string::npos &&
+                resp.find("\"Indexers\"") == std::string::npos)
+            {
+                brls::Logger::error("[jackett] invalid response: {}", resp.substr(0, 120));
+                brls::sync([cb]() {
+                    SearchResult r;
+                    r.ok    = false;
+                    r.error = tr("Invalid response from Jackett server");
                     cb(std::move(r));
                 });
                 return;
@@ -227,8 +245,12 @@ void testConnectionAsync(const std::string& url, const std::string& apiKey,
                          std::function<void(bool ok, const std::string& msg)> cb)
 {
     std::string base    = cleanBaseUrl(url);
-    std::string testUrl = base + "/api/v2.0/indexers/all/results?apikey=" +
-                          http::urlEncode(apiKey) + "&Query=test";
+    std::string testUrl = base + "/api/v2.0/indexers/all/results?";
+    if (!apiKey.empty())
+    {
+        testUrl += "apikey=" + http::urlEncode(apiKey) + "&";
+    }
+    testUrl += "Query=test";
 
     brls::Logger::info("[jackett] testing connection to {}", base);
 
@@ -242,9 +264,18 @@ void testConnectionAsync(const std::string& url, const std::string& apiKey,
         }
 
         std::string apiErr = json::str(resp, "error");
+        if (apiErr.empty())
+            apiErr = json::str(resp, "message");
         if (!apiErr.empty())
         {
             brls::sync([cb, apiErr]() { cb(false, apiErr); });
+            return;
+        }
+
+        if (resp.find("\"Results\"") == std::string::npos &&
+            resp.find("\"Indexers\"") == std::string::npos)
+        {
+            brls::sync([cb]() { cb(false, tr("Invalid response from server. Check URL and API key.")); });
             return;
         }
 

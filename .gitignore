@@ -1,5 +1,6 @@
 # Build output
 /build/
+/build-ninja/
 /NX-torrent-player.nro
 /.updatetest/
 /NX-torrent-player.elf

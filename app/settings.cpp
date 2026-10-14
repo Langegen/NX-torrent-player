@@ -466,7 +466,7 @@ brls::View* jackettPane()
     auto* keyCell = new brls::DetailCell();
     keyCell->setText(tr("API Key"));
     auto maskKey = [](const std::string& k) -> std::string {
-        if (k.empty()) return tr("Not set");
+        if (k.empty()) return tr("None");
         if (k.size() <= 8) return "********";
         return k.substr(0, 4) + "..." + k.substr(k.size() - 4);
     };
@@ -478,21 +478,21 @@ brls::View* jackettPane()
                 config::save();
                 keyCell->setDetailText(maskKey(out));
             },
-            tr("Jackett API Key"), tr("32-character API key from Jackett"), 128,
+            tr("Jackett API Key (optional)"), tr("Leave empty if disabled in Jackett"), 128,
             config::get().jackettApiKey);
         return true;
     });
     list->addView(keyCell);
     list->addView(caption(
-        tr("The API Key shown in the top right corner of the Jackett web interface.")));
+        tr("The API Key shown in the top right corner of the Jackett web interface (leave empty if disabled).")));
 
     auto* testBtn = new brls::Button();
     testBtn->setText(tr("Test connection"));
     testBtn->setMargins(14.0f, 20.0f, 18.0f, 20.0f);
     testBtn->registerClickAction([testBtn](brls::View*) {
-        if (config::get().jackettUrl.empty() || config::get().jackettApiKey.empty())
+        if (config::get().jackettUrl.empty())
         {
-            note(tr("Please set both Server URL and API Key first."));
+            note(tr("Please set Server URL first."));
             return true;
         }
         testBtn->setState(brls::ButtonState::DISABLED);

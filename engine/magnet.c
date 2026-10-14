@@ -61,11 +61,14 @@ static int decode_base32_hash(const char *in, uint8_t out[20]) {
     return o == 20 ? 0 : -1;
 }
 
-static void add_tracker(magnet_info *m, const char *url) {
-    if (m->tracker_count >= MAX_TRACKERS) return;
+void magnet_add_tracker(magnet_info *m, const char *url) {
+    if (!url || !*url || m->tracker_count >= MAX_TRACKERS) return;
     int is_http = strncmp(url, "http", 4) == 0;
     int is_udp = strncmp(url, "udp://", 6) == 0;
     if (!is_http && !is_udp) return;  // wss/other not supported
+    for (int i = 0; i < m->tracker_count; i++) {
+        if (strcmp(m->trackers[i], url) == 0) return;
+    }
     char *copy = strdup(url);
     if (copy) m->trackers[m->tracker_count++] = copy;
 }
@@ -73,8 +76,8 @@ static void add_tracker(magnet_info *m, const char *url) {
 int magnet_parse(const char *uri, magnet_info *m, char *err, size_t errlen) {
     memset(m, 0, sizeof(*m));
 
-    if (strncmp(uri, "magnet:?", 8) != 0) {
-        set_err(err, errlen, "pas un lien magnet");
+    if (!uri || strncasecmp(uri, "magnet:?", 8) != 0) {
+        set_err(err, errlen, "not a magnet link");
         return -1;
     }
 
@@ -92,19 +95,19 @@ int magnet_parse(const char *uri, magnet_info *m, char *err, size_t errlen) {
         char *val = eq + 1;
         url_decode(val);
 
-        if (strcmp(key, "xt") == 0) {
+        if (strcasecmp(key, "xt") == 0) {
             // xt=urn:btih:<40 hex | 32 base32>
             const char *pfx = "urn:btih:";
-            if (strncmp(val, pfx, strlen(pfx)) == 0) {
+            if (strncasecmp(val, pfx, strlen(pfx)) == 0) {
                 const char *h = val + strlen(pfx);
                 size_t hlen = strlen(h);
                 if (hlen == 40 && decode_hex_hash(h, m->info_hash) == 0) have_hash = true;
                 else if (hlen == 32 && decode_base32_hash(h, m->info_hash) == 0) have_hash = true;
             }
-        } else if (strcmp(key, "dn") == 0) {
+        } else if (strcasecmp(key, "dn") == 0) {
             snprintf(m->name, sizeof(m->name), "%s", val);
-        } else if (strcmp(key, "tr") == 0) {
-            add_tracker(m, val);
+        } else if (strcasecmp(key, "tr") == 0) {
+            magnet_add_tracker(m, val);
         }
     }
     free(query);

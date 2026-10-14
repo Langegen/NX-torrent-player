@@ -63,6 +63,7 @@ enum {
     META_IDLE = 0,
     META_PARSE,      // parsing the magnet URI
     META_ANNOUNCE,   // asking the trackers for peers
+    META_DHT,        // searching DHT for peers
     META_FETCH,      // BEP 9 metadata fetch across the announced peers
     META_BUILD,      // parsing the fetched info dict into a torrent_meta
     META_DONE,

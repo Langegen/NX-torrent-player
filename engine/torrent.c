@@ -13,6 +13,7 @@
 #include "udp_tracker.h"
 #include "magnet.h"
 #include "peer.h"
+#include "dhtclient.h"
 
 static void set_err(char *err, size_t errlen, const char *msg) {
     if (err && errlen) snprintf(err, errlen, "%s", msg);
@@ -190,6 +191,7 @@ const char *torrent_meta_state_str(int state) {
     switch (state) {
         case META_PARSE:    return "parsing magnet";
         case META_ANNOUNCE: return "announcing to trackers";
+        case META_DHT:      return "searching DHT";
         case META_FETCH:    return "fetching metadata (BEP 9)";
         case META_BUILD:    return "building torrent";
         case META_DONE:     return "done";
@@ -274,6 +276,40 @@ static void meta_worker(void *arg) {
     }
 }
 
+// Merges peers from `src` (count `sn`) into `dst` (current size *dn, capacity
+// max), skipping duplicates by ip+port. Returns how many were newly added.
+static int merge_peers(peer_addr *dst, int *dn, int max,
+                       const peer_addr *src, int sn) {
+    int added = 0;
+    for (int i = 0; i < sn && *dn < max; i++) {
+        bool dup = false;
+        for (int j = 0; j < *dn; j++)
+            if (dst[j].ip == src[i].ip && dst[j].port == src[i].port) {
+                dup = true;
+                break;
+            }
+        if (dup) continue;
+        dst[(*dn)++] = src[i];
+        added++;
+    }
+    return added;
+}
+
+// Collector so array-based announce and DHT peer discovery reuse the callback machinery.
+typedef struct {
+    peer_addr *peers;
+    int total;
+    int max;
+    Mutex lock;
+} collector;
+
+static void collect_cb(void *ctx, const peer_addr *peers, int n) {
+    collector *c = ctx;
+    mutexLock(&c->lock);
+    merge_peers(c->peers, &c->total, c->max, peers, n);
+    mutexUnlock(&c->lock);
+}
+
 int torrent_load_magnet(torrent_meta *t, const char *magnet_uri,
                         char *err, size_t errlen) {
     return torrent_load_magnet_peers(t, magnet_uri, NULL, 0, NULL, err, errlen);
@@ -296,11 +332,10 @@ int torrent_load_magnet_peers(torrent_meta *t, const char *magnet_uri,
         torrent_meta_state = META_FAIL;
         return -1;
     }
-    if (m.tracker_count == 0) {
-        magnet_free(&m);
-        torrent_meta_state = META_FAIL;
-        set_err(err, errlen, "magnet has no tracker (DHT bootstrap not supported yet)");
-        return -1;
+    // Always add default public UDP trackers (deduped) so trackerless magnets
+    // or magnets with dead trackers have live public trackers to announce to.
+    for (size_t i = 0; i < sizeof(DEFAULT_TRACKERS) / sizeof(*DEFAULT_TRACKERS); i++) {
+        magnet_add_tracker(&m, DEFAULT_TRACKERS[i]);
     }
     torrent_meta_trackers = m.tracker_count;
 
@@ -315,12 +350,31 @@ int torrent_load_magnet_peers(torrent_meta *t, const char *magnet_uri,
 
     torrent_meta_state = META_ANNOUNCE;
     peer_addr peers[80];
-    int n = torrent_announce(&stub, peers, 80, err, errlen);
+    int n = 0;
+    if (stub.tracker_count > 0) {
+        n = torrent_announce(&stub, peers, 80, err, errlen);
+    }
+
+    // If trackers yielded no peers, search the DHT for bootstrap peers.
+    if (n <= 0) {
+        torrent_meta_state = META_DHT;
+        collector c;
+        memset(&c, 0, sizeof(c));
+        c.peers = peers;
+        c.total = 0;
+        c.max = 80;
+        mutexInit(&c.lock);
+        dht_find_peers(m.info_hash, 30, 8000, collect_cb, &c, NULL, err, errlen);
+        if (c.total > 0) {
+            n = c.total;
+        }
+    }
+
     // stub trackers are borrowed from the magnet; do not unload it.
     if (n <= 0) {
         magnet_free(&m);
         torrent_meta_state = META_FAIL;
-        set_err(err, errlen, "no peer to fetch metadata from");
+        set_err(err, errlen, "no peers found (torrent has no active seeds on trackers or DHT)");
         return -1;
     }
     torrent_meta_state = META_FETCH;
@@ -371,7 +425,11 @@ int torrent_load_magnet_peers(torrent_meta *t, const char *magnet_uri,
     if (!metadata) {
         magnet_free(&m);
         torrent_meta_state = META_FAIL;
-        set_err(err, errlen, "no peer provided the metadata");
+        if (torrent_meta_connected == 0) {
+            set_err(err, errlen, "no connectable peers: all peers timed out or refused connection (no active seeds)");
+        } else {
+            set_err(err, errlen, "peers connected but refused to share metadata");
+        }
         return -1;
     }
     torrent_meta_state = META_BUILD;
@@ -564,24 +622,6 @@ static int parse_peers(const be_node *resp, peer_addr *peers, int max_peers) {
     return count;
 }
 
-// Merges peers from `src` (count `sn`) into `dst` (current size *dn, capacity
-// max), skipping duplicates by ip+port. Returns how many were newly added.
-static int merge_peers(peer_addr *dst, int *dn, int max,
-                       const peer_addr *src, int sn) {
-    int added = 0;
-    for (int i = 0; i < sn && *dn < max; i++) {
-        bool dup = false;
-        for (int j = 0; j < *dn; j++)
-            if (dst[j].ip == src[i].ip && dst[j].port == src[i].port) {
-                dup = true;
-                break;
-            }
-        if (dup) continue;
-        dst[(*dn)++] = src[i];
-        added++;
-    }
-    return added;
-}
 
 // Announces to a single HTTP(S) tracker, filling `out` (up to max). Returns the
 // peer count, or -1 on failure (message in err).
@@ -658,9 +698,9 @@ static int announce_http(const char *tracker, const char *hash_enc,
     return count;
 }
 
-// One tracker announce, run on its own thread. Each job holds its own result
-// buffer so no locking is needed; results are merged after all threads join.
+// One tracker announce, run via a worker pool to bound concurrent sockets.
 #define AJOB_PEERS 128
+#define ANNOUNCE_WORKERS 6
 
 typedef struct {
     const char *tracker;
@@ -677,10 +717,14 @@ typedef struct {
     torrent_peer_cb cb;   // delivered from this thread as soon as peers arrive
     void *cb_ctx;
     const volatile bool *cancel;  // teardown flag; aborts a slow announce
-
-    Thread thread;
-    bool has_thread;
 } ajob;
+
+typedef struct {
+    ajob *jobs;
+    int total_jobs;
+    int next_job;
+    Mutex lock;
+} announce_pool;
 
 static void announce_thread(void *arg) {
     ajob *j = arg;
@@ -701,8 +745,25 @@ static void announce_thread(void *arg) {
     if (j->count > 0 && j->cb) j->cb(j->cb_ctx, j->peers, j->count);
 }
 
+static void announce_worker_task(void *arg) {
+    announce_pool *pool = (announce_pool *)arg;
+    for (;;) {
+        mutexLock(&pool->lock);
+        int idx = (pool->next_job < pool->total_jobs) ? pool->next_job++ : -1;
+        mutexUnlock(&pool->lock);
+        if (idx < 0) break;
+
+        ajob *j = &pool->jobs[idx];
+        if (j->cancel && *j->cancel) break;
+
+        announce_thread(j);
+    }
+}
+
 int torrent_announce_cb(const torrent_meta *t, torrent_peer_cb cb, void *ctx,
                         const volatile bool *cancel, char *err, size_t errlen) {
+    if (t->tracker_count <= 0) return 0;
+
     char hash_enc[61], peer_id_enc[61];
     uint8_t peer_id[20];
 
@@ -713,8 +774,8 @@ int torrent_announce_cb(const torrent_meta *t, torrent_peer_cb cb, void *ctx,
     urlencode_bytes(t->info_hash, 20, hash_enc);
     urlencode_bytes(peer_id, 20, peer_id_enc);
 
-    // Announce to every tracker in PARALLEL, delivering peers via the callback
-    // the moment each tracker answers (so the fastest one unblocks downloading).
+    // Announce to trackers through a bounded worker pool (up to ANNOUNCE_WORKERS),
+    // respecting libnx's 16 concurrent socket session cap.
     ajob *jobs = calloc(t->tracker_count, sizeof(*jobs));
     if (!jobs) { set_err(err, errlen, "out of memory (announce)"); return -1; }
 
@@ -729,22 +790,39 @@ int torrent_announce_cb(const torrent_meta *t, torrent_peer_cb cb, void *ctx,
         j->cb = cb;
         j->cb_ctx = ctx;
         j->cancel = cancel;
+    }
 
-        if (threadCreate(&j->thread, announce_thread, j, NULL, 0x8000, 0x2C, -2) == 0) {
-            j->has_thread = true;
-            threadStart(&j->thread);
-        } else {
-            announce_thread(j);  // fall back to inline if the thread won't start
+    announce_pool pool;
+    pool.jobs = jobs;
+    pool.total_jobs = t->tracker_count;
+    pool.next_job = 0;
+    mutexInit(&pool.lock);
+
+    int nw = t->tracker_count < ANNOUNCE_WORKERS ? t->tracker_count : ANNOUNCE_WORKERS;
+    Thread workers[ANNOUNCE_WORKERS];
+    int started = 0;
+    for (int i = 0; i < nw; i++) {
+        if (threadCreate(&workers[started], announce_worker_task, &pool, NULL, 0x8000, 0x2C, -2) == 0) {
+            if (threadStart(&workers[started]) == 0) {
+                started++;
+            } else {
+                threadClose(&workers[started]);
+            }
+        }
+    }
+
+    if (started == 0) {
+        announce_worker_task(&pool);
+    } else {
+        for (int i = 0; i < started; i++) {
+            threadWaitForExit(&workers[i]);
+            threadClose(&workers[i]);
         }
     }
 
     int answered = 0;
     for (int i = 0; i < t->tracker_count; i++) {
         ajob *j = &jobs[i];
-        if (j->has_thread) {
-            threadWaitForExit(&j->thread);
-            threadClose(&j->thread);
-        }
         if (j->count > 0) answered++;
         tlog("tracker %.1fs (%d) %.60s", j->secs, j->count, j->tracker);
     }
@@ -753,24 +831,14 @@ int torrent_announce_cb(const torrent_meta *t, torrent_peer_cb cb, void *ctx,
     return answered;
 }
 
-// Collector so the array-based torrent_announce reuses the callback machinery.
-typedef struct {
-    peer_addr *peers;
-    int total;
-    int max;
-    Mutex lock;
-} collector;
-
-static void collect_cb(void *ctx, const peer_addr *peers, int n) {
-    collector *c = ctx;
-    mutexLock(&c->lock);
-    merge_peers(c->peers, &c->total, c->max, peers, n);
-    mutexUnlock(&c->lock);
-}
 
 int torrent_announce(const torrent_meta *t, peer_addr *peers, int max_peers,
                      char *err, size_t errlen) {
-    collector c = { peers, 0, max_peers };
+    collector c;
+    memset(&c, 0, sizeof(c));
+    c.peers = peers;
+    c.total = 0;
+    c.max = max_peers;
     mutexInit(&c.lock);
     torrent_announce_cb(t, collect_cb, &c, NULL, err, errlen);
     if (c.total == 0) { set_err(err, errlen, "no peer from the trackers"); return -1; }
