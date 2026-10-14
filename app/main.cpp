@@ -37,6 +37,7 @@
 #include "theme.hpp"
 #include "update.hpp"
 #include "stremio.hpp"
+#include "jackett_tab.hpp"
 
 extern "C" {
 #include "torrent.h"
@@ -1279,8 +1280,11 @@ void applyTabIdentity(brls::AppletFrame* frame, config::Tab tab)
 
 brls::View* buildTab(config::Tab tab)
 {
-    return tab == config::Tab::STREMIO ? (brls::View*)new StremioTab()
-                                       : buildLocalTab();
+    if (tab == config::Tab::STREMIO)
+        return (brls::View*)new StremioTab();
+    if (tab == config::Tab::JACKETT)
+        return buildJackettTab();
+    return buildLocalTab();
 }
 
 // A Label that renders with the Material icon font as its PRIMARY face. Reached
@@ -1315,6 +1319,7 @@ void attachTopTabBar(brls::AppletFrame* frame, brls::Box* content)
     // library and in-flight requests.
     auto* localBtn   = new brls::Button();
     auto* stremioBtn = new brls::Button();
+    auto* jackettBtn = new brls::Button();
 
     // Which tab is up, held in a shared cell rather than a capture so the
     // repaint hook below can restyle without knowing how we got here.
@@ -1323,16 +1328,19 @@ void attachTopTabBar(brls::AppletFrame* frame, brls::Box* content)
     // The style carries the accent: a Button copies it out of the theme when a
     // style is applied and keeps it, so this has to be re-run (not the tab
     // rebuilt) when the colour changes.
-    auto restyleTabs = [localBtn, stremioBtn, curTab]() {
+    auto restyleTabs = [localBtn, stremioBtn, jackettBtn, curTab]() {
         localBtn->setStyle(*curTab == config::Tab::LOCAL
                                ? &brls::BUTTONSTYLE_PRIMARY
                                : &brls::BUTTONSTYLE_BORDERLESS);
         stremioBtn->setStyle(*curTab == config::Tab::STREMIO
                                  ? &brls::BUTTONSTYLE_PRIMARY
                                  : &brls::BUTTONSTYLE_BORDERLESS);
+        jackettBtn->setStyle(*curTab == config::Tab::JACKETT
+                                 ? &brls::BUTTONSTYLE_PRIMARY
+                                 : &brls::BUTTONSTYLE_BORDERLESS);
     };
 
-    auto select = [content, localBtn, stremioBtn, frame, curTab,
+    auto select = [content, localBtn, stremioBtn, jackettBtn, frame, curTab,
                    restyleTabs](config::Tab tab) {
         *curTab = tab;
         restyleTabs();
@@ -1352,7 +1360,8 @@ void attachTopTabBar(brls::AppletFrame* frame, brls::Box* content)
         // does not do it: ScrollingFrame::getNextFocus keeps the focus inside
         // while the list can still scroll up, so a deep tab (Stremio's library
         // sits under two more boxes than the local list) never hands it over.
-        brls::Button* active = tab == config::Tab::STREMIO ? stremioBtn : localBtn;
+        brls::Button* active = tab == config::Tab::STREMIO ? stremioBtn :
+                               (tab == config::Tab::JACKETT ? jackettBtn : localBtn);
         v->registerAction(
             tr("Back"), brls::BUTTON_B,
             [active](brls::View*) {
@@ -1379,6 +1388,14 @@ void attachTopTabBar(brls::AppletFrame* frame, brls::Box* content)
         return true;
     });
     bar->addView(localBtn);
+
+    jackettBtn->setText("Jackett");
+    jackettBtn->setStyle(&brls::BUTTONSTYLE_BORDERLESS);
+    jackettBtn->registerClickAction([select](brls::View*) {
+        select(config::Tab::JACKETT);
+        return true;
+    });
+    bar->addView(jackettBtn);
 
     // The Stremio sub-view switcher, centred in the header: one button per view
     // (Continue / Movies / Shows / Library). It says where you are and clicking
@@ -1507,14 +1524,14 @@ void attachTopTabBar(brls::AppletFrame* frame, brls::Box* content)
     // active >= 0: show the bar and mark that view PRIMARY. active < 0: fold it
     // away and take its buttons out of the focus ring (a GONE box keeps its
     // children focusable otherwise -- the same trap as the sign-in form).
-    // LEFT out of the view bar must land on "Local", not "Stremio". The category
-    // bar reads "Stremio | Local", so coming from the right of the screen the
-    // nearest button is Local -- but Box::getDefaultFocus() hands back whichever
+    // LEFT out of the view bar must land on "Jackett", not "Stremio". The category
+    // bar reads "Stremio | Local | Jackett", so coming from the right of the screen the
+    // nearest button is Jackett -- but Box::getDefaultFocus() hands back whichever
     // of the two was focused last (box.cpp:357), and that is normally the active
     // tab's own button, i.e. Stremio. Only the leftmost view button can leave the
     // bar this way, so one explicit route is enough to beat that heuristic.
     if (!viewBtns.empty())
-        viewBtns[0]->setCustomNavigationRoute(brls::FocusDirection::LEFT, localBtn);
+        viewBtns[0]->setCustomNavigationRoute(brls::FocusDirection::LEFT, jackettBtn);
     // ... and the two bars are separate absolute boxes now, so the step between
     // the group and the detached Search icon needs saying too.
     viewBtns[searchIdx - 1]->setCustomNavigationRoute(brls::FocusDirection::RIGHT,
@@ -1523,7 +1540,7 @@ void attachTopTabBar(brls::AppletFrame* frame, brls::Box* content)
                                                   viewBtns[searchIdx - 1]);
 
     // Where the centred group starts. At the 100% UI size the header is at its
-    // most crowded and the group comes up against "Local"; inset it there so it
+    // most crowded and the group comes up against "Jackett"; inset it there so it
     // centres in the space beside the category bar instead. Every smaller UI has
     // room to spare, and true centring reads better, so they keep it. The size
     // is stored per mode, hence the docked check -- and hence recomputing this
@@ -1541,7 +1558,7 @@ void attachTopTabBar(brls::AppletFrame* frame, brls::Box* content)
     setUiScaleHook(insetViewBar);
 
     auto curView      = std::make_shared<int>(-1);
-    auto applyViewBar = [viewBar, viewBtns, viewIcons, stremioBtn, localBtn,
+    auto applyViewBar = [viewBar, viewBtns, viewIcons, stremioBtn, localBtn, jackettBtn,
                          profileBtn, settingsBtn, searchIdx, curView,
                          insetViewBar](int active) {
         *curView  = active;
@@ -1578,13 +1595,13 @@ void attachTopTabBar(brls::AppletFrame* frame, brls::Box* content)
         // What is left of the header depends on the tab, and a custom route to a
         // hidden view is a dead end (application.cpp only follows one to a
         // VISIBLE view, and does not fall back) -- so re-aim these two here.
-        // Local: the only thing right of the category bar is Options.
-        localBtn->setCustomNavigationRoute(brls::FocusDirection::RIGHT,
-                                           show ? (brls::View*)viewBtns[0]
-                                                : (brls::View*)settingsBtn);
+        // Jackett: the rightmost button in the category bar.
+        jackettBtn->setCustomNavigationRoute(brls::FocusDirection::RIGHT,
+                                             show ? (brls::View*)viewBtns[0]
+                                                  : (brls::View*)settingsBtn);
         settingsBtn->setCustomNavigationRoute(brls::FocusDirection::LEFT,
                                               show ? (brls::View*)profileBtn
-                                                   : (brls::View*)localBtn);
+                                                   : (brls::View*)jackettBtn);
         // Up from the Stremio list lands on the ACTIVE view button (Continue /
         // Movies / ...), not the "Stremio" category tab. reportView runs before
         // the list is (re)built, so finishList picks this up. Falls back to the

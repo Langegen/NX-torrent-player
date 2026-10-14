@@ -8,12 +8,14 @@
 #include <borealis/views/scrolling_frame.hpp>
 #include <borealis/views/tab_frame.hpp>
 #include <borealis/views/cells/cell_bool.hpp>
+#include <borealis/views/cells/cell_detail.hpp>
 #include <borealis/views/cells/cell_selector.hpp>
 
 #include <cctype>
 #include <cstdio>
 
 #include "config.hpp"
+#include "jackett.hpp"
 #include "theme.hpp"
 #include "update.hpp"
 #include "stremio.hpp"
@@ -59,6 +61,7 @@ brls::View* generalPane();
 brls::View* playbackPane();
 brls::View* streamingPane();
 brls::View* stremioPane();
+brls::View* jackettPane();
 brls::View* aboutPane();
 
 // ---------------------------------------------------------------------------
@@ -141,10 +144,13 @@ brls::View* generalPane()
     config::Config& cfg = config::get();
 
     auto* startup = new brls::SelectorCell();
-    startup->init(tr("Category on startup"), { tr("Local"), tr("Stremio") },
-                  cfg.startupTab == config::Tab::STREMIO ? 1 : 0, [](int sel) {
+    int curStartupIdx = (cfg.startupTab == config::Tab::STREMIO) ? 1 :
+                        (cfg.startupTab == config::Tab::JACKETT) ? 2 : 0;
+    startup->init(tr("Category on startup"), { tr("Local"), tr("Stremio"), "Jackett" },
+                  curStartupIdx, [](int sel) {
                       config::get().startupTab =
-                          sel == 1 ? config::Tab::STREMIO : config::Tab::LOCAL;
+                          (sel == 1) ? config::Tab::STREMIO :
+                          (sel == 2) ? config::Tab::JACKETT : config::Tab::LOCAL;
                       config::save();
                   });
     list->addView(startup);
@@ -429,6 +435,85 @@ brls::View* stremioPane()
     return pane;
 }
 
+brls::View* jackettPane()
+{
+    brls::Box* list = nullptr;
+    auto* pane      = newPane(&list);
+    config::Config& cfg = config::get();
+
+    auto* hdr = new brls::Header();
+    hdr->setTitle("Jackett");
+    list->addView(hdr);
+
+    auto* urlCell = new brls::DetailCell();
+    urlCell->setText(tr("Server URL"));
+    urlCell->setDetailText(cfg.jackettUrl.empty() ? tr("Not set") : cfg.jackettUrl);
+    urlCell->registerClickAction([urlCell](brls::View*) {
+        brls::Application::getImeManager()->openForText(
+            [urlCell](std::string out) {
+                config::get().jackettUrl = out;
+                config::save();
+                urlCell->setDetailText(out.empty() ? tr("Not set") : out);
+            },
+            tr("Jackett Server URL"), tr("e.g. http://192.168.1.100:9117"), 256,
+            config::get().jackettUrl);
+        return true;
+    });
+    list->addView(urlCell);
+    list->addView(caption(
+        tr("The URL of your Jackett server including port (e.g. http://192.168.1.100:9117).")));
+
+    auto* keyCell = new brls::DetailCell();
+    keyCell->setText(tr("API Key"));
+    auto maskKey = [](const std::string& k) -> std::string {
+        if (k.empty()) return tr("Not set");
+        if (k.size() <= 8) return "********";
+        return k.substr(0, 4) + "..." + k.substr(k.size() - 4);
+    };
+    keyCell->setDetailText(maskKey(cfg.jackettApiKey));
+    keyCell->registerClickAction([keyCell, maskKey](brls::View*) {
+        brls::Application::getImeManager()->openForText(
+            [keyCell, maskKey](std::string out) {
+                config::get().jackettApiKey = out;
+                config::save();
+                keyCell->setDetailText(maskKey(out));
+            },
+            tr("Jackett API Key"), tr("32-character API key from Jackett"), 128,
+            config::get().jackettApiKey);
+        return true;
+    });
+    list->addView(keyCell);
+    list->addView(caption(
+        tr("The API Key shown in the top right corner of the Jackett web interface.")));
+
+    auto* testBtn = new brls::Button();
+    testBtn->setText(tr("Test connection"));
+    testBtn->setMargins(14.0f, 20.0f, 18.0f, 20.0f);
+    testBtn->registerClickAction([testBtn](brls::View*) {
+        if (config::get().jackettUrl.empty() || config::get().jackettApiKey.empty())
+        {
+            note(tr("Please set both Server URL and API Key first."));
+            return true;
+        }
+        testBtn->setState(brls::ButtonState::DISABLED);
+        testBtn->setText(tr("Testing..."));
+        jackett::testConnectionAsync(
+            config::get().jackettUrl, config::get().jackettApiKey,
+            [testBtn](bool ok, const std::string& msg) {
+                testBtn->setState(brls::ButtonState::ENABLED);
+                testBtn->setText(tr("Test connection"));
+                if (ok)
+                    note(tr("Connection successful!"));
+                else
+                    note(tr("Connection failed: ") + msg);
+            });
+        return true;
+    });
+    list->addView(testBtn);
+
+    return pane;
+}
+
 brls::View* aboutPane()
 {
     brls::Box* list = nullptr;
@@ -564,6 +649,7 @@ brls::View* SettingsActivity::createContentView()
     tabs->addTab(tr("Playback"), [] { return playbackPane(); });
     tabs->addTab(tr("Streaming"), [] { return streamingPane(); });
     tabs->addTab("Stremio", [] { return stremioPane(); });
+    tabs->addTab("Jackett", [] { return jackettPane(); });
     tabs->addTab(tr("About"), [] { return aboutPane(); });
 
     auto* frame = new brls::AppletFrame();

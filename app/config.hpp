@@ -14,6 +14,7 @@ enum class Tab
 {
     LOCAL   = 0,
     STREMIO = 1,
+    JACKETT = 2,
 };
 
 // The default UI sizes, named so the Options screen can mark them in the list.
@@ -114,6 +115,10 @@ struct Config
     // trade is that nothing is persisted and seeking far back re-downloads, and
     // it needs a full-RAM launch. Applies to the next video.
     bool ramStream = true;
+
+    // Jackett server configuration
+    std::string jackettUrl = "";
+    std::string jackettApiKey = "";
 };
 
 // The live settings. Mutate, then call save().

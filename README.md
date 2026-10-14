@@ -19,6 +19,8 @@ and your library, addons and sources are included too.
   downloading ahead of the playhead, and re-centres on it when you seek.
 - **Stremio integration** — sign in, browse your library, drill down through
   seasons → episodes → addons → sources, artwork and all.
+- **Jackett integration** — search torrents directly across all your configured
+  trackers with category filters (Movies, Series, Anime), stream instantly or save to Local.
 - **Local torrents & magnets** — drop `.torrent` files on the SD card, or add
   magnet links (a `magnet.txt` file, or the on-screen keyboard). A magnet's name
   and file list are resolved and cached so you can pick which video to stream.
@@ -78,6 +80,16 @@ Sources are whatever your addons return; only BitTorrent ones can be
 played, and the ones that can't say so up front. 4K sources
 are hidden by default — the Switch outputs 1080p docked, so they cost bandwidth
 for pixels it cannot show. Turn that off in Options.
+
+### Jackett
+
+In the **Jackett** tab or in **Options → Jackett**, configure your Jackett Server URL
+(e.g. `http://192.168.1.100:9117`) and API Key.
+
+- Search across all configured indexers with instant category filtering (All, Movies, Series, Anime).
+- Sort results by seeders (default), file size, or date.
+- Press **A** on any result to stream it directly (multi-file torrents present an episode/video picker).
+- Press **Y** on any result to save the `.torrent` file to your **Local** library (`/switch/NX-torrent-player/torrents/`).
 
 ## Building
 

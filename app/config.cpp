@@ -242,9 +242,11 @@ void load()
     while ((n = std::fread(buf, 1, sizeof(buf), f)) > 0) body.append(buf, n);
     std::fclose(f);
 
-    cfg.startupTab = readStr(body, "startupTab", "local") == "stremio"
-                         ? Tab::STREMIO
-                         : Tab::LOCAL;
+    std::string sTab = readStr(body, "startupTab", "local");
+    cfg.startupTab = (sTab == "stremio") ? Tab::STREMIO :
+                     (sTab == "jackett") ? Tab::JACKETT : Tab::LOCAL;
+    cfg.jackettUrl    = readStr(body, "jackettUrl", cfg.jackettUrl);
+    cfg.jackettApiKey = readStr(body, "jackettApiKey", cfg.jackettApiKey);
     cfg.logging = readBool(body, "logging", cfg.logging);
     cfg.hide4k  = readBool(body, "hide4k", cfg.hide4k);
     cfg.rateGovernor = readBool(body, "rateGovernor", cfg.rateGovernor);
@@ -269,7 +271,8 @@ void load()
 
     brls::Logger::info(
         "[config] startupTab={} logging={} hide4k={} checkUpdates={}",
-        cfg.startupTab == Tab::STREMIO ? "stremio" : "local", cfg.logging,
+        cfg.startupTab == Tab::STREMIO ? "stremio" :
+        (cfg.startupTab == Tab::JACKETT ? "jackett" : "local"), cfg.logging,
         cfg.hide4k, cfg.checkUpdates);
 }
 
@@ -281,9 +284,13 @@ bool save()
         brls::Logger::warning("[config] cannot write {}", kPath);
         return false;
     }
+    const char* sTabStr = (cfg.startupTab == Tab::STREMIO) ? "stremio" :
+                          (cfg.startupTab == Tab::JACKETT) ? "jackett" : "local";
     std::fprintf(f,
                  "{\n"
                  "  \"startupTab\": \"%s\",\n"
+                 "  \"jackettUrl\": \"%s\",\n"
+                 "  \"jackettApiKey\": \"%s\",\n"
                  "  \"logging\": %s,\n"
                  "  \"hide4k\": %s,\n"
                  "  \"rateGovernor\": %s,\n"
@@ -301,7 +308,9 @@ bool save()
                  "  \"themeVariant\": \"%s\",\n"
                  "  \"listStyle\": \"%s\"\n"
                  "}\n",
-                 cfg.startupTab == Tab::STREMIO ? "stremio" : "local",
+                 sTabStr,
+                 cfg.jackettUrl.c_str(),
+                 cfg.jackettApiKey.c_str(),
                  cfg.logging ? "true" : "false", cfg.hide4k ? "true" : "false",
                  cfg.rateGovernor ? "true" : "false",
                  cfg.ramStream ? "true" : "false",
