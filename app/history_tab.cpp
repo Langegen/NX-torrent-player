@@ -48,6 +48,8 @@ std::string formatDate(int64_t timestamp)
 {
     if (timestamp <= 0) return "";
     std::time_t t = (std::time_t)timestamp;
+    // Local time, not UTC: libnx's __libnx_init_time() reads the console's
+    // time zone (timeToCalendarTimeWithMyRule) at startup and sets TZ from it.
     std::tm* tm = std::localtime(&t);
     if (!tm) return "";
     char buf[64];

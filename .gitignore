@@ -7,3 +7,5 @@
 /NX-torrent-player.nacp
 /pctest/enginetest
 *.o
+/pctest/test_suite
+/pctest/test_suite.exe

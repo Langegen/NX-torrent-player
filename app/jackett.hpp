@@ -75,6 +75,12 @@ void downloadTorrentAsync(const std::string& link, const std::string& destPath,
 // link, under APPDATA_JACKETT). Creates the folder.
 std::string cachedTorrentPath(const std::string& link);
 
+// Deletes the files in APPDATA_JACKETT that no history entry points at: they
+// are only kept so an entry can resume, and nothing else ever removes them.
+// Call after history::load(), before anything can start a playback (a file
+// fetched for a result being played is not in the history yet).
+void pruneCache();
+
 // Saves a torrent item to the local library (downloads .torrent to APPDATA_TORRENTS
 // or appends magnet to APPDATA_MAGNETS).
 void saveToLocalAsync(const Item& item,

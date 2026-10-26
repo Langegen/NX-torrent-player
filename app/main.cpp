@@ -37,6 +37,7 @@
 #include "theme.hpp"
 #include "update.hpp"
 #include "stremio.hpp"
+#include "jackett.hpp"
 #include "jackett_tab.hpp"
 #include "history.hpp"
 #include "history_tab.hpp"
@@ -281,14 +282,14 @@ void scanTorrentsRec(const std::string& dir, std::vector<TorrentEntry>& out)
 }
 
 // Trackers appended to a bare info-hash (same set as the Stremio path). Public
-// UDP trackers most torrents announce to anyway; DHT fills the rest.
+// UDP trackers most torrents announce to anyway; DHT fills the rest. Same set
+// as DEFAULT_TRACKERS in engine/torrent.c (see there).
 constexpr const char* kMagnetTrackers =
     "&tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce"
-    "&tr=udp%3A%2F%2Fopen.demonii.com%3A1337%2Fannounce"
-    "&tr=udp%3A%2F%2Ftracker.openbittorrent.com%3A6969%2Fannounce"
-    "&tr=udp%3A%2F%2Fexodus.desync.com%3A6969%2Fannounce"
+    "&tr=udp%3A%2F%2Fopen.stealth.si%3A80%2Fannounce"
     "&tr=udp%3A%2F%2Ftracker.torrent.eu.org%3A451%2Fannounce"
-    "&tr=udp%3A%2F%2Fopen.stealth.si%3A80%2Fannounce";
+    "&tr=udp%3A%2F%2Fopen.demonii.com%3A1337%2Fannounce"
+    "&tr=udp%3A%2F%2Fopen.tracker.cl%3A1337%2Fannounce";
 
 // Turn what the user pasted/typed into a playable magnet URI, or "" if it is not
 // one. Accepts a full "magnet:?..." link OR a bare info-hash (40 hex / 32 base32)
@@ -1743,6 +1744,9 @@ int main(int argc, char* argv[])
 
     config::load();
     history::load();
+    // Now, while nothing can be playing: a file fetched for the result being
+    // played is only referenced once the player records it.
+    jackett::pruneCache();
     // Straight after the config it reads, and before anything can build a view:
     // tr() is resolved when a string is handed to a view, and the header, the
     // tab bar and the browser are built once and never again.

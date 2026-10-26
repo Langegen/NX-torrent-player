@@ -97,15 +97,13 @@ bool isUnder(brls::View* v, brls::View* ancestor)
 
 // Trackers appended to the bare infoHash an addon gives us. These are the
 // long-running public UDP trackers most public torrents announce to anyway.
+// Same set as DEFAULT_TRACKERS in engine/torrent.c (see there).
 constexpr const char* kPublicTrackers =
     "&tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce"
-    "&tr=udp%3A%2F%2Fopen.demonii.com%3A1337%2Fannounce"
-    "&tr=udp%3A%2F%2Ftracker.openbittorrent.com%3A6969%2Fannounce"
-    "&tr=udp%3A%2F%2Fexodus.desync.com%3A6969%2Fannounce"
-    "&tr=udp%3A%2F%2Ftracker.torrent.eu.org%3A451%2Fannounce"
     "&tr=udp%3A%2F%2Fopen.stealth.si%3A80%2Fannounce"
-    "&tr=udp%3A%2F%2Ftracker.moeking.me%3A6969%2Fannounce"
-    "&tr=udp%3A%2F%2Fexplodie.org%3A6969%2Fannounce";
+    "&tr=udp%3A%2F%2Ftracker.torrent.eu.org%3A451%2Fannounce"
+    "&tr=udp%3A%2F%2Fopen.demonii.com%3A1337%2Fannounce"
+    "&tr=udp%3A%2F%2Fopen.tracker.cl%3A1337%2Fannounce";
 
 // The Switch's shared system font has no colour emoji, so the pictographs
 // addons use as field markers render as blanks/boxes. Swap the common ones for

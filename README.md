@@ -162,12 +162,19 @@ docker run --rm -v st_build:/build -v "$PWD":/project \
 > On Windows (using Git Bash or MSYS2), prefix docker commands with `MSYS_NO_PATHCONV=1` to prevent path conversions.
 
 ### Desktop Engine Tests (PC)
-You can build and run the standalone torrent engine tests on Linux/macOS or WSL:
+The offline test suite needs only gcc and libcurl headers (Linux, macOS, WSL or
+MSYS2). Trackers and the DHT are mocked and a mock peer serves the metadata on
+loopback, so it needs no network; CI runs it on every pull request:
 ```sh
-# Requires gcc, libcurl, libmbedtls, and zlib development packages
+sh pctest/run_tests.sh
+```
+
+`enginetest` runs the real engine against a live swarm, for measuring download
+behaviour (needs libmbedtls and zlib as well):
+```sh
 cd pctest
 ./build.sh
-./enginetest
+./enginetest <file.torrent | magnet:?...> [seconds]
 ```
 
 ---

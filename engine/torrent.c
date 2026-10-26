@@ -36,14 +36,17 @@ static void tlog(const char *fmt, ...) {
 // Well-known public UDP trackers, appended to every torrent so we discover far
 // more peers than the torrent's own (often stale) tracker list provides. UDP
 // only: HTTP(S) trackers need a CA bundle we don't ship. add_tracker dedups.
+// A dead entry costs an announce slot and its timeout on every load, so the
+// list is kept to trackers that stay on ngosang/trackerslist's "best" list
+// (checked Oct 2026; openbittorrent, exodus.desync, explodie are gone). Keep it
+// in sync with kPublicTrackers (app/browse.cpp) and kMagnetTrackers
+// (app/main.cpp), which a bare info-hash gets before any metadata exists.
 static const char *DEFAULT_TRACKERS[] = {
     "udp://tracker.opentrackr.org:1337/announce",
     "udp://open.stealth.si:80/announce",
     "udp://tracker.torrent.eu.org:451/announce",
-    "udp://exodus.desync.com:6969/announce",
     "udp://open.demonii.com:1337/announce",
-    "udp://tracker.openbittorrent.com:6969/announce",
-    "udp://explodie.org:6969/announce",
+    "udp://open.tracker.cl:1337/announce",
 };
 
 static void add_tracker(torrent_meta *t, const char *url, size_t len);

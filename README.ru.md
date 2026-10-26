@@ -161,11 +161,19 @@ docker run --rm -v st_build:/build -v "$PWD":/project \
 > В среде Windows (Git Bash или MSYS2) добавляйте перед командами `MSYS_NO_PATHCONV=1`, чтобы избежать искажения путей к каталогам.
 
 ### Сборка тестов для ПК
-Скомпилировать автономный тест движка можно в Linux/macOS или WSL:
+Офлайн-тестам нужны только gcc и заголовки libcurl (Linux, macOS, WSL или
+MSYS2). Трекеры и DHT заменены моками, метаданные отдаёт мок-пир на loopback,
+так что сеть не нужна. CI запускает их на каждый pull request:
+```sh
+sh pctest/run_tests.sh
+```
+
+`enginetest` гоняет настоящий движок на живом рое, чтобы измерять скорость
+загрузки (нужны ещё libmbedtls и zlib):
 ```sh
 cd pctest
 ./build.sh
-./enginetest
+./enginetest <file.torrent | magnet:?...> [секунды]
 ```
 
 ---

@@ -1,0 +1,84 @@
+# Builds NX-torrent-player.nro in the devkitPro image.
+#
+# - Pull requests and manual runs: build, keep the .nro as a run artifact.
+# - A pushed tag vX.Y.Z: build, then open a DRAFT release with the .nro
+#   attached. Publishing it is a manual step on purpose: the in-app updater
+#   offers the latest *published* release to every user, and shows the release
+#   body as the changelog -- write it before pressing Publish.
+#
+#   git tag v0.5.1 && git push origin v0.5.1
+
+name: Build
+
+on:
+  push:
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write  # creating the draft release
+
+jobs:
+  # Offline engine tests (pctest/test_suite.c): mocked trackers and DHT, a mock
+  # peer on loopback. No network, so they are safe to gate on.
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install libcurl
+        run: sudo apt-get update && sudo apt-get install -y libcurl4-openssl-dev
+      - name: Run
+        run: sh pctest/run_tests.sh
+
+  nro:
+    needs: tests
+    runs-on: ubuntu-latest
+    container: devkitpro/devkita64:latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The updater compares the tag with the version compiled into the .nro.
+      # A tag that disagrees with CMakeLists.txt would ship a build that keeps
+      # offering itself as an update forever (or never updates again).
+      - name: Check the tag matches the version
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          v() { sed -n "s/^set(VERSION_$1 \"\([0-9]*\)\")/\1/p" CMakeLists.txt; }
+          version="$(v MAJOR).$(v MINOR).$(v ALTER)"
+          tag="${GITHUB_REF_NAME#v}"
+          echo "CMakeLists.txt: $version, tag: $tag"
+          if [ "$version" != "$tag" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match VERSION_* ($version) in CMakeLists.txt"
+            exit 1
+          fi
+
+      - name: Install portlibs
+        run: |
+          dkp-pacman -Sy --needed --noconfirm \
+            switch-libmpv switch-curl switch-libwebp switch-mbedtls \
+            switch-glfw switch-mesa
+
+      - name: Configure
+        run: cmake -B build -DPLATFORM_SWITCH=ON -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --target NX-torrent-player.nro -j "$(nproc)"
+
+      # The .elf rides along so a crash report's offsets can be resolved against
+      # the exact build (aarch64-none-elf-addr2line -Cfe ... <offset>).
+      - uses: actions/upload-artifact@v4
+        with:
+          name: NX-torrent-player
+          path: |
+            build/NX-torrent-player.nro
+            build/NX-torrent-player.elf
+          if-no-files-found: error
+
+      - name: Draft the release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          name: ${{ github.ref_name }}
+          files: build/NX-torrent-player.nro

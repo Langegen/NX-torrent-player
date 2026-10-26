@@ -3,12 +3,15 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdio>
+#include <dirent.h>
+#include <set>
 #include <sys/stat.h>
 
 #include <borealis.hpp>
 
 #include "appdata.hpp"
 #include "config.hpp"
+#include "history.hpp"
 #include "http.hpp"
 #include "i18n.hpp"
 #include "json.hpp"
@@ -314,6 +317,36 @@ std::string cachedTorrentPath(const std::string& link)
     std::snprintf(name, sizeof(name), "%016llx.torrent", (unsigned long long)h);
     mkdir(APPDATA_JACKETT, 0777);
     return std::string(APPDATA_JACKETT) + "/" + name;
+}
+
+void pruneCache()
+{
+    DIR* d = opendir(APPDATA_JACKETT);
+    if (!d) return;
+
+    // Matched by file name: the names are hashes, so the folder part of a
+    // stored path ("sdmc:/..." or not) does not matter.
+    static const std::string marker = "/jackett/";
+    std::set<std::string> used;
+    for (const auto& it : history::all())
+    {
+        size_t at = it.source.rfind(marker);
+        if (at != std::string::npos)
+            used.insert(it.source.substr(at + marker.size()));
+    }
+
+    int removed = 0;
+    struct dirent* e;
+    while ((e = readdir(d)))
+    {
+        std::string name = e->d_name;
+        if (name == "." || name == ".." || used.count(name)) continue;
+        if (std::remove((std::string(APPDATA_JACKETT) + "/" + name).c_str()) == 0)
+            removed++;
+    }
+    closedir(d);
+    if (removed)
+        brls::Logger::info("[jackett] pruned {} cached torrent(s)", removed);
 }
 
 void saveToLocalAsync(const Item& item,
