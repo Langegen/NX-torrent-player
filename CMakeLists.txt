@@ -30,9 +30,14 @@ set(PROJECT_TITLEID "0x010000000000A123")
 # entirely -- a local HTTP server serving a fake release JSON is how the update
 # flow gets tested without publishing one:
 #   cmake . -DUPDATE_API_URL=http://192.168.1.20:8000/latest.json
-set(UPDATE_REPO "shodowlo/NX-torrent-player" CACHE STRING "GitHub owner/name for updates")
+# This fork publishes its own releases: pointing at upstream made the updater
+# replace the fork with an upstream build (losing Jackett, History, ...).
+set(UPDATE_REPO "Langegen/NX-torrent-player" CACHE STRING "GitHub owner/name for updates")
 set(UPDATE_API_URL "https://api.github.com/repos/${UPDATE_REPO}/releases/latest"
     CACHE STRING "Release API endpoint the updater polls")
+# A tag's release (its changelog), the tag appended. Same repo as above.
+set(UPDATE_TAG_URL "https://api.github.com/repos/${UPDATE_REPO}/releases/tags/"
+    CACHE STRING "Release-by-tag endpoint, the tag is appended")
 set(PROJECT_ICON ${CMAKE_CURRENT_SOURCE_DIR}/assets/icon.jpg)
 set(PROJECT_RESOURCES ${CMAKE_CURRENT_SOURCE_DIR}/library/borealis/resources)
 
@@ -82,7 +87,8 @@ target_compile_options(${PROJECT_NAME} PRIVATE -Wformat -Werror=format)
 # Options, and is what the updater compares against the latest tag.
 target_compile_definitions(${PROJECT_NAME} PRIVATE
     APP_VERSION="${VERSION_MAJOR}.${VERSION_MINOR}.${VERSION_ALTER}"
-    UPDATE_API_URL="${UPDATE_API_URL}")
+    UPDATE_API_URL="${UPDATE_API_URL}"
+    UPDATE_TAG_URL="${UPDATE_TAG_URL}")
 
 if (PLATFORM_SWITCH)
     # Bundle borealis' resources into the nro's romfs (borealis reads them from

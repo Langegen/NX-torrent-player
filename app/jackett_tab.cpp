@@ -46,6 +46,24 @@ bool isVideoExtension(const std::string& path)
     return false;
 }
 
+// The video files of a loaded torrent, with picker labels (unsorted).
+std::vector<VideoFileInfo> videosOf(const torrent_meta* m)
+{
+    std::vector<int> idx;
+    std::vector<std::string> paths;
+    for (int i = 0; i < m->file_count; i++)
+    {
+        if (!isVideoExtension(m->files[i].path)) continue;
+        idx.push_back(i);
+        paths.push_back(m->files[i].path);
+    }
+    std::vector<std::string> names = pickerNames(paths);
+    std::vector<VideoFileInfo> out;
+    for (size_t k = 0; k < idx.size(); k++)
+        out.push_back({ idx[k], names[k], m->files[idx[k]].length });
+    return out;
+}
+
 std::vector<VideoFileInfo> parseTorrentVideos(const std::string& path)
 {
     std::vector<VideoFileInfo> out;
@@ -54,14 +72,7 @@ std::vector<VideoFileInfo> parseTorrentVideos(const std::string& path)
     char err[128] = { 0 };
     if (torrent_load(m, path.c_str(), err, sizeof(err)) == 0)
     {
-        for (int i = 0; i < m->file_count; i++)
-        {
-            std::string p = m->files[i].path;
-            if (!isVideoExtension(p)) continue;
-            size_t slash = p.find_last_of("/\\");
-            out.push_back({ i, slash == std::string::npos ? p : p.substr(slash + 1),
-                            m->files[i].length });
-        }
+        out = videosOf(m);
         torrent_unload(m);
     }
     std::free(m);
@@ -97,6 +108,9 @@ class JackettTabRoot : public brls::Box
     }
 
     std::shared_ptr<bool> alive = std::make_shared<bool>(true);
+    // The controller behind this tab. Held here so it dies with the tab --
+    // it used to be `new`ed and never freed, one leak per visit to the tab.
+    std::shared_ptr<void> controller;
 };
 
 class JackettView
@@ -345,6 +359,18 @@ class JackettView
 
     void refresh()
     {
+        // Retry / Configure live inside contentContainer and call back into
+        // here: clearViews() would free the very button holding the focus,
+        // and the next input would dereference it. Park it on the search bar.
+        brls::View* cur = brls::Application::getCurrentFocus();
+        for (brls::View* v = cur; v; v = v->getParent())
+        {
+            if (v == contentContainer)
+            {
+                brls::Application::giveFocus(searchBar);
+                break;
+            }
+        }
         contentContainer->clearViews();
 
         const auto& cfg = config::get();
@@ -679,7 +705,7 @@ class JackettView
                               brls::Dialog* loading, LoadingBox* box,
                               std::shared_ptr<bool> cancelled)
     {
-        brls::async([magnet, title, loading, box, cancelled, this]() {
+        brls::async([magnet, title, loading, box, cancelled, this, live = alive]() {
             torrent_meta* m = (torrent_meta*)std::calloc(1, sizeof(torrent_meta));
             char err[128] = { 0 };
             int rc = -1;
@@ -691,14 +717,7 @@ class JackettView
                 if (rc == 0)
                 {
                     resolvedName = m->name;
-                    for (int i = 0; i < m->file_count; i++)
-                    {
-                        std::string p = m->files[i].path;
-                        if (!isVideoExtension(p)) continue;
-                        size_t slash = p.find_last_of("/\\");
-                        vids.push_back({ i, slash == std::string::npos ? p : p.substr(slash + 1),
-                                         m->files[i].length });
-                    }
+                    vids         = videosOf(m);
                     std::sort(vids.begin(), vids.end(), [](const VideoFileInfo& a, const VideoFileInfo& b) {
                         return naturalCompare(a.name, b.name);
                     });
@@ -708,8 +727,8 @@ class JackettView
             }
             std::string e = err;
 
-            brls::sync([this, magnet, title, resolvedName, vids, rc, e, loading, box, cancelled]() {
-                if (*cancelled) return;
+            brls::sync([this, live, magnet, title, resolvedName, vids, rc, e, loading, box, cancelled]() {
+                if (*cancelled || !*live) return;
                 box->cancelled = nullptr;
                 loading->close([this, magnet, title, resolvedName, vids, rc, e]() {
                     if (rc != 0)
@@ -765,9 +784,19 @@ class JackettView
 
         if (isHttp)
         {
-            std::string tempPath = std::string(APPDATA_CACHE) + "_jackett.torrent";
-            jackett::downloadTorrentAsync(link, tempPath, [this, item, tempPath, magnet, loading, box, cancelled](bool ok, const std::string& err) {
-                if (*cancelled) return;
+            // One file per link: history entries resume from this path later,
+            // so it must not be overwritten by the next result played.
+            std::string tempPath = jackett::cachedTorrentPath(link);
+            jackett::downloadTorrentAsync(link, tempPath, [this, live = alive, item, tempPath, magnet, loading, box, cancelled](
+                                                              bool ok, const std::string& err, const std::string& redirected) {
+                if (*cancelled || !*live) return;
+                // The indexer pointed at a magnet instead of a file (common for
+                // public trackers): resolve that, it is the same torrent.
+                if (ok && !redirected.empty())
+                {
+                    resolveAndPlayMagnet(redirected, item.title, loading, box, cancelled);
+                    return;
+                }
                 if (ok)
                 {
                     auto vids = parseTorrentVideos(tempPath);
@@ -817,7 +846,7 @@ class JackettView
 
 brls::View* buildJackettTab()
 {
-    auto* root = new JackettTabRoot();
-    new JackettView(root);
+    auto* root       = new JackettTabRoot();
+    root->controller = std::make_shared<JackettView>(root);
     return root;
 }

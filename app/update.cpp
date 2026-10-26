@@ -19,11 +19,11 @@
 #define APP_VERSION "0.0.0"
 #endif
 #ifndef UPDATE_API_URL
-#define UPDATE_API_URL "https://api.github.com/repos/shodowlo/NX-torrent-player/releases/latest"
+#define UPDATE_API_URL "https://api.github.com/repos/Langegen/NX-torrent-player/releases/latest"
 #endif
 // Base for a specific tag's release; the tag (e.g. "v0.2.0") is appended.
 #ifndef UPDATE_TAG_URL
-#define UPDATE_TAG_URL "https://api.github.com/repos/shodowlo/NX-torrent-player/releases/tags/"
+#define UPDATE_TAG_URL "https://api.github.com/repos/Langegen/NX-torrent-player/releases/tags/"
 #endif
 
 namespace update

@@ -64,9 +64,16 @@ void testConnectionAsync(const std::string& url, const std::string& apiKey,
                          std::function<void(bool ok, const std::string& msg)> cb);
 
 // Downloads a .torrent file from Jackett to `destPath`.
-// Callback is invoked on the UI thread with (ok, errorMsg).
+// Callback is invoked on the UI thread with (ok, errorMsg, magnet). When the
+// indexer answers with a redirect to a magnet: URI instead of a file, ok is
+// true, no file is written and `magnet` carries the URI.
 void downloadTorrentAsync(const std::string& link, const std::string& destPath,
-                          std::function<void(bool ok, const std::string& err)> cb);
+                          std::function<void(bool ok, const std::string& err,
+                                             const std::string& magnet)> cb);
+
+// Where the .torrent for a result's link is kept for playback (stable per
+// link, under APPDATA_JACKETT). Creates the folder.
+std::string cachedTorrentPath(const std::string& link);
 
 // Saves a torrent item to the local library (downloads .torrent to APPDATA_TORRENTS
 // or appends magnet to APPDATA_MAGNETS).

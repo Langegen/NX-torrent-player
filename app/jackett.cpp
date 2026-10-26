@@ -161,7 +161,9 @@ void searchAsync(const std::string& query, Category category,
         url += "&Category[]=" + std::to_string(static_cast<int>(category));
     }
 
-    brls::Logger::info("[jackett] querying {}", url);
+    // Not the URL itself: it carries the API key, and the log is a plain file
+    // on the SD card that people attach to bug reports.
+    brls::Logger::info("[jackett] querying {} for \"{}\"", base, query);
 
     brls::async([url, cb]() {
         std::string resp, err;
@@ -284,16 +286,34 @@ void testConnectionAsync(const std::string& url, const std::string& apiKey,
 }
 
 void downloadTorrentAsync(const std::string& link, const std::string& destPath,
-                          std::function<void(bool ok, const std::string& err)> cb)
+                          std::function<void(bool ok, const std::string& err,
+                                             const std::string& magnet)> cb)
 {
     std::string targetUrl = normalizeDownloadLink(link);
-    brls::Logger::info("[jackett] downloading torrent from {} to {}", targetUrl, destPath);
+    brls::Logger::info("[jackett] downloading torrent to {}", destPath);
 
     brls::async([targetUrl, destPath, cb]() {
-        std::string err;
-        bool ok = http::download(targetUrl, destPath, err);
-        brls::sync([cb, ok, err]() { cb(ok, err); });
+        std::string err, magnet;
+        bool ok = http::downloadTorrent(targetUrl, destPath, magnet, err);
+        if (ok && !magnet.empty())
+            brls::Logger::info("[jackett] link redirected to a magnet");
+        brls::sync([cb, ok, err, magnet]() { cb(ok, err, magnet); });
     });
+}
+
+std::string cachedTorrentPath(const std::string& link)
+{
+    // FNV-1a over the link: stable across runs, which is all a file name needs.
+    uint64_t h = 1469598103934665603ULL;
+    for (unsigned char c : link)
+    {
+        h ^= c;
+        h *= 1099511628211ULL;
+    }
+    char name[32];
+    std::snprintf(name, sizeof(name), "%016llx.torrent", (unsigned long long)h);
+    mkdir(APPDATA_JACKETT, 0777);
+    return std::string(APPDATA_JACKETT) + "/" + name;
 }
 
 void saveToLocalAsync(const Item& item,
@@ -310,7 +330,16 @@ void saveToLocalAsync(const Item& item,
         std::string filename = sanitizeFilename(item.title) + ".torrent";
         std::string destPath = std::string(APPDATA_TORRENTS) + "/" + filename;
 
-        downloadTorrentAsync(item.link, destPath, [item, destPath, magnet, cb](bool ok, const std::string& err) {
+        downloadTorrentAsync(item.link, destPath, [item, destPath, magnet, cb](bool ok, const std::string& err,
+                                                                               const std::string& redirected) {
+            if (ok && !redirected.empty())
+            {
+                if (appendMagnetToFile(APPDATA_MAGNETS, redirected))
+                    cb(true, tr("Saved magnet link to Local library"));
+                else
+                    cb(false, tr("Failed to save magnet link"));
+                return;
+            }
             if (ok)
             {
                 brls::Logger::info("[jackett] saved torrent to {}", destPath);

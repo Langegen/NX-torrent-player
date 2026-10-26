@@ -1,6 +1,7 @@
 #include "history.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <ctime>
@@ -19,6 +20,13 @@ std::mutex g_lock;
 std::vector<Item> g_items;
 bool g_loaded = false;
 uint32_t g_generation = 0;
+
+// Serialises the file writes themselves: a background save and a forced one
+// (the player closing) must not interleave on history.json.tmp.
+std::mutex g_saveLock;
+// A background save is already queued; it snapshots the list when it runs, so
+// a second request in the meantime has nothing to add.
+std::atomic<bool> g_savePending{ false };
 
 constexpr size_t kMaxItems = 100;
 
@@ -45,7 +53,12 @@ void load()
     g_items.clear();
     g_loaded = true;
 
+    // save() removes the old file before renaming the new one into place (FAT
+    // will not rename over an existing file); a crash between the two leaves
+    // only the .tmp, which is complete -- read that rather than lose everything.
+    std::string tmp = std::string(APPDATA_HISTORY) + ".tmp";
     FILE* f = std::fopen(APPDATA_HISTORY, "rb");
+    if (!f) f = std::fopen(tmp.c_str(), "rb");
     if (!f) return;
 
     std::fseek(f, 0, SEEK_END);
@@ -100,6 +113,7 @@ void load()
 
 void save()
 {
+    std::lock_guard<std::mutex> saveGuard(g_saveLock);
     std::vector<Item> copy;
     {
         std::lock_guard<std::mutex> guard(g_lock);
@@ -147,31 +161,28 @@ void save()
 std::vector<Item> all()
 {
     std::lock_guard<std::mutex> guard(g_lock);
-    if (!g_loaded)
-    {
-        // Unlock while load() locks, so call without holding guard
-        // load() will acquire g_lock
-    }
     return g_items;
 }
 
-const Item* find(const std::string& source, int fileIndex, const std::string& stremioVideoId)
+bool find(const std::string& source, int fileIndex, const std::string& stremioVideoId,
+          Item& out)
 {
     std::lock_guard<std::mutex> guard(g_lock);
     std::string targetId = makeId(source, fileIndex, stremioVideoId);
     for (const auto& it : g_items)
     {
-        if (it.id == targetId)
-            return &it;
-        if (!stremioVideoId.empty() && it.stremioVideoId == stremioVideoId)
-            return &it;
-        if (it.source == source && it.fileIndex == fileIndex)
-            return &it;
+        if (it.id == targetId ||
+            (!stremioVideoId.empty() && it.stremioVideoId == stremioVideoId) ||
+            (it.source == source && it.fileIndex == fileIndex))
+        {
+            out = it;
+            return true;
+        }
     }
-    return nullptr;
+    return false;
 }
 
-void record(const Item& item)
+void record(const Item& item, bool saveNow)
 {
     std::string id = item.id.empty() ? makeId(item.source, item.fileIndex, item.stremioVideoId) : item.id;
     int64_t now = item.lastWatched != 0 ? item.lastWatched : (int64_t)std::time(nullptr);
@@ -215,7 +226,18 @@ void record(const Item& item)
         g_generation++;
     }
 
-    save();
+    if (saveNow)
+    {
+        save();
+        return;
+    }
+    if (!g_savePending.exchange(true))
+    {
+        brls::async([]() {
+            g_savePending = false;  // before the snapshot: a later change re-queues
+            save();
+        });
+    }
 }
 
 void remove(const std::string& id)

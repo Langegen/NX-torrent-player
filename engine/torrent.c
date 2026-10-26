@@ -301,13 +301,57 @@ typedef struct {
     int total;
     int max;
     Mutex lock;
+    volatile bool full;  // no room left: further announces have nothing to add
 } collector;
 
 static void collect_cb(void *ctx, const peer_addr *peers, int n) {
     collector *c = ctx;
     mutexLock(&c->lock);
     merge_peers(c->peers, &c->total, c->max, peers, n);
+    if (c->total >= c->max) c->full = true;
     mutexUnlock(&c->lock);
+}
+
+// One BEP 9 round: asks `n` peers for the metadata, META_WORKERS at a time; the
+// first to deliver wins. Returns the metadata (caller frees) or NULL.
+static uint8_t *fetch_metadata_round(peer_addr *peers, int n,
+                                     const uint8_t *info_hash,
+                                     const uint8_t *peer_id, size_t *len_out) {
+    torrent_meta_peers_total = n;
+    torrent_meta_peers_tried = 0;
+
+    meta_fetch fetch;
+    memset(&fetch, 0, sizeof(fetch));
+    mutexInit(&fetch.lock);
+    fetch.peers     = peers;
+    fetch.n         = n;
+    fetch.info_hash = info_hash;
+    fetch.peer_id   = peer_id;
+
+    int nw = n < META_WORKERS ? n : META_WORKERS;
+    Thread workers[META_WORKERS];
+    int started = 0;
+    for (int i = 0; i < nw; i++) {
+        if (threadCreate(&workers[started], meta_worker, &fetch, NULL, 0x10000,
+                         0x2C, -2) != 0)
+            break;
+        if (threadStart(&workers[started]) != 0) {
+            threadClose(&workers[started]);
+            break;
+        }
+        started++;
+    }
+    // No worker could start: still fetch it, just on this thread. Slow beats
+    // "no peer provided the metadata" when the swarm was fine.
+    if (started == 0)
+        meta_worker(&fetch);
+
+    for (int i = 0; i < started; i++) {
+        threadWaitForExit(&workers[i]);
+        threadClose(&workers[i]);
+    }
+    *len_out = fetch.meta_len;
+    return fetch.metadata;
 }
 
 int torrent_load_magnet(torrent_meta *t, const char *magnet_uri,
@@ -356,7 +400,9 @@ int torrent_load_magnet_peers(torrent_meta *t, const char *magnet_uri,
     }
 
     // If trackers yielded no peers, search the DHT for bootstrap peers.
+    bool dht_tried = false;
     if (n <= 0) {
+        dht_tried = true;
         torrent_meta_state = META_DHT;
         collector c;
         memset(&c, 0, sizeof(c));
@@ -386,42 +432,43 @@ int torrent_load_magnet_peers(torrent_meta *t, const char *magnet_uri,
 
     // Ask several peers at once for the metadata (BEP 9); the first to answer
     // wins and the rest stop. Progress is published for the UI to poll.
-    torrent_meta_peers_total = n;
-    torrent_meta_peers_tried = 0;
+    size_t meta_len   = 0;
+    uint8_t *metadata = fetch_metadata_round(peers, n, m.info_hash, peer_id, &meta_len);
 
-    meta_fetch fetch;
-    memset(&fetch, 0, sizeof(fetch));
-    mutexInit(&fetch.lock);
-    fetch.peers     = peers;
-    fetch.n         = n;
-    fetch.info_hash = m.info_hash;
-    fetch.peer_id   = peer_id;
+    // Trackers often hand out stale swarms: every peer listed is long gone, and
+    // the fetch used to fail right there ("peer 80/80 0%") without ever asking
+    // the DHT, which only ran when trackers returned nobody at all. Give the
+    // DHT its turn with the peers we have not tried yet.
+    if (!metadata && !dht_tried) {
+        torrent_meta_state = META_DHT;
+        peer_addr fresh[80];
+        collector c;
+        memset(&c, 0, sizeof(c));
+        c.peers = fresh;
+        c.total = 0;
+        c.max   = 80;
+        mutexInit(&c.lock);
+        dht_find_peers(m.info_hash, 30, 8000, collect_cb, &c, NULL, err, errlen);
 
-    int nw = n < META_WORKERS ? n : META_WORKERS;
-    Thread workers[META_WORKERS];
-    int started = 0;
-    for (int i = 0; i < nw; i++) {
-        if (threadCreate(&workers[started], meta_worker, &fetch, NULL, 0x10000,
-                         0x2C, -2) != 0)
-            break;
-        if (threadStart(&workers[started]) != 0) {
-            threadClose(&workers[started]);
-            break;
+        // Keep only peers the first round did not already try.
+        int fn = 0;
+        for (int i = 0; i < c.total; i++) {
+            bool seen = false;
+            for (int j = 0; j < n && !seen; j++)
+                seen = peers[j].ip == fresh[i].ip && peers[j].port == fresh[i].port;
+            if (!seen) fresh[fn++] = fresh[i];
         }
-        started++;
+        if (fn > 0) {
+            torrent_meta_state = META_FETCH;
+            metadata = fetch_metadata_round(fresh, fn, m.info_hash, peer_id, &meta_len);
+            if (metadata) {
+                // Hand the DHT peers on below: they are the ones that answered.
+                memcpy(peers, fresh, (size_t)fn * sizeof(peers[0]));
+                n = fn;
+            }
+        }
     }
-    // No worker could start: still fetch it, just on this thread. Slow beats
-    // "no peer provided the metadata" when the swarm was fine.
-    if (started == 0)
-        meta_worker(&fetch);
 
-    for (int i = 0; i < started; i++) {
-        threadWaitForExit(&workers[i]);
-        threadClose(&workers[i]);
-    }
-
-    uint8_t *metadata = fetch.metadata;
-    size_t meta_len   = fetch.meta_len;
     if (!metadata) {
         magnet_free(&m);
         torrent_meta_state = META_FAIL;
@@ -840,7 +887,10 @@ int torrent_announce(const torrent_meta *t, peer_addr *peers, int max_peers,
     c.total = 0;
     c.max = max_peers;
     mutexInit(&c.lock);
-    torrent_announce_cb(t, collect_cb, &c, NULL, err, errlen);
+    // Stop as soon as the list is full rather than waiting out every slow or
+    // dead tracker (up to 32 of them, 6 at a time): peers they would add have
+    // nowhere to go, and the metadata fetch is waiting on this list.
+    torrent_announce_cb(t, collect_cb, &c, &c.full, err, errlen);
     if (c.total == 0) { set_err(err, errlen, "no peer from the trackers"); return -1; }
     return c.total;
 }

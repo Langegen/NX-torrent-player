@@ -21,6 +21,11 @@
 // in the player. Kept so re-picking the same one costs nothing; they are a few
 // tens of KB each.
 #define APPDATA_SUBS     APPDATA_DIR "/subtitles"
+// .torrent files fetched to play a Jackett result, one per link (named by a
+// hash of it). Kept, not overwritten: a history entry points at its file to
+// resume later, and a single shared temp file made every entry open whichever
+// torrent was played last.
+#define APPDATA_JACKETT  APPDATA_DIR "/jackett"
 // Watch history and saved playback positions.
 #define APPDATA_HISTORY  APPDATA_DIR "/history.json"
 

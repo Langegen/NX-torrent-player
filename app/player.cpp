@@ -2743,7 +2743,9 @@ void MpvView::maybeUpdateHistory(bool force)
     it.stremioType = watch.type;
     it.id = history::makeId(it.source, it.fileIndex, it.stremioVideoId);
 
-    history::record(it);
+    // Only the final write (the player closing) waits for the SD card; the
+    // periodic one is handed to a background thread so it cannot drop a frame.
+    history::record(it, force);
 }
 
 // Enter scrub mode: pause and pin the cursor to where playback currently is.
@@ -3026,18 +3028,19 @@ void startPlaybackPrompt(const std::string& source, const PlayerArt& art,
                          const std::string& title, int fileIndex,
                          WatchInfo watch, const std::string& sourceType)
 {
-    const history::Item* item = history::find(source, fileIndex, watch.videoId);
+    history::Item item;
+    bool known = history::find(source, fileIndex, watch.videoId, item);
     double resumePos = 0.0;
     double resumeDur = 0.0;
     std::string itemTitle = title;
 
-    if (item)
+    if (known)
     {
-        if (history::hasValidResume(*item))
+        if (history::hasValidResume(item))
         {
-            resumePos = item->positionSec;
-            resumeDur = item->durationSec;
-            if (itemTitle.empty()) itemTitle = item->title;
+            resumePos = item.positionSec;
+            resumeDur = item.durationSec;
+            if (itemTitle.empty()) itemTitle = item.title;
         }
     }
     else if (watch.resumeSec > 15.0)

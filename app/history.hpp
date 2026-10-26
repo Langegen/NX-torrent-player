@@ -39,12 +39,17 @@ void save();
 // Returns all history items, sorted newest to oldest (max 100)
 std::vector<Item> all();
 
-// Finds an item by source, fileIndex, and optional stremioVideoId.
-// Returns nullptr if not found. Note: internal reference remains valid until next record/remove/clear call.
-const Item* find(const std::string& source, int fileIndex, const std::string& stremioVideoId = "");
+// Finds an item by source, fileIndex, and optional stremioVideoId, copying it
+// into `out`. A copy, not a pointer: the list is shared with the player, which
+// records into it while the UI reads, and a record() reallocates it.
+bool find(const std::string& source, int fileIndex, const std::string& stremioVideoId,
+          Item& out);
 
-// Adds or updates an item in history, re-sorts and limits to 100 items, and saves
-void record(const Item& item);
+// Adds or updates an item in history, re-sorts and limits to 100 items, and
+// saves. `saveNow` writes the file before returning; the player's periodic
+// update passes false so the SD write runs off the UI thread instead of
+// stalling a frame every 15 seconds.
+void record(const Item& item, bool saveNow = true);
 
 // Removes a single item by id
 void remove(const std::string& id);

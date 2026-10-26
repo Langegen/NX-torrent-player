@@ -30,6 +30,13 @@ bool postJson(const char* url, const std::string& body, std::string& resp,
 bool download(const std::string& url, const std::string& path, std::string& err,
               std::function<bool(int64_t, int64_t)> progress = nullptr);
 
+// Fetches a .torrent to `path`, for indexer links (Jackett's /dl/...). Many of
+// those answer with a redirect to a magnet: URI instead of a file, which curl
+// cannot follow; that case returns true with the URI in `magnet` and no file.
+// Otherwise true means the file is on disk and `magnet` is empty.
+bool downloadTorrent(const std::string& url, const std::string& path,
+                     std::string& magnet, std::string& err);
+
 // Percent-encodes a URL path segment.
 std::string urlEncode(const std::string& s);
 

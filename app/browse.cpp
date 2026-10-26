@@ -58,6 +58,32 @@ bool naturalCompare(const std::string& a, const std::string& b)
     return ia == a.size() && ib < b.size();
 }
 
+std::vector<std::string> pickerNames(const std::vector<std::string>& paths)
+{
+    auto baseOf = [](const std::string& p) {
+        size_t s = p.find_last_of("/\\");
+        return s == std::string::npos ? p : p.substr(s + 1);
+    };
+    auto withFolder = [](const std::string& p) {
+        size_t s = p.find_last_of("/\\");
+        if (s == std::string::npos || s == 0) return p;
+        size_t s2 = p.find_last_of("/\\", s - 1);
+        return s2 == std::string::npos ? p : p.substr(s2 + 1);
+    };
+
+    std::vector<std::string> out;
+    out.reserve(paths.size());
+    for (const auto& p : paths) out.push_back(baseOf(p));
+    for (size_t i = 0; i < out.size(); i++)
+    {
+        bool dup = false;
+        for (size_t j = 0; j < paths.size() && !dup; j++)
+            dup = j != i && baseOf(paths[j]) == baseOf(paths[i]);
+        if (dup) out[i] = withFolder(paths[i]);
+    }
+    return out;
+}
+
 namespace
 {
 

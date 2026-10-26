@@ -528,7 +528,25 @@ struct VideoFile
     int64_t length;
 };
 
-// The video files a .torrent holds, largest first. Empty if it cannot be read.
+// The video files of a loaded torrent, with picker labels (unsorted).
+std::vector<VideoFile> videoFilesOf(const torrent_meta* m)
+{
+    std::vector<int> idx;
+    std::vector<std::string> paths;
+    for (int i = 0; i < m->file_count; i++)
+    {
+        if (!isVideoFile(m->files[i].path)) continue;
+        idx.push_back(i);
+        paths.push_back(m->files[i].path);
+    }
+    std::vector<std::string> names = pickerNames(paths);
+    std::vector<VideoFile> out;
+    for (size_t k = 0; k < idx.size(); k++)
+        out.push_back({ idx[k], names[k], m->files[idx[k]].length });
+    return out;
+}
+
+// The video files a .torrent holds, in natural order. Empty if it cannot be read.
 std::vector<VideoFile> torrentVideoFiles(const std::string& path)
 {
     std::vector<VideoFile> out;
@@ -538,14 +556,7 @@ std::vector<VideoFile> torrentVideoFiles(const std::string& path)
     char err[128] = { 0 };
     if (torrent_load(m, path.c_str(), err, sizeof(err)) == 0)
     {
-        for (int i = 0; i < m->file_count; i++)
-        {
-            std::string p = m->files[i].path;
-            if (!isVideoFile(p)) continue;
-            size_t slash = p.find_last_of("/\\");
-            out.push_back({ i, slash == std::string::npos ? p : p.substr(slash + 1),
-                            m->files[i].length });
-        }
+        out = videoFilesOf(m);
         torrent_unload(m);
     }
     else
@@ -986,17 +997,7 @@ void resolveMagnetNames(std::shared_ptr<bool> alive,
                 total = m->total_len;  // whole-torrent size, like torrentScanInfo
                 // Extract + cache its video files (largest first) in the same
                 // fetch, so playing it can offer a picker with no extra wait.
-                std::vector<VideoFile> vids;
-                for (int i = 0; i < m->file_count; i++)
-                {
-                    std::string p = m->files[i].path;
-                    if (!isVideoFile(p)) continue;
-                    size_t slash = p.find_last_of("/\\");
-                    vids.push_back({ i,
-                                     slash == std::string::npos ? p
-                                                                : p.substr(slash + 1),
-                                     m->files[i].length });
-                }
+                std::vector<VideoFile> vids = videoFilesOf(m);
                 torrent_unload(m);
                 if (!magnetFilesCached(magnetHash(magnet)))
                     cacheMagnetFiles(magnetHash(magnet), vids, total);
