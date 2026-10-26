@@ -120,6 +120,16 @@ struct Config
     // Jackett server configuration
     std::string jackettUrl = "";
     std::string jackettApiKey = "";
+
+    // TorrServer ("http://192.168.1.10:8090"). Set: torrents are streamed by
+    // that server and played here as plain HTTP, instead of by the on-device
+    // engine. Empty: the engine, as before.
+    std::string torrServerUrl = "";
+
+    // Proxy for the app's HTTP requests and https playback, as curl takes it:
+    // "http://host:3128", "socks5h://host:1080". Empty: direct. Addresses on
+    // the local network (Jackett, TorrServer) never go through it.
+    std::string proxyUrl = "";
 };
 
 // The live settings. Mutate, then call save().

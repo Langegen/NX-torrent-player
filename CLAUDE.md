@@ -36,11 +36,15 @@ rewrites the container paths.
 ## Architecture
 
 - `app/` — the UI (C++, borealis): `main` (browser/tabs), `player` (mpv view +
-  loading screen + seek), `stremio` (API, library, artwork), `browse` (the
-  Stremio drill-down), `settings`, `config` (config.json)
+  loading screen + seek; torrents, direct http(s) links, TorrServer), `stremio`
+  (API, library, artwork), `browse` (the Stremio drill-down), `settings`,
+  `config` (config.json), `http` (curl + proxy), `torrserver`, `i18n` (+
+  `i18n_ru.cpp`, one table per language)
 - `engine/` — the torrent engine (C): `torrentfs` (piece picking, cache, the
   streaming read), `peer`, `swarm`, `torrent`, `udp_tracker`, `dht`, `magnet`,
-  `stream` (the devoptab mpv reads through), plus vendored libutp (`utp*.cpp`)
+  `stream` (the mpv `stream_cb` protocols: `torrent://` and `nxhttps://`),
+  `httpsrc` (https read through curl range requests), plus vendored libutp
+  (`utp*.cpp`)
 - `include/` — libutp headers, paired with `engine/utp*.cpp`
 - `assets/` — app icon, logos, list icons (copied into the nro's romfs)
 - `library/borealis/` — vendored UI framework, locally patched: see its
@@ -75,6 +79,14 @@ The entry point is `int main()` in `app/main.cpp`.
   focus parking in `StremioTab::onAuthenticated`.
 - The Switch outputs stereo: mpv is forced to `audio-channels=stereo` or 5.1
   dialogue (centre channel) is lost.
+- The portlibs **FFmpeg has no `https` protocol** (only file, http, ftp, tcp,
+  udp, rtmp, tls, httpproxy; `tls` is libnx's ssl service). mpv opens `http://`
+  and HLS over it itself; an `https://` URL is played as `nxhttps://` through
+  `engine/httpsrc.c` (curl, our CA bundle, Range requests). HLS over https is
+  therefore not supported yet. No `crypto` protocol either (AES-128 HLS).
+- **Space Grotesk (the primary UI font) has no Cyrillic**: in Russian the app
+  turns it off before `Application::init()` (`SwitchFontLoader::useBundledFont`,
+  a local borealis patch) so the UI is the system font throughout.
 
 ## Debugging on device
 

@@ -63,7 +63,7 @@ set(ENGINE_SRC
     ${ENGINE_DIR}/bencode.c ${ENGINE_DIR}/torrent.c ${ENGINE_DIR}/torrentfs.c
     ${ENGINE_DIR}/peer.c ${ENGINE_DIR}/swarm.c ${ENGINE_DIR}/magnet.c
     ${ENGINE_DIR}/udp_tracker.c ${ENGINE_DIR}/dht.c ${ENGINE_DIR}/dhtclient.c
-    ${ENGINE_DIR}/udpdiag.c ${ENGINE_DIR}/stream.c
+    ${ENGINE_DIR}/udpdiag.c ${ENGINE_DIR}/stream.c ${ENGINE_DIR}/httpsrc.c
     ${ENGINE_DIR}/utp.cpp ${ENGINE_DIR}/utp_utils.cpp ${ENGINE_DIR}/utpbridge.cpp)
 # libutp needs -DPOSIX for its socket types (SOCKADDR_STORAGE etc).
 set_source_files_properties(${ENGINE_SRC} PROPERTIES COMPILE_DEFINITIONS "POSIX")

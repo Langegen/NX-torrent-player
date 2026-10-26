@@ -9,3 +9,7 @@
 *.o
 /pctest/test_suite
 /pctest/test_suite.exe
+/pctest/test_httpsrc
+/pctest/test_httpsrc.exe
+/pctest/test_net
+/pctest/test_net.exe

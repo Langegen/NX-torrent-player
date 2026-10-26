@@ -64,6 +64,12 @@ primary carries Latin glyphs, so a `FONT_REGULAR` fallback was never reached for
 Latin. Falls back to the stock system-Chinese-primary setup if the romfs file is
 missing. The `.ttf` is bundled by the top-level CMakeLists.
 
+`SwitchFontLoader::useBundledFont` (a public static, declared in
+`include/borealis/platforms/switch/switch_font.hpp`, default `true`) turns the
+bundled font off: the app clears it before `Application::init()` when the UI is
+in Russian, since Space Grotesk has no Cyrillic and a label would otherwise mix
+two typefaces.
+
 The patch is marked with a `LOCAL PATCH` comment in the source.
 
 ### 5. `library/lib/views/label.cpp` — three-dot ellipsis

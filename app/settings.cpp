@@ -16,6 +16,8 @@
 
 #include "config.hpp"
 #include "jackett.hpp"
+#include "http.hpp"
+#include "torrserver.hpp"
 #include "theme.hpp"
 #include "update.hpp"
 #include "stremio.hpp"
@@ -62,6 +64,7 @@ brls::View* playbackPane();
 brls::View* streamingPane();
 brls::View* stremioPane();
 brls::View* jackettPane();
+brls::View* networkPane();
 brls::View* aboutPane();
 
 // ---------------------------------------------------------------------------
@@ -516,6 +519,90 @@ brls::View* jackettPane()
     return pane;
 }
 
+brls::View* networkPane()
+{
+    brls::Box* list = nullptr;
+    auto* pane      = newPane(&list);
+    config::Config& cfg = config::get();
+
+    auto* hdr = new brls::Header();
+    hdr->setTitle("TorrServer");
+    list->addView(hdr);
+
+    auto* tsCell = new brls::DetailCell();
+    tsCell->setText(tr("Server URL"));
+    tsCell->setDetailText(cfg.torrServerUrl.empty() ? tr("Off") : cfg.torrServerUrl);
+    tsCell->registerClickAction([tsCell](brls::View*) {
+        brls::Application::getImeManager()->openForText(
+            [tsCell](std::string out) {
+                config::get().torrServerUrl = torrserver::normalizeBase(out);
+                config::save();
+                const std::string& v = config::get().torrServerUrl;
+                tsCell->setDetailText(v.empty() ? tr("Off") : v);
+            },
+            tr("TorrServer URL"), tr("e.g. http://192.168.1.10:8090"), 256,
+            config::get().torrServerUrl);
+        return true;
+    });
+    list->addView(tsCell);
+    list->addView(caption(
+        tr("When set, torrents are streamed by your TorrServer and played here as "
+           "a plain video stream, instead of being downloaded by the console. "
+           "Leave empty to use the built-in engine.")));
+
+    auto* tsTest = new brls::Button();
+    tsTest->setText(tr("Test connection"));
+    tsTest->setMargins(14.0f, 20.0f, 18.0f, 20.0f);
+    tsTest->registerClickAction([tsTest](brls::View*) {
+        if (config::get().torrServerUrl.empty())
+        {
+            note(tr("Please set Server URL first."));
+            return true;
+        }
+        tsTest->setState(brls::ButtonState::DISABLED);
+        tsTest->setText(tr("Testing..."));
+        torrserver::testConnectionAsync(
+            config::get().torrServerUrl,
+            [tsTest](bool ok, const std::string& msg) {
+                tsTest->setState(brls::ButtonState::ENABLED);
+                tsTest->setText(tr("Test connection"));
+                if (ok)
+                    note(tr("Connected to TorrServer ") + msg);
+                else
+                    note(tr("Connection failed: ") + msg);
+            });
+        return true;
+    });
+    list->addView(tsTest);
+
+    auto* phdr = new brls::Header();
+    phdr->setTitle(tr("Proxy"));
+    list->addView(phdr);
+
+    auto* proxyCell = new brls::DetailCell();
+    proxyCell->setText(tr("Proxy"));
+    proxyCell->setDetailText(cfg.proxyUrl.empty() ? tr("Off") : cfg.proxyUrl);
+    proxyCell->registerClickAction([proxyCell](brls::View*) {
+        brls::Application::getImeManager()->openForText(
+            [proxyCell](std::string out) {
+                while (!out.empty() && out.back() == ' ') out.pop_back();
+                config::get().proxyUrl = out;
+                config::save();
+                http::applyProxy();
+                proxyCell->setDetailText(out.empty() ? tr("Off") : out);
+            },
+            tr("Proxy"), tr("e.g. http://host:3128 or socks5h://host:1080"), 256,
+            config::get().proxyUrl);
+        return true;
+    });
+    list->addView(proxyCell);
+    list->addView(caption(
+        tr("Used for catalogs, addons, posters and https video links. Servers on "
+           "your local network (Jackett, TorrServer) are always reached directly.")));
+
+    return pane;
+}
+
 brls::View* aboutPane()
 {
     brls::Box* list = nullptr;
@@ -652,6 +739,7 @@ brls::View* SettingsActivity::createContentView()
     tabs->addTab(tr("Streaming"), [] { return streamingPane(); });
     tabs->addTab("Stremio", [] { return stremioPane(); });
     tabs->addTab("Jackett", [] { return jackettPane(); });
+    tabs->addTab(tr("Network"), [] { return networkPane(); });
     tabs->addTab(tr("About"), [] { return aboutPane(); });
 
     auto* frame = new brls::AppletFrame();

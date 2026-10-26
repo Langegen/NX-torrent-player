@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <functional>
 #include <string>
 
@@ -16,8 +17,10 @@ namespace http
 
 // GET `url` into `resp`. False on failure, with a readable reason in `err`.
 // `accept` is an optional full header line ("Accept: image/jpeg").
+// `timeoutSec` bounds the whole request (TorrServer answers only once it has
+// a torrent's metadata, which can take longer than the default).
 bool get(const std::string& url, std::string& resp, std::string& err,
-         const char* accept = nullptr);
+         const char* accept = nullptr, long timeoutSec = 25);
 
 // POST `body` as application/json.
 bool postJson(const char* url, const std::string& body, std::string& resp,
@@ -39,5 +42,13 @@ bool downloadTorrent(const std::string& url, const std::string& path,
 
 // Percent-encodes a URL path segment.
 std::string urlEncode(const std::string& s);
+
+// Re-reads the proxy from config (Options -> Network). Call after load and
+// after every change.
+void applyProxy();
+
+// The proxy to use for `url`: the configured one, or "" for a host on the
+// local network (Jackett, TorrServer, a NAS) and when none is set.
+std::string proxyFor(const std::string& url);
 
 } // namespace http

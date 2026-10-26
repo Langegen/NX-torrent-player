@@ -248,6 +248,8 @@ void load()
                      (sTab == "history") ? Tab::HISTORY : Tab::LOCAL;
     cfg.jackettUrl    = readStr(body, "jackettUrl", cfg.jackettUrl);
     cfg.jackettApiKey = readStr(body, "jackettApiKey", cfg.jackettApiKey);
+    cfg.torrServerUrl = readStr(body, "torrServerUrl", cfg.torrServerUrl);
+    cfg.proxyUrl      = readStr(body, "proxyUrl", cfg.proxyUrl);
     cfg.logging = readBool(body, "logging", cfg.logging);
     cfg.hide4k  = readBool(body, "hide4k", cfg.hide4k);
     cfg.rateGovernor = readBool(body, "rateGovernor", cfg.rateGovernor);
@@ -293,6 +295,8 @@ bool save()
                  "  \"startupTab\": \"%s\",\n"
                  "  \"jackettUrl\": \"%s\",\n"
                  "  \"jackettApiKey\": \"%s\",\n"
+                 "  \"torrServerUrl\": \"%s\",\n"
+                 "  \"proxyUrl\": \"%s\",\n"
                  "  \"logging\": %s,\n"
                  "  \"hide4k\": %s,\n"
                  "  \"rateGovernor\": %s,\n"
@@ -313,6 +317,8 @@ bool save()
                  sTabStr,
                  cfg.jackettUrl.c_str(),
                  cfg.jackettApiKey.c_str(),
+                 cfg.torrServerUrl.c_str(),
+                 cfg.proxyUrl.c_str(),
                  cfg.logging ? "true" : "false", cfg.hide4k ? "true" : "false",
                  cfg.rateGovernor ? "true" : "false",
                  cfg.ramStream ? "true" : "false",

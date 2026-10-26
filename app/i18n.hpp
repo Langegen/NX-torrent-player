@@ -21,8 +21,12 @@ namespace i18n
 // config::load() and before any view exists.
 void load();
 
-// The active language, as stored in config: "en" or "fr".
+// The active language, as stored in config: "en", "fr" or "ru".
 const std::string& lang();
+
+// True when the active language has letters the bundled UI font lacks
+// (Cyrillic), so the UI should use the console's system font throughout.
+bool needsSystemFont();
 
 // The offered languages: ids and labels, index-matched. Labels are endonyms
 // ("Francais"), which is what a language picker should show whatever the UI is

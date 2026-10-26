@@ -3,6 +3,7 @@
 #include <unordered_map>
 
 #include "config.hpp"
+#include "i18n_tables.hpp"
 
 namespace
 {
@@ -428,13 +429,26 @@ namespace i18n
 void load()
 {
     g_lang = config::get().language;
-    if (g_lang != "fr")
-        return;
+    if (g_lang == "fr")
+    {
+        g_table = new std::unordered_map<std::string, const char*>();
+        g_table->reserve(sizeof(kFr) / sizeof(kFr[0]) * 2);
+        for (const auto& e : kFr)
+            (*g_table)[e.en] = e.fr;
+    }
+    else if (g_lang == "ru")
+    {
+        g_table = new std::unordered_map<std::string, const char*>();
+        g_table->reserve(i18n_tables::kRuCount * 2);
+        for (size_t i = 0; i < i18n_tables::kRuCount; i++)
+            (*g_table)[i18n_tables::kRu[i].en] = i18n_tables::kRu[i].tr;
+    }
+}
 
-    g_table = new std::unordered_map<std::string, const char*>();
-    g_table->reserve(sizeof(kFr) / sizeof(kFr[0]) * 2);
-    for (const auto& e : kFr)
-        (*g_table)[e.en] = e.fr;
+bool needsSystemFont()
+{
+    // The bundled Space Grotesk covers Latin only.
+    return g_lang == "ru";
 }
 
 const std::string& lang()
@@ -444,7 +458,7 @@ const std::string& lang()
 
 const std::vector<std::string>& langIds()
 {
-    static const std::vector<std::string> v = { "en", "fr" };
+    static const std::vector<std::string> v = { "en", "fr", "ru" };
     return v;
 }
 
@@ -453,7 +467,7 @@ const std::vector<std::string>& langLabels()
     // Endonyms, and never translated: a language picker has to be readable to
     // someone who cannot read the language the UI is currently in.
     static const std::vector<std::string> v = { "English (default)",
-                                                "Français" };
+                                                "Français", "Русский" };
     return v;
 }
 

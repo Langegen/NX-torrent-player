@@ -21,6 +21,9 @@
 
 #include <borealis/views/applet_frame.hpp>
 #include <borealis/views/button.hpp>
+#ifdef __SWITCH__
+#include <borealis/platforms/switch/switch_font.hpp>
+#endif
 #include <borealis/views/tab_frame.hpp>
 #include <borealis/views/recycler.hpp>
 #include <borealis/views/cells/cell_detail.hpp>
@@ -37,12 +40,14 @@
 #include "theme.hpp"
 #include "update.hpp"
 #include "stremio.hpp"
+#include "http.hpp"
 #include "jackett.hpp"
 #include "jackett_tab.hpp"
 #include "history.hpp"
 #include "history_tab.hpp"
 
 extern "C" {
+#include "httpsrc.h"
 #include "torrent.h"
 #include "torrentfs.h"
 }
@@ -1741,8 +1746,12 @@ int main(int argc, char* argv[])
     }
 
     ensureAppDataDir();
+    // https:// playback verifies against the same bundle as the app's own
+    // requests (app/http.cpp): the console mounts no CA store.
+    httpsrc_set_ca("romfs:/cacert.pem");
 
     config::load();
+    http::applyProxy();
     history::load();
     // Now, while nothing can be playing: a file fetched for the result being
     // played is only referenced once the player records it.
@@ -1806,6 +1815,12 @@ int main(int argc, char* argv[])
     // did this, but that front-end is no longer compiled, so curl was being used
     // (Stremio login) without ever being initialised.
     curl_global_init(CURL_GLOBAL_DEFAULT);
+
+#ifdef __SWITCH__
+    // Space Grotesk has no Cyrillic: in Russian the whole UI uses the system
+    // font (which has it) rather than mixing two typefaces in every label.
+    brls::SwitchFontLoader::useBundledFont = !i18n::needsSystemFont();
+#endif
 
     if (!brls::Application::init())
     {

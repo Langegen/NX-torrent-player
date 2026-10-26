@@ -12,4 +12,14 @@
 // Returns 0 on success. `tfs` must outlive the mpv instance.
 int stream_register(mpv_handle *mpv, torrentfs *tfs);
 
+// Registers `nxhttps://`: `loadfile nxhttps://host/path` plays
+// https://host/path, read through curl with range requests (httpsrc.c). This
+// FFmpeg build has no https protocol, so mpv cannot open such a URL itself;
+// plain http:// (and HLS over it) needs no help.
+int stream_register_http(mpv_handle *mpv);
+
+// Why the last nxhttps:// open failed ("" if it did not), for the player to
+// show: mpv itself only reports "loading failed".
+extern char stream_http_err[160];
+
 #endif
