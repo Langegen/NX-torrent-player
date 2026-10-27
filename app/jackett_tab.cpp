@@ -293,6 +293,22 @@ class JackettView
         }
     }
 
+  public:
+    // Starts on a query of someone else's choosing (the film card's
+    // "Torrents"): fills the search bar and runs it, so the results are the
+    // first thing on screen and the bar is still there to refine the query.
+    void startWith(const std::string& query, jackett::Category cat)
+    {
+        if (query.empty()) return;
+        searchQuery     = query;
+        currentCategory = cat;
+        barText->setText(query);
+        barText->setTextColor(theme::text());
+        updateCategoryButtonStyles();
+        runSearch();
+    }
+
+  private:
     void promptSearch()
     {
         brls::Application::getImeManager()->openForText(
@@ -849,4 +865,19 @@ brls::View* buildJackettTab()
     auto* root       = new JackettTabRoot();
     root->controller = std::make_shared<JackettView>(root);
     return root;
+}
+
+void openJackettSearch(const std::string& query, int category)
+{
+    auto* root       = new JackettTabRoot();
+    auto view        = std::make_shared<JackettView>(root);
+    root->controller = view;
+
+    auto* frame = new brls::AppletFrame(root);
+    frame->setTitle("Jackett");
+    brls::Application::pushActivity(new brls::Activity(frame));
+    // After the push: a search left unconfigured shows its setup prompt
+    // instead, which is the right answer there too.
+    if (!config::get().jackettUrl.empty())
+        view->startWith(query, (jackett::Category)category);
 }

@@ -59,8 +59,12 @@ jobs:
             switch-libmpv switch-curl switch-libwebp switch-mbedtls \
             switch-glfw switch-mesa
 
+      # TMDB_API_KEY (a repository secret, optional): the catalog key a release
+      # ships with. Without it users enter their own in Options -> Network.
       - name: Configure
-        run: cmake -B build -DPLATFORM_SWITCH=ON -DCMAKE_BUILD_TYPE=Release
+        env:
+          TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
+        run: cmake -B build -DPLATFORM_SWITCH=ON -DCMAKE_BUILD_TYPE=Release -DTMDB_API_KEY="$TMDB_API_KEY"
 
       - name: Build
         run: cmake --build build --target NX-torrent-player.nro -j "$(nproc)"

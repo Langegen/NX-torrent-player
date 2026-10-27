@@ -3,6 +3,7 @@
 #   test_suite   -- the torrent engine (pctest/test_suite.c)
 #   test_httpsrc -- HTTP range reads for https playback (pctest/test_httpsrc.c)
 #   test_net     -- TorrServer URLs and the proxy bypass (pctest/test_net.cpp)
+#   test_tmdb    -- TMDB answers and the JSON helpers (pctest/test_tmdb.cpp)
 #
 # Needs a C compiler and libcurl headers (Debian/Ubuntu: build-essential
 # libcurl4-openssl-dev; MSYS2/Cygwin: gcc libcurl-devel). No mbedtls: SHA-1
@@ -41,8 +42,17 @@ ${CXX:-g++} -O1 -g -Wall -std=c++17 \
     pctest/test_net.cpp \
     -o "$out/test_net"
 
+${CXX:-g++} -O1 -g -Wall -std=c++17 \
+    -DTMDB_NO_UI -Iapp \
+    app/tmdb.cpp \
+    app/json.cpp \
+    pctest/test_tmdb.cpp \
+    -o "$out/test_tmdb"
+
 "$out/test_suite"
 echo
 "$out/test_httpsrc"
 echo
 "$out/test_net"
+echo
+"$out/test_tmdb"

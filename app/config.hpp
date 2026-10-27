@@ -16,6 +16,7 @@ enum class Tab
     STREMIO = 1,
     JACKETT = 2,
     HISTORY = 3,
+    HOME    = 4,  // the TMDB catalog (home.cpp)
 };
 
 // The default UI sizes, named so the Options screen can mark them in the list.
@@ -27,7 +28,7 @@ constexpr int kDefaultHandheldUiWidth = 1280;
 struct Config
 {
     // Which category the browser opens on.
-    Tab startupTab = Tab::LOCAL;
+    Tab startupTab = Tab::HOME;
 
     // Writes the log to APPDATA_LOG. Off by default: it is unbuffered and the
     // engine dumps a [stats] line every 2s, so it writes to the SD card
@@ -130,6 +131,13 @@ struct Config
     // "http://host:3128", "socks5h://host:1080". Empty: direct. Addresses on
     // the local network (Jackett, TorrServer) never go through it.
     std::string proxyUrl = "";
+
+    // TMDB: the key (v3 key or v4 token; empty = the build's default, if
+    // any), and optional mirrors for the API and the images (empty = TMDB's
+    // own). See tmdb.hpp.
+    std::string tmdbApiKey = "";
+    std::string tmdbApiUrl = "";
+    std::string tmdbImageUrl = "";
 };
 
 // The live settings. Mutate, then call save().

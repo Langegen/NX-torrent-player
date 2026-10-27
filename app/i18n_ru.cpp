@@ -427,6 +427,61 @@ const Pair kRu[] = {
     { " – present", " – н. в." },
     { "Could not remove it", "Не удалось удалить" },
 
+    // ---- home (TMDB) ---------------------------------------------------------
+    { "Home", "Главная" },
+    { "Popular now", "Популярное сейчас" },
+    { "Popular movies", "Популярные фильмы" },
+    { "Popular shows", "Популярные сериалы" },
+    { "In cinemas", "Сейчас в кино" },
+    { "Top rated movies", "Лучшие фильмы" },
+    { "Top rated shows", "Лучшие сериалы" },
+    { "Watch", "Смотреть" },
+    { "Details", "Подробнее" },
+    { "The catalog needs a TMDB key", "Для каталога нужен ключ TMDB" },
+    { "Get a free API key at themoviedb.org (Settings -> API) and enter it in "
+      "Options -> Network. Where TMDB is blocked, set a proxy or a mirror there "
+      "too.",
+      "Получите бесплатный ключ API на themoviedb.org (Settings -> API) и "
+      "введите его в Настройки -> Сеть. Если TMDB заблокирован, там же укажите "
+      "прокси или зеркало." },
+
+    // ---- card ---------------------------------------------------------------
+    { "Torrents", "Торренты" },
+    { "Season", "Сезон" },
+    { "Watch S", "Смотреть С" },
+    { " E", " Э" },
+    { " min", " мин" },
+    { " h ", " ч " },
+    { "Seasons: ", "Сезонов: " },
+    { "Episodes: ", "Серий: " },
+    { "Starring: ", "В ролях: " },
+    { "Still loading, try again in a moment.",
+      "Данные ещё загружаются, попробуйте через секунду." },
+    { "Set up Jackett in Options to search torrents.",
+      "Настройте Jackett в настройках, чтобы искать торренты." },
+    { "To find sources, sign in to Stremio or set up Jackett in Options.",
+      "Чтобы найти источники, войдите в Stremio или настройте Jackett в "
+      "настройках." },
+
+    // ---- options: TMDB -------------------------------------------------------
+    { "API key", "Ключ API" },
+    { "TMDB API key", "Ключ API TMDB" },
+    { "API key (v3) or read access token (v4)",
+      "Ключ API (v3) или токен доступа (v4)" },
+    { "API address", "Адрес API" },
+    { "TMDB API address", "Адрес API TMDB" },
+    { "The catalog on the Home tab comes from TMDB. A free key is issued at "
+      "themoviedb.org (Settings -> API). Leave the address empty unless you use "
+      "a mirror. Changes apply when you reopen the Home tab.",
+      "Каталог на вкладке «Главная» берётся из TMDB. Бесплатный ключ выдают на "
+      "themoviedb.org (Settings -> API). Адрес оставьте пустым, если не "
+      "пользуетесь зеркалом. Изменения применятся, когда вы снова откроете "
+      "«Главную»." },
+    { "Enter the TMDB API key first.", "Сначала введите ключ API TMDB." },
+    { "empty answer", "пустой ответ" },
+    { "Clear TMDB cache", "Очистить кэш TMDB" },
+    { "TMDB cache cleared.", "Кэш TMDB очищен." },
+
     // ---- updater ------------------------------------------------------------
     { "unknown install path", "путь установки неизвестен" },
     { "no release found", "релиз не найден" },

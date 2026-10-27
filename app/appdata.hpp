@@ -26,6 +26,9 @@
 // resume later, and a single shared temp file made every entry open whichever
 // torrent was played last.
 #define APPDATA_JACKETT  APPDATA_DIR "/jackett"
+// TMDB answers, one .json per request (see tmdb.cpp): fresh copies replace
+// the network, stale ones stand in for it when it is down.
+#define APPDATA_TMDB     APPDATA_DIR "/tmdb"
 // Watch history and saved playback positions.
 #define APPDATA_HISTORY  APPDATA_DIR "/history.json"
 

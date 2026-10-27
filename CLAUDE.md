@@ -39,7 +39,9 @@ rewrites the container paths.
   loading screen + seek; torrents, direct http(s) links, TorrServer), `stremio`
   (API, library, artwork), `browse` (the Stremio drill-down), `settings`,
   `config` (config.json), `http` (curl + proxy), `torrserver`, `i18n` (+
-  `i18n_ru.cpp`, one table per language)
+  `i18n_ru.cpp`, one table per language), `home` (the TMDB home tab), `card`
+  (film/series card), `tmdb` (client + SD cache), `content` (the model the
+  catalog screens share), `widgets` (strips, poster/wide cards, chips, shades)
 - `engine/` — the torrent engine (C): `torrentfs` (piece picking, cache, the
   streaming read), `peer`, `swarm`, `torrent`, `udp_tracker`, `dht`, `magnet`,
   `stream` (the mpv `stream_cb` protocols: `torrent://` and `nxhttps://`),

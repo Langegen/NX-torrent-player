@@ -45,6 +45,7 @@
 #include "jackett_tab.hpp"
 #include "history.hpp"
 #include "history_tab.hpp"
+#include "home.hpp"
 
 extern "C" {
 #include "httpsrc.h"
@@ -1294,6 +1295,8 @@ brls::View* buildTab(config::Tab tab)
         return buildJackettTab();
     if (tab == config::Tab::HISTORY)
         return buildHistoryTab();
+    if (tab == config::Tab::HOME)
+        return buildHomeTab();
     return buildLocalTab();
 }
 
@@ -1327,6 +1330,7 @@ void attachTopTabBar(brls::AppletFrame* frame, brls::Box* content)
     // Rebuilt on every switch: TabFrame frees the old tab before making the new
     // one, and so must we -- two live StremioTabs would each hold their own
     // library and in-flight requests.
+    auto* homeBtn    = new brls::Button();
     auto* localBtn   = new brls::Button();
     auto* stremioBtn = new brls::Button();
     auto* jackettBtn = new brls::Button();
@@ -1339,7 +1343,10 @@ void attachTopTabBar(brls::AppletFrame* frame, brls::Box* content)
     // The style carries the accent: a Button copies it out of the theme when a
     // style is applied and keeps it, so this has to be re-run (not the tab
     // rebuilt) when the colour changes.
-    auto restyleTabs = [localBtn, stremioBtn, jackettBtn, historyBtn, curTab]() {
+    auto restyleTabs = [homeBtn, localBtn, stremioBtn, jackettBtn, historyBtn, curTab]() {
+        homeBtn->setStyle(*curTab == config::Tab::HOME
+                              ? &brls::BUTTONSTYLE_PRIMARY
+                              : &brls::BUTTONSTYLE_BORDERLESS);
         localBtn->setStyle(*curTab == config::Tab::LOCAL
                                ? &brls::BUTTONSTYLE_PRIMARY
                                : &brls::BUTTONSTYLE_BORDERLESS);
@@ -1354,8 +1361,8 @@ void attachTopTabBar(brls::AppletFrame* frame, brls::Box* content)
                                  : &brls::BUTTONSTYLE_BORDERLESS);
     };
 
-    auto select = [content, localBtn, stremioBtn, jackettBtn, historyBtn, frame, curTab,
-                   restyleTabs](config::Tab tab) {
+    auto select = [content, homeBtn, localBtn, stremioBtn, jackettBtn, historyBtn, frame,
+                   curTab, restyleTabs](config::Tab tab) {
         *curTab = tab;
         restyleTabs();
         // L and R only cycle the Stremio views, so the "View" chip has no
@@ -1376,7 +1383,8 @@ void attachTopTabBar(brls::AppletFrame* frame, brls::Box* content)
         // sits under two more boxes than the local list) never hands it over.
         brls::Button* active = tab == config::Tab::STREMIO ? stremioBtn :
                                (tab == config::Tab::JACKETT ? jackettBtn :
-                               (tab == config::Tab::HISTORY ? historyBtn : localBtn));
+                               (tab == config::Tab::HISTORY ? historyBtn :
+                               (tab == config::Tab::HOME ? homeBtn : localBtn)));
         v->registerAction(
             tr("Back"), brls::BUTTON_B,
             [active](brls::View*) {
@@ -1386,9 +1394,18 @@ void attachTopTabBar(brls::AppletFrame* frame, brls::Box* content)
             false, false, brls::SOUND_BACK);
     };
 
+    // Home first: it is where the app opens (the roadmap's main screen).
+    homeBtn->setText(tr("Home"));
+    homeBtn->setStyle(&brls::BUTTONSTYLE_BORDERLESS);
+    homeBtn->setMarginLeft(8.0f);
+    homeBtn->registerClickAction([select](brls::View*) {
+        select(config::Tab::HOME);
+        return true;
+    });
+    bar->addView(homeBtn);
+
     stremioBtn->setText(tr("Stremio"));
     stremioBtn->setStyle(&brls::BUTTONSTYLE_BORDERLESS);
-    stremioBtn->setMarginLeft(8.0f);
     stremioBtn->registerClickAction([select](brls::View*) {
         select(config::Tab::STREMIO);
         return true;

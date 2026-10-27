@@ -36,4 +36,12 @@ std::vector<std::string> objects(const std::string& body, const char* key);
 // The plain strings of an array like "types":["movie","series"].
 std::vector<std::string> strings(const std::string& body, const char* key);
 
+// `obj` (one JSON object) with the contents of every nested object and array
+// emptied, so the lookups above can only find the object's own keys -- TMDB's
+// "name" turns up inside "created_by" and "genres" before the show's own.
+std::string topLevel(const std::string& obj);
+
+// The text of the object at `key` ("external_ids": {...}), or "".
+std::string object(const std::string& body, const char* key);
+
 } // namespace json

@@ -38,6 +38,7 @@
 #include "http.hpp"
 #include "json.hpp"
 #include "theme.hpp"
+#include "widgets.hpp"
 #include "i18n.hpp"
 
 namespace
@@ -3567,86 +3568,6 @@ NVGcolor tabBgAt(float px, float py)
     return nvgRGBAf(a.r + (b.r - a.r) * t, a.g + (b.g - a.g) * t,
                     a.b + (b.b - a.b) * t, 1.0f);
 }
-
-// A strip that fades its cards out at whichever edge still has content beyond
-// it, so they dissolve into the background instead of being cut off -- the same
-// treatment the episode and addon scrollers get. The scrim is the background
-// colour sampled AT the edge, fading to transparent inward; an edge with
-// nothing past it is left alone, so the first card at rest is never dimmed.
-class FadeStrip : public brls::HScrollingFrame
-{
-  public:
-    void setContentView(brls::View* view)
-    {
-        content = view;
-        brls::HScrollingFrame::setContentView(view);
-    }
-
-    void draw(NVGcontext* vg, float x, float y, float w, float h,
-              brls::Style style, brls::FrameContext* ctx) override
-    {
-        brls::HScrollingFrame::draw(vg, x, y, w, h, style, ctx);
-
-        const float fade = 64.0f;
-        float offset     = getContentOffsetX();
-        float rightLimit = content ? content->getWidth() - w : 0.0f;
-        float midY       = y + h * 0.5f;
-
-        if (offset > 2.0f)  // scrolled: cards run off the left
-        {
-            NVGcolor edge = tabBgAt(x, midY);
-            NVGcolor gone = edge;
-            gone.a        = 0.0f;
-            nvgBeginPath(vg);
-            nvgRect(vg, x, y, fade, h);
-            nvgFillPaint(vg, nvgLinearGradient(vg, x, y, x + fade, y, edge, gone));
-            nvgFill(vg);
-        }
-        if (offset < rightLimit - 2.0f)  // more cards off the right
-        {
-            NVGcolor edge = tabBgAt(x + w, midY);
-            NVGcolor gone = edge;
-            gone.a        = 0.0f;
-            nvgBeginPath(vg);
-            nvgRect(vg, x + w - fade, y, fade, h);
-            nvgFillPaint(vg,
-                         nvgLinearGradient(vg, x + w - fade, y, x + w, y, gone, edge));
-            nvgFill(vg);
-        }
-    }
-
-  private:
-    brls::View* content = nullptr;
-};
-
-// A poster with only its top corners rounded: it meets the card's footer flush,
-// and a rounded bottom edge cut two notches of card background out of the
-// artwork. brls::Image rounds all four corners, so this repeats its draw with a
-// varying-radius rect -- everything it needs is protected, not private.
-class TopRoundedImage : public brls::Image
-{
-  public:
-    void draw(NVGcontext* vg, float x, float y, float w, float h,
-              brls::Style style, brls::FrameContext* ctx) override
-    {
-        if (this->texture == 0) return;
-
-        float ix = x + this->imageX;
-        float iy = y + this->imageY;
-        this->paint.xform[4] = ix;
-        this->paint.xform[5] = iy;
-
-        float r = this->getCornerRadius();
-        nvgBeginPath(vg);
-        if (this->getClipsToBounds())
-            nvgRoundedRectVarying(vg, x, y, w, h, r, r, 0.0f, 0.0f);
-        else
-            nvgRoundedRectVarying(vg, ix, iy, this->imageWidth,
-                                  this->imageHeight, r, r, 0.0f, 0.0f);
-        nvgFillPaint(vg, a(this->paint));
-        nvgFill(vg);
-    }
-};
 
 // The card's panel: the surface the title, the meta line and the progress bar
 // sit on. It drops its own fill while the row is focused -- the cursor draws a

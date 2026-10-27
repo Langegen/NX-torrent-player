@@ -242,14 +242,18 @@ void load()
     while ((n = std::fread(buf, 1, sizeof(buf), f)) > 0) body.append(buf, n);
     std::fclose(f);
 
-    std::string sTab = readStr(body, "startupTab", "local");
+    std::string sTab = readStr(body, "startupTab", "home");
     cfg.startupTab = (sTab == "stremio") ? Tab::STREMIO :
                      (sTab == "jackett") ? Tab::JACKETT :
-                     (sTab == "history") ? Tab::HISTORY : Tab::LOCAL;
+                     (sTab == "history") ? Tab::HISTORY :
+                     (sTab == "home")    ? Tab::HOME : Tab::LOCAL;
     cfg.jackettUrl    = readStr(body, "jackettUrl", cfg.jackettUrl);
     cfg.jackettApiKey = readStr(body, "jackettApiKey", cfg.jackettApiKey);
     cfg.torrServerUrl = readStr(body, "torrServerUrl", cfg.torrServerUrl);
     cfg.proxyUrl      = readStr(body, "proxyUrl", cfg.proxyUrl);
+    cfg.tmdbApiKey    = readStr(body, "tmdbApiKey", cfg.tmdbApiKey);
+    cfg.tmdbApiUrl    = readStr(body, "tmdbApiUrl", cfg.tmdbApiUrl);
+    cfg.tmdbImageUrl  = readStr(body, "tmdbImageUrl", cfg.tmdbImageUrl);
     cfg.logging = readBool(body, "logging", cfg.logging);
     cfg.hide4k  = readBool(body, "hide4k", cfg.hide4k);
     cfg.rateGovernor = readBool(body, "rateGovernor", cfg.rateGovernor);
@@ -289,7 +293,8 @@ bool save()
     }
     const char* sTabStr = (cfg.startupTab == Tab::STREMIO) ? "stremio" :
                           (cfg.startupTab == Tab::JACKETT) ? "jackett" :
-                          (cfg.startupTab == Tab::HISTORY) ? "history" : "local";
+                          (cfg.startupTab == Tab::HISTORY) ? "history" :
+                          (cfg.startupTab == Tab::HOME)    ? "home" : "local";
     std::fprintf(f,
                  "{\n"
                  "  \"startupTab\": \"%s\",\n"
@@ -297,6 +302,9 @@ bool save()
                  "  \"jackettApiKey\": \"%s\",\n"
                  "  \"torrServerUrl\": \"%s\",\n"
                  "  \"proxyUrl\": \"%s\",\n"
+                 "  \"tmdbApiKey\": \"%s\",\n"
+                 "  \"tmdbApiUrl\": \"%s\",\n"
+                 "  \"tmdbImageUrl\": \"%s\",\n"
                  "  \"logging\": %s,\n"
                  "  \"hide4k\": %s,\n"
                  "  \"rateGovernor\": %s,\n"
@@ -319,6 +327,9 @@ bool save()
                  cfg.jackettApiKey.c_str(),
                  cfg.torrServerUrl.c_str(),
                  cfg.proxyUrl.c_str(),
+                 cfg.tmdbApiKey.c_str(),
+                 cfg.tmdbApiUrl.c_str(),
+                 cfg.tmdbImageUrl.c_str(),
                  cfg.logging ? "true" : "false", cfg.hide4k ? "true" : "false",
                  cfg.rateGovernor ? "true" : "false",
                  cfg.ramStream ? "true" : "false",

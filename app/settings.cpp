@@ -18,6 +18,7 @@
 #include "jackett.hpp"
 #include "http.hpp"
 #include "torrserver.hpp"
+#include "tmdb.hpp"
 #include "theme.hpp"
 #include "update.hpp"
 #include "stremio.hpp"
@@ -149,13 +150,16 @@ brls::View* generalPane()
     auto* startup = new brls::SelectorCell();
     int curStartupIdx = (cfg.startupTab == config::Tab::STREMIO) ? 1 :
                         (cfg.startupTab == config::Tab::JACKETT) ? 2 :
-                        (cfg.startupTab == config::Tab::HISTORY) ? 3 : 0;
-    startup->init(tr("Category on startup"), { tr("Local"), tr("Stremio"), "Jackett", tr("History") },
+                        (cfg.startupTab == config::Tab::HISTORY) ? 3 :
+                        (cfg.startupTab == config::Tab::HOME)    ? 4 : 0;
+    startup->init(tr("Category on startup"),
+                  { tr("Local"), tr("Stremio"), "Jackett", tr("History"), tr("Home") },
                   curStartupIdx, [](int sel) {
                       config::get().startupTab =
                           (sel == 1) ? config::Tab::STREMIO :
                           (sel == 2) ? config::Tab::JACKETT :
-                          (sel == 3) ? config::Tab::HISTORY : config::Tab::LOCAL;
+                          (sel == 3) ? config::Tab::HISTORY :
+                          (sel == 4) ? config::Tab::HOME : config::Tab::LOCAL;
                       config::save();
                   });
     list->addView(startup);
@@ -599,6 +603,88 @@ brls::View* networkPane()
     list->addView(caption(
         tr("Used for catalogs, addons, posters and https video links. Servers on "
            "your local network (Jackett, TorrServer) are always reached directly.")));
+
+    auto* thdr = new brls::Header();
+    thdr->setTitle("TMDB");
+    list->addView(thdr);
+
+    auto maskKey = [](const std::string& k) -> std::string {
+        if (k.empty()) return tr("Not set");
+        if (k.size() <= 8) return "********";
+        return k.substr(0, 4) + "..." + k.substr(k.size() - 4);
+    };
+    auto* tmdbKey = new brls::DetailCell();
+    tmdbKey->setText(tr("API key"));
+    tmdbKey->setDetailText(maskKey(cfg.tmdbApiKey));
+    tmdbKey->registerClickAction([tmdbKey, maskKey](brls::View*) {
+        brls::Application::getImeManager()->openForText(
+            [tmdbKey, maskKey](std::string out) {
+                while (!out.empty() && out.back() == ' ') out.pop_back();
+                config::get().tmdbApiKey = out;
+                config::save();
+                tmdbKey->setDetailText(maskKey(out));
+            },
+            tr("TMDB API key"), tr("API key (v3) or read access token (v4)"), 512,
+            config::get().tmdbApiKey);
+        return true;
+    });
+    list->addView(tmdbKey);
+
+    auto* tmdbUrl = new brls::DetailCell();
+    tmdbUrl->setText(tr("API address"));
+    tmdbUrl->setDetailText(cfg.tmdbApiUrl.empty() ? "api.themoviedb.org" : cfg.tmdbApiUrl);
+    tmdbUrl->registerClickAction([tmdbUrl](brls::View*) {
+        brls::Application::getImeManager()->openForText(
+            [tmdbUrl](std::string out) {
+                while (!out.empty() && (out.back() == ' ' || out.back() == '/')) out.pop_back();
+                config::get().tmdbApiUrl = out;
+                config::save();
+                tmdbUrl->setDetailText(out.empty() ? "api.themoviedb.org" : out);
+            },
+            tr("TMDB API address"), "https://api.themoviedb.org/3", 256,
+            config::get().tmdbApiUrl);
+        return true;
+    });
+    list->addView(tmdbUrl);
+    list->addView(caption(
+        tr("The catalog on the Home tab comes from TMDB. A free key is issued at "
+           "themoviedb.org (Settings -> API). Leave the address empty unless you use "
+           "a mirror. Changes apply when you reopen the Home tab.")));
+
+    auto* tmdbTest = new brls::Button();
+    tmdbTest->setText(tr("Test connection"));
+    tmdbTest->setMargins(14.0f, 20.0f, 6.0f, 20.0f);
+    tmdbTest->registerClickAction([tmdbTest](brls::View*) {
+        if (!tmdb::configured())
+        {
+            note(tr("Enter the TMDB API key first."));
+            return true;
+        }
+        tmdbTest->setState(brls::ButtonState::DISABLED);
+        tmdbTest->setText(tr("Testing..."));
+        // A cleared cache makes it a real request rather than a stored answer.
+        tmdb::clearCache();
+        tmdb::fetchRowAsync(tmdb::Row::Trending, [tmdbTest](tmdb::ListResult r) {
+            tmdbTest->setState(brls::ButtonState::ENABLED);
+            tmdbTest->setText(tr("Test connection"));
+            if (r.ok && !r.items.empty())
+                note(tr("Connection successful!"));
+            else
+                note(tr("Connection failed: ") + (r.error.empty() ? tr("empty answer") : r.error));
+        });
+        return true;
+    });
+    list->addView(tmdbTest);
+
+    auto* tmdbClear = new brls::Button();
+    tmdbClear->setText(tr("Clear TMDB cache"));
+    tmdbClear->setMargins(6.0f, 20.0f, 18.0f, 20.0f);
+    tmdbClear->registerClickAction([](brls::View*) {
+        tmdb::clearCache();
+        note(tr("TMDB cache cleared."));
+        return true;
+    });
+    list->addView(tmdbClear);
 
     return pane;
 }
