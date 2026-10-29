@@ -967,6 +967,11 @@ class SourcesView : public brls::Box
 
 } // namespace
 
+PlayHint episodeHint(const content::Item& item, int season, int episode, int nextPop)
+{
+    return hintFor(item, season, episode, 0, nextPop);
+}
+
 void openSourcesScreen(const content::Item& item, int season, int episode,
                        int episodesInSeason)
 {

@@ -86,4 +86,10 @@ std::vector<int> yearsIn(const std::string& name);
 // ("Season 1/..."). -1 when none, or when two files match equally.
 int matchEpisode(const std::vector<std::string>& paths, int season, int episode);
 
+// The other way round: which episode a torrent file is, by its name (same
+// forms as above), for a file picked by hand from a pack. `packSeason` stands
+// in when neither the name nor its folders give a season (0 = unknown).
+// false when no episode is named, or no season is known.
+bool episodeOfFile(const std::string& path, int packSeason, int& season, int& episode);
+
 } // namespace release

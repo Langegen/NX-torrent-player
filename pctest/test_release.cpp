@@ -158,6 +158,16 @@ static void test_match_episode()
 
     std::vector<std::string> ambiguous = { "a/E05.mkv", "b/E05.mkv" };
     CHECK(release::matchEpisode(ambiguous, 1, 5) == -1);
+
+    // A file picked by hand: which episode it is.
+    int s = 0, e = 0;
+    CHECK(release::episodeOfFile(pack[2], 0, s, e) && s == 1 && e == 6);
+    CHECK(release::episodeOfFile(seasons[1], 0, s, e) && s == 2 && e == 5);
+    CHECK(release::episodeOfFile(russian[1], 0, s, e) && s == 1 && e == 2);
+    // No season in the name: the pack's own.
+    CHECK(release::episodeOfFile(numbered[2], 3, s, e) && s == 3 && e == 10);
+    CHECK(!release::episodeOfFile(numbered[2], 0, s, e));
+    CHECK(!release::episodeOfFile(pack[3], 1, s, e));  // a sample, no episode
     std::printf("      PASSED\n");
 }
 

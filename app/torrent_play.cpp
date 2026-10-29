@@ -12,6 +12,7 @@
 #include "browse.hpp"   // ListActivity, Row, naturalCompare, pickerNames
 #include "i18n.hpp"
 #include "release.hpp"  // matchEpisode
+#include "sources.hpp"  // episodeHint
 #include "workers.hpp"
 
 extern "C" {
@@ -192,6 +193,23 @@ void playWithVideos(const PlayHint& h, const std::string& source,
             // A file picked by hand: its own name is the better title.
             PlayHint picked = hint;
             if (hint.episode <= 0) picked.title = vids[i].name;
+            // This list stays under the player: the next episode closes it too.
+            picked.watch.nextPop = hint.watch.nextPop + 1;
+            // A catalog show's pack opened for the whole season ("Torrents"
+            // on the card): which episode this is, from the file's name, so
+            // its progress is that episode's and the next one follows --
+            // instead of the show's progress as if it were a film.
+            const content::Item& show = hint.watch.content;
+            int s = 0, e = 0;
+            if (show.tmdbId > 0 && show.isSeries() && hint.episode <= 0 &&
+                release::episodeOfFile(vids[i].path, hint.season, s, e))
+            {
+                brls::Logger::info("[play] picked file {} is S{}E{}", vids[i].index, s, e);
+                PlayHint ep   = episodeHint(show, s, e, picked.watch.nextPop);
+                ep.sourceType = hint.sourceType;
+                ep.art        = hint.art;
+                picked        = ep;
+            }
             start(picked, source, vids[i]);
         }));
 }

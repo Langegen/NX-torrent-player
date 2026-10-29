@@ -2,6 +2,7 @@
 
 #include "content.hpp"
 #include "library.hpp"
+#include "torrent_play.hpp"  // PlayHint
 
 // The sources screen (roadmap mock-up "Выбор раздачи"): every release found
 // for a film or an episode, from Jackett (searched by the title and by the
@@ -22,6 +23,11 @@
 // show's card).
 void openSourcesScreen(const content::Item& item, int season, int episode,
                        int episodesInSeason = 0);
+
+// What the player is told for one episode of a catalog show: its title, its
+// art, progress against that episode, the next one. For a file picked by hand
+// from a pack opened for the whole season (torrent_play.cpp).
+PlayHint episodeHint(const content::Item& item, int season, int episode, int nextPop);
 
 // The next episode of a show: from the same season pack when the last episode
 // came from one that holds it (no list to pick from), else its sources screen.

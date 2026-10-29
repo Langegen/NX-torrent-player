@@ -617,4 +617,16 @@ int matchEpisode(const std::vector<std::string>& paths, int season, int episode)
     return tie ? -1 : best;
 }
 
+bool episodeOfFile(const std::string& path, int packSeason, int& season, int& episode)
+{
+    int s = -1, e = -1;
+    fileScope(path, s, e);
+    if (e <= 0) return false;
+    if (s <= 0) s = packSeason;
+    if (s <= 0) return false;
+    season  = s;
+    episode = e;
+    return true;
+}
+
 } // namespace release
