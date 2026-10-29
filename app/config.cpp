@@ -256,6 +256,7 @@ void load()
                      (sTab == "bookmarks") ? Tab::BOOKMARKS : Tab::LOCAL;
     cfg.jackettUrl    = readStr(body, "jackettUrl", cfg.jackettUrl);
     cfg.jackettApiKey = readStr(body, "jackettApiKey", cfg.jackettApiKey);
+    cfg.jackettSetupAsked = readBool(body, "jackettSetupAsked", cfg.jackettSetupAsked);
     cfg.torrServerUrl = readStr(body, "torrServerUrl", cfg.torrServerUrl);
     cfg.proxyUrl      = readStr(body, "proxyUrl", cfg.proxyUrl);
     cfg.tmdbApiKey    = readStr(body, "tmdbApiKey", cfg.tmdbApiKey);
@@ -308,6 +309,7 @@ bool save()
                  "  \"startupTab\": \"%s\",\n"
                  "  \"jackettUrl\": \"%s\",\n"
                  "  \"jackettApiKey\": \"%s\",\n"
+                 "  \"jackettSetupAsked\": %s,\n"
                  "  \"torrServerUrl\": \"%s\",\n"
                  "  \"proxyUrl\": \"%s\",\n"
                  "  \"tmdbApiKey\": \"%s\",\n"
@@ -333,6 +335,7 @@ bool save()
                  sTabStr,
                  cfg.jackettUrl.c_str(),
                  cfg.jackettApiKey.c_str(),
+                 cfg.jackettSetupAsked ? "true" : "false",
                  cfg.torrServerUrl.c_str(),
                  cfg.proxyUrl.c_str(),
                  cfg.tmdbApiKey.c_str(),

@@ -136,8 +136,9 @@ bool postJson(const char* url, const std::string& body, std::string& resp,
 // to answer with WebP -- which stb_image (nanovg's decoder) cannot read, so the
 // poster silently never appeared.
 bool get(const std::string& url, std::string& resp, std::string& err,
-         const char* accept, long timeoutSec)
+         const char* accept, long timeoutSec, long* status)
 {
+    if (status) *status = 0;
     CURL* curl = curl_easy_init();
     if (!curl)
     {
@@ -161,6 +162,7 @@ bool get(const std::string& url, std::string& resp, std::string& err,
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
     verifyTls(curl, url);
     CURLcode rc = curl_easy_perform(curl);
+    if (status) curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, status);
     if (hdrs) curl_slist_free_all(hdrs);
     curl_easy_cleanup(curl);
     if (rc != CURLE_OK)

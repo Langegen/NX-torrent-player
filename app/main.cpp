@@ -52,6 +52,7 @@
 #include "http.hpp"
 #include "jackett.hpp"
 #include "jackett_tab.hpp"
+#include "setup.hpp"
 #include "history.hpp"
 #include "history_tab.hpp"
 #include "bookmarks.hpp"
@@ -1993,6 +1994,8 @@ int main(int argc, char* argv[])
     brls::Application::getWindowSizeChangedEvent()->subscribe(applyUiScale);
 
     brls::Application::pushActivity(new brls::Activity(buildBrowser()));
+    // First run without Jackett: its setup on top, once.
+    maybeOfferJackettSetup();
 
     // A quiet check: it only ever surfaces when there IS a newer release, so a
     // missing network or an unreachable GitHub costs nothing but a log line.

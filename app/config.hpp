@@ -124,6 +124,9 @@ struct Config
     // Jackett server configuration
     std::string jackettUrl = "";
     std::string jackettApiKey = "";
+    // The first-run Jackett setup has been shown (finished or skipped): it is
+    // offered once, then only Options -> Jackett.
+    bool jackettSetupAsked = false;
 
     // TorrServer ("http://192.168.1.10:8090"). Set: torrents are streamed by
     // that server and played here as plain HTTP, instead of by the on-device

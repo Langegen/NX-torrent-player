@@ -6,6 +6,7 @@
 #   test_tmdb    -- TMDB answers and the JSON helpers (pctest/test_tmdb.cpp)
 #   test_release -- release names, ranking, episode files (pctest/test_release.cpp)
 #   test_library -- the library's JSON, Continue, import merge (pctest/test_library.cpp)
+#   test_jackett -- Jackett errors explained, typed addresses (pctest/test_jackett.cpp)
 #
 # Needs a C compiler and libcurl headers (Debian/Ubuntu: build-essential
 # libcurl4-openssl-dev; MSYS2/Cygwin: gcc libcurl-devel). No mbedtls: SHA-1
@@ -64,6 +65,13 @@ ${CXX:-g++} -O1 -g -Wall -std=c++17 \
     pctest/test_library.cpp \
     -o "$out/test_library"
 
+${CXX:-g++} -O1 -g -Wall -std=c++17 \
+    -Iapp \
+    app/jackett_diag.cpp \
+    app/json.cpp \
+    pctest/test_jackett.cpp \
+    -o "$out/test_jackett"
+
 "$out/test_suite"
 echo
 "$out/test_httpsrc"
@@ -75,3 +83,5 @@ echo
 "$out/test_release"
 echo
 "$out/test_library"
+echo
+"$out/test_jackett"

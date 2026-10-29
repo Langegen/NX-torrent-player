@@ -49,6 +49,30 @@ std::string sanitizeFilename(const std::string& name)
     return out;
 }
 
+// The releases of a search answer, most seeded first.
+std::vector<Item> parseResults(const std::string& resp)
+{
+    std::vector<Item> items;
+    for (const auto& obj : json::objects(resp, "Results"))
+    {
+        Item it;
+        it.title = json::str(obj, "Title");
+        if (it.title.empty()) continue;
+        it.tracker = json::str(obj, "Tracker");
+        if (it.tracker.empty()) it.tracker = json::str(obj, "TrackerId");
+        it.size         = json::integer(obj, "Size");
+        it.seeders      = (int)json::integer(obj, "Seeders");
+        it.peers        = (int)json::integer(obj, "Peers");
+        it.publishDate  = json::str(obj, "PublishDate");
+        it.magnetUri    = json::str(obj, "MagnetUri");
+        it.link         = json::str(obj, "Link");
+        it.categoryDesc = json::str(obj, "CategoryDesc");
+        items.push_back(std::move(it));
+    }
+    sortItems(items, SortBy::SEEDERS);
+    return items;
+}
+
 bool appendMagnetToFile(const std::string& path, const std::string& magnet)
 {
     FILE* f = std::fopen(path.c_str(), "a+");
@@ -168,79 +192,37 @@ void searchAsync(const std::string& query, Category category,
     // on the SD card that people attach to bug reports.
     brls::Logger::info("[jackett] querying {} for \"{}\"", base, query);
 
-    brls::async([url, cb]() {
+    brls::async([url, cb, base]() {
         std::string resp, err;
-        bool ok = http::get(url, resp, err);
-        if (!ok)
+        long status = 0;
+        Diagnosis d;
+        std::vector<Item> items;
+        if (!http::get(url, resp, err, nullptr, 25, &status))
         {
             brls::Logger::error("[jackett] http request failed: {}", err);
-            brls::sync([cb, err]() {
-                SearchResult r;
-                r.ok    = false;
-                r.error = err;
-                cb(std::move(r));
-            });
-            return;
+            d = diagnoseTransport(err);
         }
-
-        std::vector<std::string> rawObjects = json::objects(resp, "Results");
-        if (rawObjects.empty())
+        else
         {
-            std::string apiErr = json::str(resp, "error");
-            if (apiErr.empty())
-                apiErr = json::str(resp, "message");
-            if (!apiErr.empty())
-            {
-                brls::Logger::error("[jackett] api error: {}", apiErr);
-                brls::sync([cb, apiErr]() {
-                    SearchResult r;
-                    r.ok    = false;
-                    r.error = apiErr;
-                    cb(std::move(r));
-                });
-                return;
-            }
-
-            if (resp.find("\"Results\"") == std::string::npos &&
-                resp.find("\"Indexers\"") == std::string::npos)
-            {
-                brls::Logger::error("[jackett] invalid response: {}", resp.substr(0, 120));
-                brls::sync([cb]() {
-                    SearchResult r;
-                    r.ok    = false;
-                    r.error = tr("Invalid response from Jackett server");
-                    cb(std::move(r));
-                });
-                return;
-            }
+            d = diagnoseAnswer(status, resp, true);
+            if (d.problem != Problem::None)
+                brls::Logger::error("[jackett] bad answer (HTTP {}): {}", status,
+                                    resp.substr(0, 160));
+            else
+                items = parseResults(resp);
+            if (d.failed > 0)
+                brls::Logger::warning("[jackett] {} of {} indexers failed, first: {}",
+                                      d.failed, d.indexers, d.detail);
         }
-
-        std::vector<Item> items;
-        items.reserve(rawObjects.size());
-        for (const auto& obj : rawObjects)
-        {
-            Item it;
-            it.title = json::str(obj, "Title");
-            if (it.title.empty()) continue;
-            it.tracker = json::str(obj, "Tracker");
-            if (it.tracker.empty()) it.tracker = json::str(obj, "TrackerId");
-            it.size         = json::integer(obj, "Size");
-            it.seeders      = (int)json::integer(obj, "Seeders");
-            it.peers        = (int)json::integer(obj, "Peers");
-            it.publishDate  = json::str(obj, "PublishDate");
-            it.magnetUri    = json::str(obj, "MagnetUri");
-            it.link         = json::str(obj, "Link");
-            it.categoryDesc = json::str(obj, "CategoryDesc");
-            items.push_back(std::move(it));
-        }
-
         brls::Logger::info("[jackett] search returned {} items", items.size());
-        sortItems(items, SortBy::SEEDERS);
 
-        brls::sync([cb, items = std::move(items)]() mutable {
+        brls::sync([cb, d, base, items = std::move(items)]() mutable {
             SearchResult r;
-            r.ok    = true;
-            r.items = std::move(items);
+            r.ok = d.problem == Problem::None;
+            if (r.ok)
+                r.items = std::move(items);
+            else
+                r.error = explain(d, base);
             cb(std::move(r));
         });
     });
@@ -259,33 +241,66 @@ void testConnectionAsync(const std::string& url, const std::string& apiKey,
 
     brls::Logger::info("[jackett] testing connection to {}", base);
 
-    brls::async([testUrl, cb]() {
+    brls::async([testUrl, cb, base]() {
         std::string resp, err;
-        bool ok = http::get(testUrl, resp, err);
-        if (!ok)
-        {
-            brls::sync([cb, err]() { cb(false, err); });
-            return;
-        }
-
-        std::string apiErr = json::str(resp, "error");
-        if (apiErr.empty())
-            apiErr = json::str(resp, "message");
-        if (!apiErr.empty())
-        {
-            brls::sync([cb, apiErr]() { cb(false, apiErr); });
-            return;
-        }
-
-        if (resp.find("\"Results\"") == std::string::npos &&
-            resp.find("\"Indexers\"") == std::string::npos)
-        {
-            brls::sync([cb]() { cb(false, tr("Invalid response from server. Check URL and API key.")); });
-            return;
-        }
-
-        brls::sync([cb]() { cb(true, ""); });
+        long status = 0;
+        Diagnosis d = http::get(testUrl, resp, err, nullptr, 25, &status)
+                          ? diagnoseAnswer(status, resp, false)
+                          : diagnoseTransport(err);
+        brls::sync([cb, d, base]() {
+            if (d.problem != Problem::None)
+            {
+                cb(false, explain(d, base));
+                return;
+            }
+            // Working: say how many indexers it has, and how many of them
+            // failed this time (a tracker down, a login expired).
+            std::string msg = tr("Jackett works. Indexers: ") + std::to_string(d.indexers);
+            if (d.failed > 0)
+                msg += tr(", with errors: ") + std::to_string(d.failed) + "\n" + d.detail;
+            cb(true, msg);
+        });
     });
+}
+
+std::string explain(const Diagnosis& d, const std::string& base)
+{
+    switch (d.problem)
+    {
+        case Problem::None:
+            return "";
+        case Problem::BadUrl:
+            return tr("The Jackett address is not a valid URL. Enter it like "
+                      "http://192.168.1.100:9117.");
+        case Problem::NoHost:
+            return tr("The Jackett address does not resolve. Check its spelling, or use "
+                      "the computer's IP address (like http://192.168.1.100:9117).");
+        case Problem::Unreachable:
+            return tr("Nothing answers at ") + base +
+                   tr(". Check that Jackett is running, that the console is on the same "
+                      "network, and the port (9117 by default).");
+        case Problem::Timeout:
+            return tr("Jackett did not answer in time. Indexers can be slow: try again, "
+                      "and if it keeps happening, check the network.");
+        case Problem::Certificate:
+            return tr("Secure connection to Jackett failed: ") + d.detail;
+        case Problem::BadKey:
+            return tr("Jackett rejected the API key. Copy it from the top right corner of "
+                      "the Jackett web page into Options, Jackett.");
+        case Problem::NotJackett:
+            return tr("Something answers at this address, but not Jackett's API. Check "
+                      "the port (9117 by default) and the API key.");
+        case Problem::NoIndexers:
+            return tr("Jackett works, but has no indexers. Add trackers with \"Add "
+                      "indexer\" on the Jackett web page.");
+        case Problem::IndexersFailed:
+            return tr("Every Jackett indexer returned an error. Check them on the Jackett "
+                      "web page.") + std::string("\n") + d.detail;
+        case Problem::Other:
+            break;
+    }
+    return d.detail.empty() ? std::string(tr("Invalid response from Jackett server"))
+                            : d.detail;
 }
 
 void downloadTorrentAsync(const std::string& link, const std::string& destPath,

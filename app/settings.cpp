@@ -463,6 +463,7 @@ brls::View* jackettPane()
     urlCell->registerClickAction([urlCell](brls::View*) {
         brls::Application::getImeManager()->openForText(
             [urlCell](std::string out) {
+                out = jackett::normalizeUrl(out);  // "192.168.1.5" -> http://...:9117
                 config::get().jackettUrl = out;
                 config::save();
                 urlCell->setDetailText(out.empty() ? tr("Not set") : out);
@@ -514,10 +515,8 @@ brls::View* jackettPane()
             [testBtn](bool ok, const std::string& msg) {
                 testBtn->setState(brls::ButtonState::ENABLED);
                 testBtn->setText(tr("Test connection"));
-                if (ok)
-                    note(tr("Connection successful!"));
-                else
-                    note(tr("Connection failed: ") + msg);
+                // Either way the message says what was found or what to fix.
+                note(ok ? msg : tr("Connection failed: ") + msg);
             });
         return true;
     });

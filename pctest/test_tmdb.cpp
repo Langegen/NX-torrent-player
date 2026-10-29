@@ -24,7 +24,7 @@
 
 namespace http
 {
-bool get(const std::string&, std::string&, std::string& err, const char*, long)
+bool get(const std::string&, std::string&, std::string& err, const char*, long, long*)
 {
     err = "no network in tests";
     return false;

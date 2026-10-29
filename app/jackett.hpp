@@ -5,6 +5,8 @@
 #include <functional>
 #include <cstdint>
 
+#include "jackett_diag.hpp"
+
 namespace jackett
 {
 
@@ -58,8 +60,14 @@ void searchAsync(const std::string& query, Category category,
 // Sorts items in-place according to SortBy.
 void sortItems(std::vector<Item>& items, SortBy sort);
 
-// Tests connectivity with the specified URL and API key.
-// Callback is invoked on the UI thread (via brls::sync).
+// What a Diagnosis means and what to do about it, in the UI language, for
+// the server at `base`. "" for Problem::None.
+std::string explain(const Diagnosis& d, const std::string& base);
+
+// Tests connectivity with the specified URL and API key: a search, so the
+// indexers are checked too. Callback is invoked on the UI thread (via
+// brls::sync); on success `msg` says how many indexers answered ("Jackett
+// works. Indexers: 12"), on failure what is wrong and what to do.
 void testConnectionAsync(const std::string& url, const std::string& apiKey,
                          std::function<void(bool ok, const std::string& msg)> cb);
 

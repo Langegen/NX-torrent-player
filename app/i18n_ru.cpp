@@ -86,6 +86,53 @@ const Pair kRu[] = {
     { "Jackett is not configured. Set URL in Options.",
       "Jackett не настроен. Укажите адрес в настройках." },
     { "Invalid response from Jackett server", "Некорректный ответ сервера Jackett" },
+    { "Jackett works. Indexers: ", "Jackett работает. Индексаторов: " },
+    { ", with errors: ", ", с ошибками: " },
+    { "The Jackett address is not a valid URL. Enter it like http://192.168.1.100:9117.",
+      "Адрес Jackett — не URL. Введите его в виде http://192.168.1.100:9117." },
+    { "The Jackett address does not resolve. Check its spelling, or use the computer's IP "
+      "address (like http://192.168.1.100:9117).",
+      "Адрес Jackett не найден. Проверьте написание или укажите IP-адрес компьютера "
+      "(например, http://192.168.1.100:9117)." },
+    { "Nothing answers at ", "По адресу " },
+    { ". Check that Jackett is running, that the console is on the same network, and the "
+      "port (9117 by default).",
+      " никто не отвечает. Проверьте, что Jackett запущен, консоль в той же сети, и порт "
+      "(по умолчанию 9117)." },
+    { "Jackett did not answer in time. Indexers can be slow: try again, and if it keeps "
+      "happening, check the network.",
+      "Jackett не ответил вовремя. Индексаторы бывают медленными: попробуйте ещё раз, а "
+      "если повторяется — проверьте сеть." },
+    { "Secure connection to Jackett failed: ", "Не удалось защищённое соединение с Jackett: " },
+    { "Jackett rejected the API key. Copy it from the top right corner of the Jackett web "
+      "page into Options, Jackett.",
+      "Jackett не принял ключ API. Скопируйте его из правого верхнего угла веб-страницы "
+      "Jackett в Настройки → Jackett." },
+    { "Something answers at this address, but not Jackett's API. Check the port (9117 by "
+      "default) and the API key.",
+      "По этому адресу отвечает не API Jackett. Проверьте порт (по умолчанию 9117) и ключ "
+      "API." },
+    { "Jackett works, but has no indexers. Add trackers with \"Add indexer\" on the Jackett "
+      "web page.",
+      "Jackett работает, но в нём нет индексаторов. Добавьте трекеры кнопкой «Add indexer» "
+      "на веб-странице Jackett." },
+    { "Every Jackett indexer returned an error. Check them on the Jackett web page.",
+      "Все индексаторы Jackett вернули ошибку. Проверьте их на веб-странице Jackett." },
+
+    // ---- first-run setup (app/setup.cpp) ----------------------------------------
+    { "Set up Jackett", "Настройка Jackett" },
+    { "The app finds releases through Jackett: a server on your computer or NAS that "
+      "searches the torrent trackers. Enter its address and API key, then check the "
+      "connection.",
+      "Приложение ищет раздачи через Jackett — сервер на вашем компьютере или NAS, который "
+      "опрашивает торрент-трекеры. Укажите его адрес и ключ API, затем проверьте "
+      "соединение." },
+    { "Check and save", "Проверить и сохранить" },
+    { "Skip", "Пропустить" },
+    { "Done", "Готово" },
+    { "Asking Jackett and its indexers...", "Опрашиваем Jackett и его индексаторы..." },
+    { "You can change this later in Options, Jackett.",
+      "Это можно изменить позже в Настройки → Jackett." },
     { "Invalid response from server. Check URL and API key.",
       "Некорректный ответ сервера. Проверьте адрес и ключ API." },
     { "Saved magnet link to Local library", "Магнет сохранён в локальную библиотеку" },

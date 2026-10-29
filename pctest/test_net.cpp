@@ -27,7 +27,7 @@ static int g_gets;
 namespace http
 {
 bool get(const std::string& url, std::string& resp, std::string& err,
-         const char*, long timeoutSec)
+         const char*, long timeoutSec, long*)
 {
     g_gets++;
     g_lastUrl = url;
