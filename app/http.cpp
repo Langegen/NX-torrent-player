@@ -3,8 +3,16 @@
 #include <curl/curl.h>
 
 #include <cstdio>
+#include <mutex>
+#include <strings.h>  // strncasecmp
 
 #include <borealis.hpp>
+
+#include "config.hpp"
+#include "appdata.hpp"
+#include "netutil.hpp"
+#include <unistd.h>
+
 
 namespace http
 {
@@ -13,6 +21,30 @@ static size_t writeCb(char* ptr, size_t size, size_t nmemb, void* userdata)
 {
     ((std::string*)userdata)->append(ptr, size * nmemb);
     return size * nmemb;
+}
+
+// Copied from config by applyProxy(): requests run on worker threads, which
+// must not read a std::string the settings screen may be assigning to.
+static std::mutex g_proxyLock;
+static std::string g_proxy;
+
+void applyProxy()
+{
+    std::string p = config::get().proxyUrl;
+    {
+        std::lock_guard<std::mutex> g(g_proxyLock);
+        g_proxy = p;
+    }
+    // https playback (engine/httpsrc.c) takes its proxy from the player, per
+    // URL, through proxyFor().
+    brls::Logger::info("[http] proxy {}", p.empty() ? "off" : "on");
+}
+
+std::string proxyFor(const std::string& url)
+{
+    if (netutil::isLocalHost(netutil::hostOf(url))) return "";
+    std::lock_guard<std::mutex> g(g_proxyLock);
+    return g_proxy;
 }
 
 // Turn certificate checking on, against the CA store we ship ourselves. The
@@ -24,13 +56,24 @@ static size_t writeCb(char* ptr, size_t size, size_t nmemb, void* userdata)
 // devoptab, so mbedtls_x509_crt_parse_file fopen()s it like any other path.
 // It is re-parsed on every handshake -- an ASN.1 walk over ~120 roots, no
 // signature maths, which is small next to the handshake it precedes.
-static void verifyTls(CURL* curl)
+//
+// The proxy (Options -> Network) is set here too, since every request passes
+// through: on for the internet, off for a host on the local network.
+static void verifyTls(CURL* curl, const std::string& url)
 {
 #ifdef __SWITCH__
     curl_easy_setopt(curl, CURLOPT_CAINFO, "romfs:/cacert.pem");
+#else
+    if (access(APP_RES("cacert.pem"), 0) == 0)
+        curl_easy_setopt(curl, CURLOPT_CAINFO, APP_RES("cacert.pem"));
+#ifdef CURLSSLOPT_NATIVE_CA
+    curl_easy_setopt(curl, CURLOPT_SSL_OPTIONS, CURLSSLOPT_NATIVE_CA);
+#endif
 #endif
     curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
     curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
+    // "" turns off any proxy curl might take from the environment.
+    curl_easy_setopt(curl, CURLOPT_PROXY, proxyFor(url).c_str());
 }
 
 // curl's own words for a rejected chain ("SSL peer certificate ... not OK") send
@@ -74,7 +117,7 @@ bool postJson(const char* url, const std::string& body, std::string& resp,
     curl_easy_setopt(curl, CURLOPT_ERRORBUFFER, errbuf);
     curl_easy_setopt(curl, CURLOPT_TIMEOUT, 25L);
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
-    verifyTls(curl);  // the Stremio password goes through here
+    verifyTls(curl, url);  // the Stremio password goes through here
 
     CURLcode rc = curl_easy_perform(curl);
     curl_slist_free_all(hdrs);
@@ -93,8 +136,9 @@ bool postJson(const char* url, const std::string& body, std::string& resp,
 // to answer with WebP -- which stb_image (nanovg's decoder) cannot read, so the
 // poster silently never appeared.
 bool get(const std::string& url, std::string& resp, std::string& err,
-         const char* accept)
+         const char* accept, long timeoutSec, long* status)
 {
+    if (status) *status = 0;
     CURL* curl = curl_easy_init();
     if (!curl)
     {
@@ -114,10 +158,11 @@ bool get(const std::string& url, std::string& resp, std::string& err,
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, writeCb);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &resp);
     curl_easy_setopt(curl, CURLOPT_ERRORBUFFER, errbuf);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 25L);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, timeoutSec);
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
-    verifyTls(curl);
+    verifyTls(curl, url);
     CURLcode rc = curl_easy_perform(curl);
+    if (status) curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, status);
     if (hdrs) curl_slist_free_all(hdrs);
     curl_easy_cleanup(curl);
     if (rc != CURLE_OK)
@@ -191,7 +236,7 @@ bool download(const std::string& url, const std::string& path, std::string& err,
     curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, 1024L);
     curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, 30L);
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);  // GitHub redirects to a CDN
-    verifyTls(curl);  // this one lands an executable nro on the SD card
+    verifyTls(curl, url);  // this one lands an executable nro on the SD card
     curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
     curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, progressCb);
     curl_easy_setopt(curl, CURLOPT_XFERINFODATA, &ctx);
@@ -210,6 +255,90 @@ bool download(const std::string& url, const std::string& path, std::string& err,
     }
     // A 404 is a perfectly successful transfer of an error page, and would land
     // on disk as a "download" -- check what we were actually served.
+    if (code >= 400)
+    {
+        std::remove(path.c_str());
+        err = "HTTP " + std::to_string(code);
+        return false;
+    }
+    return true;
+}
+
+// Keeps the last Location: header of the transfer. It is read from the raw
+// headers rather than from curl, because curl itself gives up on a redirect to
+// a scheme it does not speak (magnet:) before telling us where it pointed.
+static size_t locationHeaderCb(char* buf, size_t size, size_t nitems, void* userdata)
+{
+    size_t n = size * nitems;
+    static const char kName[] = "location:";
+    const size_t kLen = sizeof(kName) - 1;
+    if (n > kLen && strncasecmp(buf, kName, kLen) == 0)
+    {
+        std::string v(buf + kLen, n - kLen);
+        size_t a = v.find_first_not_of(" \t");
+        size_t b = v.find_last_not_of(" \t\r\n");
+        *(std::string*)userdata = (a == std::string::npos) ? "" : v.substr(a, b - a + 1);
+    }
+    return n;
+}
+
+bool downloadTorrent(const std::string& url, const std::string& path,
+                     std::string& magnet, std::string& err)
+{
+    magnet.clear();
+
+    DlCtx ctx;
+    ctx.f = std::fopen(path.c_str(), "wb");
+    if (!ctx.f)
+    {
+        err = "cannot write " + path;
+        return false;
+    }
+
+    CURL* curl = curl_easy_init();
+    if (!curl)
+    {
+        std::fclose(ctx.f);
+        std::remove(path.c_str());
+        err = "cannot initialise the network";
+        return false;
+    }
+
+    std::string location;
+    char errbuf[CURL_ERROR_SIZE] = { 0 };
+    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+    curl_easy_setopt(curl, CURLOPT_USERAGENT, "NX-torrent-player");
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, fileWriteCb);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &ctx);
+    curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, locationHeaderCb);
+    curl_easy_setopt(curl, CURLOPT_HEADERDATA, &location);
+    curl_easy_setopt(curl, CURLOPT_ERRORBUFFER, errbuf);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L);
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(curl, CURLOPT_MAXREDIRS, 8L);
+    // Only plain web redirects are followed; a magnet: one stops the transfer
+    // and is picked up from the header below.
+    curl_easy_setopt(curl, CURLOPT_REDIR_PROTOCOLS, (long)(CURLPROTO_HTTP | CURLPROTO_HTTPS));
+    verifyTls(curl, url);
+
+    CURLcode rc = curl_easy_perform(curl);
+    long code   = 0;
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &code);
+    curl_easy_cleanup(curl);
+    std::fclose(ctx.f);
+
+    if (location.compare(0, 7, "magnet:") == 0 && (rc != CURLE_OK || (code >= 300 && code < 400)))
+    {
+        std::remove(path.c_str());
+        magnet = location;
+        return true;
+    }
+    if (rc != CURLE_OK)
+    {
+        std::remove(path.c_str());
+        err = tlsAwareErr(rc, errbuf);
+        return false;
+    }
     if (code >= 400)
     {
         std::remove(path.c_str());

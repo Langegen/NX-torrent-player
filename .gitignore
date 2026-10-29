@@ -1,9 +1,23 @@
 # Build output
 /build/
 /build-ninja/
+/build-pc/
+/pc_deps/
 /NX-torrent-player.nro
 /.updatetest/
 /NX-torrent-player.elf
 /NX-torrent-player.nacp
 /pctest/enginetest
 *.o
+/pctest/test_suite
+/pctest/test_suite.exe
+/pctest/test_httpsrc
+/pctest/test_httpsrc.exe
+/pctest/test_net
+/pctest/test_net.exe
+/pctest/test_tmdb
+/pctest/test_tmdb.exe
+/pctest/test_release
+/pctest/test_release.exe
+/pctest/test_library
+/pctest/test_library.exe

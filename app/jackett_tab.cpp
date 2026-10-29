@@ -15,7 +15,9 @@
 #include "i18n.hpp"
 #include "jackett.hpp"
 #include "player.hpp"
+#include "torrent_play.hpp"
 #include "theme.hpp"
+#include "widgets.hpp"  // ui::FieldFrame
 
 extern "C" {
 #include "torrent.h"
@@ -23,64 +25,6 @@ extern "C" {
 
 namespace
 {
-
-struct VideoFileInfo
-{
-    int index;
-    std::string name;
-    int64_t length;
-};
-
-bool isVideoExtension(const std::string& path)
-{
-    static const char* kExt[] = { ".mkv", ".mp4", ".avi", ".m4v",  ".mov",
-                                  ".webm", ".ts", ".m2ts", ".mpg", ".mpeg",
-                                  ".wmv", ".flv", ".ogv" };
-    for (const char* e : kExt)
-    {
-        size_t n = std::strlen(e);
-        if (path.size() > n &&
-            strcasecmp(path.c_str() + path.size() - n, e) == 0)
-            return true;
-    }
-    return false;
-}
-
-std::vector<VideoFileInfo> parseTorrentVideos(const std::string& path)
-{
-    std::vector<VideoFileInfo> out;
-    torrent_meta* m = (torrent_meta*)std::calloc(1, sizeof(torrent_meta));
-    if (!m) return out;
-    char err[128] = { 0 };
-    if (torrent_load(m, path.c_str(), err, sizeof(err)) == 0)
-    {
-        for (int i = 0; i < m->file_count; i++)
-        {
-            std::string p = m->files[i].path;
-            if (!isVideoExtension(p)) continue;
-            size_t slash = p.find_last_of("/\\");
-            out.push_back({ i, slash == std::string::npos ? p : p.substr(slash + 1),
-                            m->files[i].length });
-        }
-        torrent_unload(m);
-    }
-    std::free(m);
-    std::sort(out.begin(), out.end(), [](const VideoFileInfo& a, const VideoFileInfo& b) {
-        return naturalCompare(a.name, b.name);
-    });
-    return out;
-}
-
-class LoadingBox : public brls::Box
-{
-  public:
-    std::shared_ptr<bool> cancelled;
-    LoadingBox(std::shared_ptr<bool> c) : cancelled(std::move(c)) {}
-    ~LoadingBox() override
-    {
-        if (cancelled) *cancelled = true;
-    }
-};
 
 class JackettTabRoot : public brls::Box
 {
@@ -97,6 +41,9 @@ class JackettTabRoot : public brls::Box
     }
 
     std::shared_ptr<bool> alive = std::make_shared<bool>(true);
+    // The controller behind this tab. Held here so it dies with the tab --
+    // it used to be `new`ed and never freed, one leak per visit to the tab.
+    std::shared_ptr<void> controller;
 };
 
 class JackettView
@@ -279,6 +226,22 @@ class JackettView
         }
     }
 
+  public:
+    // Starts on a query of someone else's choosing (the film card's
+    // "Torrents"): fills the search bar and runs it, so the results are the
+    // first thing on screen and the bar is still there to refine the query.
+    void startWith(const std::string& query, jackett::Category cat)
+    {
+        if (query.empty()) return;
+        searchQuery     = query;
+        currentCategory = cat;
+        barText->setText(query);
+        barText->setTextColor(theme::text());
+        updateCategoryButtonStyles();
+        runSearch();
+    }
+
+  private:
     void promptSearch()
     {
         brls::Application::getImeManager()->openForText(
@@ -345,6 +308,18 @@ class JackettView
 
     void refresh()
     {
+        // Retry / Configure live inside contentContainer and call back into
+        // here: clearViews() would free the very button holding the focus,
+        // and the next input would dereference it. Park it on the search bar.
+        brls::View* cur = brls::Application::getCurrentFocus();
+        for (brls::View* v = cur; v; v = v->getParent())
+        {
+            if (v == contentContainer)
+            {
+                brls::Application::giveFocus(searchBar);
+                break;
+            }
+        }
         contentContainer->clearViews();
 
         const auto& cfg = config::get();
@@ -574,7 +549,7 @@ class JackettView
             auto* trk = new brls::Label();
             trk->setText("[" + item.tracker + "]");
             trk->setFontSize(16.0f);
-            trk->setTextColor(theme::accent());
+            trk->setTextColor(theme::accentText());
             trk->setMarginRight(14.0f);
             meta->addView(trk);
         }
@@ -628,7 +603,9 @@ class JackettView
         // Action A: Play
         jackett::Item itemCopy = item;
         row->registerClickAction([this, itemCopy](brls::View*) {
-            playItem(itemCopy);
+            PlayHint hint;
+            hint.title = itemCopy.title;
+            playJackettItem(itemCopy, hint);
             return true;
         });
 
@@ -642,165 +619,6 @@ class JackettView
             false, false, brls::SOUND_CLICK);
 
         return row;
-    }
-
-    void playWithVideos(const std::string& source, const std::string& title,
-                        const std::vector<VideoFileInfo>& vids)
-    {
-        if (vids.empty())
-        {
-            auto* d = new brls::Dialog(tr("This torrent has no video file to stream."));
-            d->addButton("OK", []() {});
-            d->open();
-            return;
-        }
-
-        if (vids.size() == 1)
-        {
-            startPlaybackPrompt(source, {}, vids[0].name, vids[0].index, {}, "Jackett");
-            return;
-        }
-
-        std::vector<Row> rows;
-        for (const auto& v : vids)
-        {
-            Row r;
-            r.label  = v.name;
-            r.detail = jackett::formatSize(v.length);
-            rows.push_back(r);
-        }
-        brls::Application::pushActivity(new ListActivity(
-            title, tr("Pick a file"), rows, [source, vids](int i) {
-                startPlaybackPrompt(source, {}, vids[i].name, vids[i].index, {}, "Jackett");
-            }));
-    }
-
-    void resolveAndPlayMagnet(const std::string& magnet, const std::string& title,
-                              brls::Dialog* loading, LoadingBox* box,
-                              std::shared_ptr<bool> cancelled)
-    {
-        brls::async([magnet, title, loading, box, cancelled, this]() {
-            torrent_meta* m = (torrent_meta*)std::calloc(1, sizeof(torrent_meta));
-            char err[128] = { 0 };
-            int rc = -1;
-            std::vector<VideoFileInfo> vids;
-            std::string resolvedName;
-            if (m)
-            {
-                rc = torrent_load_magnet(m, magnet.c_str(), err, sizeof(err));
-                if (rc == 0)
-                {
-                    resolvedName = m->name;
-                    for (int i = 0; i < m->file_count; i++)
-                    {
-                        std::string p = m->files[i].path;
-                        if (!isVideoExtension(p)) continue;
-                        size_t slash = p.find_last_of("/\\");
-                        vids.push_back({ i, slash == std::string::npos ? p : p.substr(slash + 1),
-                                         m->files[i].length });
-                    }
-                    std::sort(vids.begin(), vids.end(), [](const VideoFileInfo& a, const VideoFileInfo& b) {
-                        return naturalCompare(a.name, b.name);
-                    });
-                    torrent_unload(m);
-                }
-                std::free(m);
-            }
-            std::string e = err;
-
-            brls::sync([this, magnet, title, resolvedName, vids, rc, e, loading, box, cancelled]() {
-                if (*cancelled) return;
-                box->cancelled = nullptr;
-                loading->close([this, magnet, title, resolvedName, vids, rc, e]() {
-                    if (rc != 0)
-                    {
-                        auto* d = new brls::Dialog(tr("Could not resolve torrent metadata: ") + e);
-                        d->addButton("OK", []() {});
-                        d->open();
-                        return;
-                    }
-                    std::string playTitle = !resolvedName.empty() ? resolvedName : title;
-                    playWithVideos(magnet, playTitle, vids);
-                });
-            });
-        });
-    }
-
-    void playItem(const jackett::Item& item)
-    {
-        std::string link = item.link;
-        std::string magnet = (!link.empty() && link.rfind("magnet:", 0) == 0)
-                                 ? link
-                                 : item.magnetUri;
-        bool isHttp = !link.empty() && link.rfind("magnet:", 0) != 0;
-
-        if (!isHttp && magnet.empty())
-        {
-            auto* d = new brls::Dialog(tr("No playable link or magnet URI found for this torrent."));
-            d->addButton("OK", []() {});
-            d->open();
-            return;
-        }
-
-        auto cancelled = std::make_shared<bool>(false);
-        auto* box = new LoadingBox(cancelled);
-        box->setAxis(brls::Axis::COLUMN);
-        box->setAlignItems(brls::AlignItems::CENTER);
-        box->setJustifyContent(brls::JustifyContent::CENTER);
-        box->setPadding(24.0f);
-
-        auto* spinner = new brls::ProgressSpinner();
-        box->addView(spinner);
-
-        auto* lbl = new brls::Label();
-        lbl->setText(tr("Preparing torrent..."));
-        lbl->setFontSize(20.0f);
-        lbl->setMarginTop(20.0f);
-        box->addView(lbl);
-
-        auto* loading = new brls::Dialog(box);
-        loading->addButton(tr("Cancel"), [cancelled]() { *cancelled = true; });
-        loading->setCancelable(true);
-        loading->open();
-
-        if (isHttp)
-        {
-            std::string tempPath = std::string(APPDATA_CACHE) + "_jackett.torrent";
-            jackett::downloadTorrentAsync(link, tempPath, [this, item, tempPath, magnet, loading, box, cancelled](bool ok, const std::string& err) {
-                if (*cancelled) return;
-                if (ok)
-                {
-                    auto vids = parseTorrentVideos(tempPath);
-                    if (!vids.empty())
-                    {
-                        box->cancelled = nullptr;
-                        loading->close([this, item, tempPath, vids]() {
-                            playWithVideos(tempPath, item.title, vids);
-                        });
-                        return;
-                    }
-                }
-                // If .torrent download failed or had no video, fall back to magnet if available
-                if (!magnet.empty())
-                {
-                    resolveAndPlayMagnet(magnet, item.title, loading, box, cancelled);
-                }
-                else
-                {
-                    box->cancelled = nullptr;
-                    loading->close([err, ok]() {
-                        auto* d = new brls::Dialog(ok ? tr("This torrent has no video file to stream.")
-                                                      : tr("Could not download torrent: ") + err);
-                        d->addButton("OK", []() {});
-                        d->open();
-                    });
-                }
-            });
-        }
-        else
-        {
-            resolveAndPlayMagnet(magnet, item.title, loading, box, cancelled);
-        }
     }
 
     void saveItem(const jackett::Item& item)
@@ -817,7 +635,22 @@ class JackettView
 
 brls::View* buildJackettTab()
 {
-    auto* root = new JackettTabRoot();
-    new JackettView(root);
+    auto* root       = new JackettTabRoot();
+    root->controller = std::make_shared<JackettView>(root);
     return root;
+}
+
+void openJackettSearch(const std::string& query, int category)
+{
+    auto* root       = new JackettTabRoot();
+    auto view        = std::make_shared<JackettView>(root);
+    root->controller = view;
+
+    auto* frame = new ui::FieldFrame(root);
+    frame->setTitle("Jackett");
+    brls::Application::pushActivity(new brls::Activity(frame));
+    // After the push: a search left unconfigured shows its setup prompt
+    // instead, which is the right answer there too.
+    if (!config::get().jackettUrl.empty())
+        view->startWith(query, (jackett::Category)category);
 }

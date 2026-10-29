@@ -127,6 +127,7 @@ Config& get() { return cfg; }
 
 std::string consoleLang()
 {
+#ifdef __SWITCH__
     // setGetSystemLanguage packs the code as chars in a u64 ("fr", "en-US"),
     // NOT as a SetLanguage enum -- the first two bytes are the ISO-639-1 part,
     // which is all we need. borealis already calls setInitialize().
@@ -136,6 +137,11 @@ std::string consoleLang()
     std::memcpy(buf, &code, 8);
     if (!buf[0] || !buf[1]) return "en";
     return std::string(buf, 2);
+#else
+    const char* l = std::getenv("LANG");
+    if (l && std::strlen(l) >= 2) return std::string(l, 2);
+    return "ru";
+#endif
 }
 
 std::string mpvLangList(const std::string& code)
@@ -242,12 +248,20 @@ void load()
     while ((n = std::fread(buf, 1, sizeof(buf), f)) > 0) body.append(buf, n);
     std::fclose(f);
 
-    std::string sTab = readStr(body, "startupTab", "local");
+    std::string sTab = readStr(body, "startupTab", "home");
     cfg.startupTab = (sTab == "stremio") ? Tab::STREMIO :
                      (sTab == "jackett") ? Tab::JACKETT :
-                     (sTab == "history") ? Tab::HISTORY : Tab::LOCAL;
+                     (sTab == "history") ? Tab::HISTORY :
+                     (sTab == "home")    ? Tab::HOME :
+                     (sTab == "bookmarks") ? Tab::BOOKMARKS : Tab::LOCAL;
     cfg.jackettUrl    = readStr(body, "jackettUrl", cfg.jackettUrl);
     cfg.jackettApiKey = readStr(body, "jackettApiKey", cfg.jackettApiKey);
+    cfg.jackettSetupAsked = readBool(body, "jackettSetupAsked", cfg.jackettSetupAsked);
+    cfg.torrServerUrl = readStr(body, "torrServerUrl", cfg.torrServerUrl);
+    cfg.proxyUrl      = readStr(body, "proxyUrl", cfg.proxyUrl);
+    cfg.tmdbApiKey    = readStr(body, "tmdbApiKey", cfg.tmdbApiKey);
+    cfg.tmdbApiUrl    = readStr(body, "tmdbApiUrl", cfg.tmdbApiUrl);
+    cfg.tmdbImageUrl  = readStr(body, "tmdbImageUrl", cfg.tmdbImageUrl);
     cfg.logging = readBool(body, "logging", cfg.logging);
     cfg.hide4k  = readBool(body, "hide4k", cfg.hide4k);
     cfg.rateGovernor = readBool(body, "rateGovernor", cfg.rateGovernor);
@@ -287,12 +301,20 @@ bool save()
     }
     const char* sTabStr = (cfg.startupTab == Tab::STREMIO) ? "stremio" :
                           (cfg.startupTab == Tab::JACKETT) ? "jackett" :
-                          (cfg.startupTab == Tab::HISTORY) ? "history" : "local";
+                          (cfg.startupTab == Tab::HISTORY) ? "history" :
+                          (cfg.startupTab == Tab::HOME)    ? "home" :
+                          (cfg.startupTab == Tab::BOOKMARKS) ? "bookmarks" : "local";
     std::fprintf(f,
                  "{\n"
                  "  \"startupTab\": \"%s\",\n"
                  "  \"jackettUrl\": \"%s\",\n"
                  "  \"jackettApiKey\": \"%s\",\n"
+                 "  \"jackettSetupAsked\": %s,\n"
+                 "  \"torrServerUrl\": \"%s\",\n"
+                 "  \"proxyUrl\": \"%s\",\n"
+                 "  \"tmdbApiKey\": \"%s\",\n"
+                 "  \"tmdbApiUrl\": \"%s\",\n"
+                 "  \"tmdbImageUrl\": \"%s\",\n"
                  "  \"logging\": %s,\n"
                  "  \"hide4k\": %s,\n"
                  "  \"rateGovernor\": %s,\n"
@@ -313,6 +335,12 @@ bool save()
                  sTabStr,
                  cfg.jackettUrl.c_str(),
                  cfg.jackettApiKey.c_str(),
+                 cfg.jackettSetupAsked ? "true" : "false",
+                 cfg.torrServerUrl.c_str(),
+                 cfg.proxyUrl.c_str(),
+                 cfg.tmdbApiKey.c_str(),
+                 cfg.tmdbApiUrl.c_str(),
+                 cfg.tmdbImageUrl.c_str(),
                  cfg.logging ? "true" : "false", cfg.hide4k ? "true" : "false",
                  cfg.rateGovernor ? "true" : "false",
                  cfg.ramStream ? "true" : "false",

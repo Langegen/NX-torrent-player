@@ -21,11 +21,23 @@
 
 #include <borealis/views/applet_frame.hpp>
 #include <borealis/views/button.hpp>
+#ifdef __SWITCH__
+#include <borealis/platforms/switch/switch_font.hpp>
+#endif
 #include <borealis/views/tab_frame.hpp>
 #include <borealis/views/recycler.hpp>
 #include <borealis/views/cells/cell_detail.hpp>
 
 #include <curl/curl.h>
+
+#ifdef ABSOLUTE
+#undef ABSOLUTE
+#endif
+#ifdef RELATIVE
+#undef RELATIVE
+#endif
+
+#include <GLFW/glfw3.h>
 
 #include <switch.h>  // Thread/Mutex/CondVar for the async log sink
 
@@ -37,11 +49,20 @@
 #include "theme.hpp"
 #include "update.hpp"
 #include "stremio.hpp"
+#include "http.hpp"
+#include "jackett.hpp"
 #include "jackett_tab.hpp"
+#include "setup.hpp"
+#include "autotest.hpp"
+#include "widgets.hpp"  // ui::paintField
 #include "history.hpp"
 #include "history_tab.hpp"
+#include "bookmarks.hpp"
+#include "home.hpp"
+#include "library.hpp"
 
 extern "C" {
+#include "httpsrc.h"
 #include "torrent.h"
 #include "torrentfs.h"
 }
@@ -51,6 +72,7 @@ extern "C" {
 namespace
 {
 
+#ifdef __SWITCH__
 // --- Async log sink ---------------------------------------------------------
 // The log used to be an UNBUFFERED FILE handed to the Logger: every line
 // (each mpv "v" message, the 2 s [stats] line) was a synchronous fs IPC from
@@ -135,12 +157,15 @@ int logRingWrite(void* cookie, const char* p, size_t n)
     condvarWakeOne(&r->cv);
     return (int)n;  // claim everything: a short write would make stdio error out
 }
+#endif
 
 // Everything the app writes (log, piece cache) lives here so it doesn't clutter
 // the SD card root. Created at startup. Paths in appdata.hpp.
 void ensureAppDataDir()
 {
+#ifdef __SWITCH__
     mkdir("sdmc:/switch", 0777);   // usually already there
+#endif
     mkdir(APPDATA_DIR, 0777);      // ignore EEXIST
     mkdir(APPDATA_TORRENTS, 0777); // where the user drops .torrent files
     mkdir(APPDATA_POSTERS, 0777);  // cached Stremio artwork
@@ -281,14 +306,14 @@ void scanTorrentsRec(const std::string& dir, std::vector<TorrentEntry>& out)
 }
 
 // Trackers appended to a bare info-hash (same set as the Stremio path). Public
-// UDP trackers most torrents announce to anyway; DHT fills the rest.
+// UDP trackers most torrents announce to anyway; DHT fills the rest. Same set
+// as DEFAULT_TRACKERS in engine/torrent.c (see there).
 constexpr const char* kMagnetTrackers =
     "&tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce"
-    "&tr=udp%3A%2F%2Fopen.demonii.com%3A1337%2Fannounce"
-    "&tr=udp%3A%2F%2Ftracker.openbittorrent.com%3A6969%2Fannounce"
-    "&tr=udp%3A%2F%2Fexodus.desync.com%3A6969%2Fannounce"
+    "&tr=udp%3A%2F%2Fopen.stealth.si%3A80%2Fannounce"
     "&tr=udp%3A%2F%2Ftracker.torrent.eu.org%3A451%2Fannounce"
-    "&tr=udp%3A%2F%2Fopen.stealth.si%3A80%2Fannounce";
+    "&tr=udp%3A%2F%2Fopen.demonii.com%3A1337%2Fannounce"
+    "&tr=udp%3A%2F%2Fopen.tracker.cl%3A1337%2Fannounce";
 
 // Turn what the user pasted/typed into a playable magnet URI, or "" if it is not
 // one. Accepts a full "magnet:?..." link OR a bare info-hash (40 hex / 32 base32)
@@ -528,7 +553,25 @@ struct VideoFile
     int64_t length;
 };
 
-// The video files a .torrent holds, largest first. Empty if it cannot be read.
+// The video files of a loaded torrent, with picker labels (unsorted).
+std::vector<VideoFile> videoFilesOf(const torrent_meta* m)
+{
+    std::vector<int> idx;
+    std::vector<std::string> paths;
+    for (int i = 0; i < m->file_count; i++)
+    {
+        if (!isVideoFile(m->files[i].path)) continue;
+        idx.push_back(i);
+        paths.push_back(m->files[i].path);
+    }
+    std::vector<std::string> names = pickerNames(paths);
+    std::vector<VideoFile> out;
+    for (size_t k = 0; k < idx.size(); k++)
+        out.push_back({ idx[k], names[k], m->files[idx[k]].length });
+    return out;
+}
+
+// The video files a .torrent holds, in natural order. Empty if it cannot be read.
 std::vector<VideoFile> torrentVideoFiles(const std::string& path)
 {
     std::vector<VideoFile> out;
@@ -538,14 +581,7 @@ std::vector<VideoFile> torrentVideoFiles(const std::string& path)
     char err[128] = { 0 };
     if (torrent_load(m, path.c_str(), err, sizeof(err)) == 0)
     {
-        for (int i = 0; i < m->file_count; i++)
-        {
-            std::string p = m->files[i].path;
-            if (!isVideoFile(p)) continue;
-            size_t slash = p.find_last_of("/\\");
-            out.push_back({ i, slash == std::string::npos ? p : p.substr(slash + 1),
-                            m->files[i].length });
-        }
+        out = videoFilesOf(m);
         torrent_unload(m);
     }
     else
@@ -846,6 +882,7 @@ void removeMagnetFromFile(const std::string& magnet)
 // list -- it does NOT auto-play.
 std::string promptMagnetInput()
 {
+#ifdef __SWITCH__
     SwkbdConfig kbd;
     if (R_FAILED(swkbdCreate(&kbd, 0)))
         return "";
@@ -858,6 +895,22 @@ std::string promptMagnetInput()
     swkbdClose(&kbd);
     if (R_FAILED(rc) || !raw[0])
         return "";
+#else
+    char raw[2048] = { 0 };
+    const char* clip = glfwGetClipboardString(nullptr);
+    if (clip)
+    {
+        snprintf(raw, sizeof(raw), "%s", clip);
+    }
+    if (!raw[0])
+    {
+        auto* d = new brls::Dialog(
+            tr("Clipboard is empty or does not contain text."));
+        d->addButton("OK", []() {});
+        d->open();
+        return "";
+    }
+#endif
 
     std::string magnet = normalizeMagnet(raw);
     if (magnet.empty())
@@ -918,6 +971,7 @@ brls::View* buildEmptyState()
     return box;
 }
 
+#ifdef __SWITCH__
 // Shown on the libnx text console (NOT borealis) when the app was launched in
 // applet mode -- that mode caps the heap far below what mpv and the RAM
 // streaming window need. Done before borealis/GL is ever set up: bringing the
@@ -947,6 +1001,7 @@ static void appletModeBlock()
     }
     consoleExit(NULL);
 }
+#endif
 
 // Resolve magnets in the background, ONE AT A TIME (no full download starts):
 // (magnet, resolved name, whole-torrent size). Name "" / size 0 mean the attempt
@@ -986,17 +1041,7 @@ void resolveMagnetNames(std::shared_ptr<bool> alive,
                 total = m->total_len;  // whole-torrent size, like torrentScanInfo
                 // Extract + cache its video files (largest first) in the same
                 // fetch, so playing it can offer a picker with no extra wait.
-                std::vector<VideoFile> vids;
-                for (int i = 0; i < m->file_count; i++)
-                {
-                    std::string p = m->files[i].path;
-                    if (!isVideoFile(p)) continue;
-                    size_t slash = p.find_last_of("/\\");
-                    vids.push_back({ i,
-                                     slash == std::string::npos ? p
-                                                                : p.substr(slash + 1),
-                                     m->files[i].length });
-                }
+                std::vector<VideoFile> vids = videoFilesOf(m);
                 torrent_unload(m);
                 if (!magnetFilesCached(magnetHash(magnet)))
                     cacheMagnetFiles(magnetHash(magnet), vids, total);
@@ -1209,22 +1254,16 @@ class BrowserFrame : public brls::AppletFrame
         stremio::setLibraryCountSink(nullptr);
     }
 
-    // Both the background gradient and the header mark are Stremio-tab-only.
+    // The header mark is Stremio-tab-only (the field is on every tab).
     void setOnStremio(bool on) { this->onStremio = on; }
 
     void draw(NVGcontext* vg, float x, float y, float width, float height,
               brls::Style style, brls::FrameContext* ctx) override
     {
-        if (this->onStremio)
-        {
-            NVGpaint gradient =
-                nvgLinearGradient(vg, x + width, y, x, y + height,
-                                  theme::gradTop(), theme::gradBottom());
-            nvgBeginPath(vg);
-            nvgRect(vg, x, y, width, height);
-            nvgFillPaint(vg, gradient);
-            nvgFill(vg);
-        }
+        // Every tab on the app's field now, not only Stremio's: the flat theme
+        // grey read as unfinished, and the strips' edge fades (tabBgAt) were
+        // blending into this gradient on every tab anyway.
+        ui::paintField(vg, x, y, width, height);
         brls::AppletFrame::draw(vg, x, y, width, height, style, ctx);
 
         // The Stremio mark, drawn on top of the header's icon slot rather than
@@ -1263,7 +1302,7 @@ void applyTabIdentity(brls::AppletFrame* frame, config::Tab tab)
     // Local keeps its white PNG. Stremio's mark is drawn by BrowserFrame instead,
     // so no texture is loaded for it at all -- romfs:/stremio-icon.png is a fixed
     // violet that cannot follow the accent.
-    if (!stremio) frame->setIcon("romfs:/local-icon.png");
+    if (!stremio) frame->setIcon(APP_RES("local-icon.png"));
 
     // The header icon is sized "auto", i.e. from the texture, and these two are
     // not the same pixel size -- pin both to the same box.
@@ -1287,7 +1326,53 @@ brls::View* buildTab(config::Tab tab)
         return buildJackettTab();
     if (tab == config::Tab::HISTORY)
         return buildHistoryTab();
+    if (tab == config::Tab::HOME)
+        return buildHomeTab();
+    if (tab == config::Tab::BOOKMARKS)
+        return buildBookmarksTab();
+    if (tab == config::Tab::MOVIES)
+        return buildHomeTab(1);
+    if (tab == config::Tab::SHOWS)
+        return buildHomeTab(2);
+    if (tab == config::Tab::ANIME)
+        return buildHomeTab(3);
     return buildLocalTab();
+}
+
+// R/L cycle the Stremio view. On the frame (not the tab) so they work with
+// focus on the header tab bar too. Registered only while the Stremio tab is
+// up: an action merely made unavailable still shows its (greyed) chip in the
+// footer of every other tab. One chip "L R  View": L is the auto icon, R a
+// glyph in the hint text; the R action is hidden so it adds no second chip.
+void setStremioViewKeys(brls::AppletFrame* frame, bool on)
+{
+    static brls::AppletFrame* owner = nullptr;
+    static brls::ActionIdentifier lb = -1, rb = -1;
+    if (owner && owner != frame) lb = rb = -1;  // a new frame: nothing on it yet
+    owner = frame;
+    bool registered = lb >= 0;
+    if (on == registered) return;
+    if (on)
+    {
+        lb = frame->registerAction(std::string("  ") + tr("View"), brls::BUTTON_LB,
+                                   [](brls::View*) {
+                                       stremio::cycleActiveView(-1);
+                                       return true;
+                                   },
+                                   false, false, brls::SOUND_NONE);
+        rb = frame->registerAction(tr("View"), brls::BUTTON_RB,
+                                   [](brls::View*) {
+                                       stremio::cycleActiveView(+1);
+                                       return true;
+                                   },
+                                   true, false, brls::SOUND_NONE);
+    }
+    else
+    {
+        frame->unregisterAction(lb);
+        frame->unregisterAction(rb);
+        lb = rb = -1;
+    }
 }
 
 // A Label that renders with the Material icon font as its PRIMARY face. Reached
@@ -1320,42 +1405,65 @@ void attachTopTabBar(brls::AppletFrame* frame, brls::Box* content)
     // Rebuilt on every switch: TabFrame frees the old tab before making the new
     // one, and so must we -- two live StremioTabs would each hold their own
     // library and in-flight requests.
-    auto* localBtn   = new brls::Button();
-    auto* stremioBtn = new brls::Button();
-    auto* jackettBtn = new brls::Button();
+    //
+    // The roadmap mock-up's header: Home, Movies, Shows, Bookmarks, History.
+    // Stremio, Local and Jackett are where titles come from rather than what to
+    // watch, so they share one button -- labelled with the source on screen --
+    // which also leaves the middle free for the Stremio view bar.
+    auto* homeBtn    = new brls::Button();
+    auto* moviesBtn  = new brls::Button();
+    auto* showsBtn   = new brls::Button();
+    auto* animeBtn   = new brls::Button();
+    auto* marksBtn   = new brls::Button();
     auto* historyBtn = new brls::Button();
+    auto* sourceBtn  = new brls::Button();
+    // The routes further down were written for three buttons; they are one now.
+    brls::Button* stremioBtn = sourceBtn;
+    brls::Button* localBtn   = sourceBtn;
+    brls::Button* jackettBtn = sourceBtn;
+
+    struct TabButton
+    {
+        brls::Button* btn;
+        config::Tab tab;
+    };
+    std::vector<TabButton> tabButtons = {
+        { homeBtn, config::Tab::HOME },          { moviesBtn, config::Tab::MOVIES },
+        { showsBtn, config::Tab::SHOWS },        { animeBtn, config::Tab::ANIME },
+        { marksBtn, config::Tab::BOOKMARKS },
+        { historyBtn, config::Tab::HISTORY },
+    };
 
     // Which tab is up, held in a shared cell rather than a capture so the
     // repaint hook below can restyle without knowing how we got here.
     auto curTab = std::make_shared<config::Tab>(config::get().startupTab);
 
+    auto isSource = [](config::Tab t) {
+        return t == config::Tab::STREMIO || t == config::Tab::LOCAL ||
+               t == config::Tab::JACKETT;
+    };
+
     // The style carries the accent: a Button copies it out of the theme when a
     // style is applied and keeps it, so this has to be re-run (not the tab
     // rebuilt) when the colour changes.
-    auto restyleTabs = [localBtn, stremioBtn, jackettBtn, historyBtn, curTab]() {
-        localBtn->setStyle(*curTab == config::Tab::LOCAL
-                               ? &brls::BUTTONSTYLE_PRIMARY
-                               : &brls::BUTTONSTYLE_BORDERLESS);
-        stremioBtn->setStyle(*curTab == config::Tab::STREMIO
-                                 ? &brls::BUTTONSTYLE_PRIMARY
-                                 : &brls::BUTTONSTYLE_BORDERLESS);
-        jackettBtn->setStyle(*curTab == config::Tab::JACKETT
-                                 ? &brls::BUTTONSTYLE_PRIMARY
-                                 : &brls::BUTTONSTYLE_BORDERLESS);
-        historyBtn->setStyle(*curTab == config::Tab::HISTORY
-                                 ? &brls::BUTTONSTYLE_PRIMARY
-                                 : &brls::BUTTONSTYLE_BORDERLESS);
+    auto restyleTabs = [tabButtons, sourceBtn, curTab, isSource]() {
+        for (const auto& t : tabButtons)
+            t.btn->setStyle(*curTab == t.tab ? &brls::BUTTONSTYLE_PRIMARY
+                                             : &brls::BUTTONSTYLE_BORDERLESS);
+        bool src = isSource(*curTab);
+        sourceBtn->setStyle(src ? &brls::BUTTONSTYLE_PRIMARY : &brls::BUTTONSTYLE_BORDERLESS);
+        sourceBtn->setText(*curTab == config::Tab::STREMIO ? std::string("Stremio")
+                           : *curTab == config::Tab::LOCAL ? std::string(tr("Local"))
+                           : *curTab == config::Tab::JACKETT ? std::string("Jackett")
+                                                             : std::string(tr("Sources")));
     };
 
-    auto select = [content, localBtn, stremioBtn, jackettBtn, historyBtn, frame, curTab,
-                   restyleTabs](config::Tab tab) {
+    auto select = [content, tabButtons, sourceBtn, frame, curTab, restyleTabs,
+                   isSource](config::Tab tab) {
         *curTab = tab;
         restyleTabs();
-        // L and R only cycle the Stremio views, so the "View" chip has no
-        // business in the footer on the Local tab.
-        bool stremioUp = tab == config::Tab::STREMIO;
-        frame->setActionAvailable(brls::BUTTON_LB, stremioUp);
-        frame->setActionAvailable(brls::BUTTON_RB, stremioUp);
+        // L and R cycle the Stremio views: their footer chip exists only there.
+        setStremioViewKeys(frame, tab == config::Tab::STREMIO);
         content->clearViews();  // deletes the previous tab
         brls::View* v = buildTab(tab);
         v->setGrow(1.0f);
@@ -1367,9 +1475,9 @@ void attachTopTabBar(brls::AppletFrame* frame, brls::Box* content)
         // does not do it: ScrollingFrame::getNextFocus keeps the focus inside
         // while the list can still scroll up, so a deep tab (Stremio's library
         // sits under two more boxes than the local list) never hands it over.
-        brls::Button* active = tab == config::Tab::STREMIO ? stremioBtn :
-                               (tab == config::Tab::JACKETT ? jackettBtn :
-                               (tab == config::Tab::HISTORY ? historyBtn : localBtn));
+        brls::Button* active = sourceBtn;
+        for (const auto& t : tabButtons)
+            if (t.tab == tab) active = t.btn;
         v->registerAction(
             tr("Back"), brls::BUTTON_B,
             [active](brls::View*) {
@@ -1379,39 +1487,47 @@ void attachTopTabBar(brls::AppletFrame* frame, brls::Box* content)
             false, false, brls::SOUND_BACK);
     };
 
-    stremioBtn->setText(tr("Stremio"));
-    stremioBtn->setStyle(&brls::BUTTONSTYLE_BORDERLESS);
-    stremioBtn->setMarginLeft(8.0f);
-    stremioBtn->registerClickAction([select](brls::View*) {
-        select(config::Tab::STREMIO);
+    const char* tabNames[] = { "Home", "Movies", "Shows", "Anime", "Bookmarks", "History" };
+    for (size_t i = 0; i < tabButtons.size(); i++)
+    {
+        brls::Button* b = tabButtons[i].btn;
+        config::Tab tab = tabButtons[i].tab;
+        b->setText(tr(tabNames[i]));
+        b->setStyle(&brls::BUTTONSTYLE_BORDERLESS);
+        // Narrower than borealis' stock padding: six tabs and the view bar
+        // share a handheld-width header.
+        b->setPadding(12.0f, 16.0f, 12.0f, 16.0f);
+        if (i == 0) b->setMarginLeft(8.0f);
+        b->registerClickAction([select, tab](brls::View*) {
+            select(tab);
+            return true;
+        });
+        bar->addView(b);
+    }
+
+    sourceBtn->setStyle(&brls::BUTTONSTYLE_BORDERLESS);
+    sourceBtn->setPadding(12.0f, 16.0f, 12.0f, 16.0f);
+    sourceBtn->setMarginLeft(10.0f);
+    sourceBtn->registerClickAction([select, curTab](brls::View*) {
+        // Jackett first: it is the app's main source. Only the tab actually
+        // open is marked (from Home or History, none of these is).
+        const config::Tab tabs[] = { config::Tab::JACKETT, config::Tab::LOCAL,
+                                     config::Tab::STREMIO };
+        int sel = -1;
+        for (int i = 0; i < 3; i++)
+            if (*curTab == tabs[i]) sel = i;
+        auto* dd = new brls::Dropdown(
+            tr("Sources"), { "Jackett", tr("Local"), "Stremio" },
+            [select](int i) {
+                const config::Tab t[] = { config::Tab::JACKETT, config::Tab::LOCAL,
+                                          config::Tab::STREMIO };
+                if (i >= 0 && i < 3) select(t[i]);
+            },
+            sel);
+        brls::Application::pushActivity(new brls::Activity(dd));
         return true;
     });
-    bar->addView(stremioBtn);
-
-
-    localBtn->setText(tr("Local"));
-    localBtn->setStyle(&brls::BUTTONSTYLE_BORDERLESS);
-    localBtn->registerClickAction([select](brls::View*) {
-        select(config::Tab::LOCAL);
-        return true;
-    });
-    bar->addView(localBtn);
-
-    jackettBtn->setText("Jackett");
-    jackettBtn->setStyle(&brls::BUTTONSTYLE_BORDERLESS);
-    jackettBtn->registerClickAction([select](brls::View*) {
-        select(config::Tab::JACKETT);
-        return true;
-    });
-    bar->addView(jackettBtn);
-
-    historyBtn->setText(tr("History"));
-    historyBtn->setStyle(&brls::BUTTONSTYLE_BORDERLESS);
-    historyBtn->registerClickAction([select](brls::View*) {
-        select(config::Tab::HISTORY);
-        return true;
-    });
-    bar->addView(historyBtn);
+    bar->addView(sourceBtn);
 
     // The Stremio sub-view switcher, centred in the header: one button per view
     // (Continue / Movies / Shows / Library). It says where you are and clicking
@@ -1528,6 +1644,29 @@ void attachTopTabBar(brls::AppletFrame* frame, brls::Box* content)
     });
     rightBar->addView(profileBtn);
 
+    // "Search" for the catalog, as the mock-up's header has it: the magnifier
+    // of Stremio's own search plus a word. The Stremio tab shows its own search
+    // instead, so this one folds away there (see applyViewBar).
+    auto* catSearchBtn = new brls::Button();
+    {
+        const std::string& full = viewLabels[searchIdx];
+        size_t sp = full.find(' ');
+        catSearchBtn->setText(tr("Search"));
+        catSearchBtn->setStyle(&brls::BUTTONSTYLE_BORDERLESS);
+        catSearchBtn->setPadding(12.0f, 16.0f, 12.0f, 16.0f);
+        auto* ic = new IconLabel();
+        ic->setText(sp == std::string::npos ? full : full.substr(0, sp));
+        sizeIcon(ic, btnFont, true);
+        ic->setMarginRight(6.0f);
+        ic->setTextColor(brls::Application::getTheme()["brls/button/default_enabled_text"]);
+        catSearchBtn->addView(ic, 0);
+        catSearchBtn->registerClickAction([](brls::View*) {
+            openCatalogSearch();
+            return true;
+        });
+        rightBar->addView(catSearchBtn);
+    }
+
     // Material "settings". The only header button that belongs to BOTH tabs --
     // it is X in the footer as well, but that hint is easy to miss.
     auto* settingsBtn = makeIconButton("");
@@ -1536,6 +1675,8 @@ void attachTopTabBar(brls::AppletFrame* frame, brls::Box* content)
         return true;
     });
     rightBar->addView(settingsBtn);
+    catSearchBtn->setCustomNavigationRoute(brls::FocusDirection::RIGHT, settingsBtn);
+    catSearchBtn->setCustomNavigationRoute(brls::FocusDirection::LEFT, sourceBtn);
 
     // active >= 0: show the bar and mark that view PRIMARY. active < 0: fold it
     // away and take its buttons out of the focus ring (a GONE box keeps its
@@ -1575,10 +1716,22 @@ void attachTopTabBar(brls::AppletFrame* frame, brls::Box* content)
 
     auto curView      = std::make_shared<int>(-1);
     auto applyViewBar = [viewBar, viewBtns, viewIcons, stremioBtn, localBtn, jackettBtn,
-                         profileBtn, settingsBtn, searchIdx, curView,
-                         insetViewBar](int active) {
+                         profileBtn, settingsBtn, searchIdx, curView, catSearchBtn,
+                         tabButtons, insetViewBar](int active) {
         *curView  = active;
         bool show = active >= 0;
+        // Stremio's view bar takes the middle of the header: the catalog tabs
+        // other than Home fold away meanwhile (they would run into it on a
+        // handheld screen), and so does the catalog's Search -- Stremio's own
+        // stands in its place.
+        for (size_t i = 1; i < tabButtons.size(); i++)
+        {
+            tabButtons[i].btn->setVisibility(show ? brls::Visibility::GONE
+                                                  : brls::Visibility::VISIBLE);
+            tabButtons[i].btn->setFocusable(!show);
+        }
+        catSearchBtn->setVisibility(show ? brls::Visibility::GONE : brls::Visibility::VISIBLE);
+        catSearchBtn->setFocusable(!show);
         // Also here, not only on the window event: changing the UI size in
         // Options resizes the logical space without firing that event (see
         // applyUiScale), and this runs on the way back into a view.
@@ -1614,10 +1767,10 @@ void attachTopTabBar(brls::AppletFrame* frame, brls::Box* content)
         // Jackett: the rightmost button in the category bar.
         jackettBtn->setCustomNavigationRoute(brls::FocusDirection::RIGHT,
                                              show ? (brls::View*)viewBtns[0]
-                                                  : (brls::View*)settingsBtn);
+                                                  : (brls::View*)catSearchBtn);
         settingsBtn->setCustomNavigationRoute(brls::FocusDirection::LEFT,
                                               show ? (brls::View*)profileBtn
-                                                   : (brls::View*)jackettBtn);
+                                                   : (brls::View*)catSearchBtn);
         // Up from the Stremio list lands on the ACTIVE view button (Continue /
         // Movies / ...), not the "Stremio" category tab. reportView runs before
         // the list is (re)built, so finishList picks this up. Falls back to the
@@ -1696,27 +1849,8 @@ brls::View* buildBrowser()
     // No X shortcut for Options: the header carries a gear now, and a chip in
     // the footer for something already on screen is noise.
 
-    // R/L cycle the Stremio view. On the frame (not the tab) so they work with
-    // focus on the header tab bar too; a no-op when the Stremio tab is not live.
-    // One chip "L R  View": L is the auto icon, R is a glyph in the hint text.
-    // (The text glyph renders a touch smaller than the icon -- a borealis hint
-    // quirk -- but this keeps them side by side; the R action is hidden so it
-    // does not add a second chip.)
-    frame->registerAction(std::string("  ") + tr("View"), brls::BUTTON_LB, [](brls::View*) {
-        stremio::cycleActiveView(-1);
-        return true;
-    }, false, false, brls::SOUND_NONE);
-    frame->registerAction(tr("View"), brls::BUTTON_RB, [](brls::View*) {
-        stremio::cycleActiveView(+1);
-        return true;
-    }, true, false, brls::SOUND_NONE);
-
-    // select() keeps these in step from here on, but its first call ran inside
-    // attachTopTabBar -- i.e. before the actions existed, where setActionAvailable
-    // finds nothing to set. Seed them for the startup tab.
-    bool stremioUp = config::get().startupTab == config::Tab::STREMIO;
-    frame->setActionAvailable(brls::BUTTON_LB, stremioUp);
-    frame->setActionAvailable(brls::BUTTON_RB, stremioUp);
+    // The Stremio L/R "View" keys come and go with the tab: setStremioViewKeys,
+    // called by select() (already for the startup tab, in attachTopTabBar).
 
     return frame;
 }
@@ -1725,6 +1859,7 @@ brls::View* buildBrowser()
 
 int main(int argc, char* argv[])
 {
+#ifdef __SWITCH__
     // Applet mode caps the heap far below what mpv + the RAM streaming window
     // need. Bail before anything is initialised (a full-RAM launch runs as an
     // Application or SystemApplication; everything else is applet mode) -- and
@@ -1737,11 +1872,25 @@ int main(int argc, char* argv[])
         appletModeBlock();
         return EXIT_SUCCESS;
     }
+#endif
 
     ensureAppDataDir();
+#ifdef __SWITCH__
+    // https:// playback verifies against the same bundle as the app's own
+    // requests (app/http.cpp): the console mounts no CA store.
+    httpsrc_set_ca("romfs:/cacert.pem");
+#else
+    if (access("resources/cacert.pem", F_OK) == 0)
+        httpsrc_set_ca("resources/cacert.pem");
+#endif
 
     config::load();
+    http::applyProxy();
     history::load();
+    library::load();
+    // Now, while nothing can be playing: a file fetched for the result being
+    // played is only referenced once the player records it.
+    jackett::pruneCache();
     // Straight after the config it reads, and before anything can build a view:
     // tr() is resolved when a string is handed to a view, and the header, the
     // tab bar and the browser are built once and never again.
@@ -1764,6 +1913,7 @@ int main(int argc, char* argv[])
     {
         if (FILE* lf = std::fopen(APPDATA_LOG, "w+"))
         {
+#ifdef __SWITCH__
             // Async sink (see LogRing above): loggers memcpy into a RAM ring,
             // a dedicated thread does the actual SD writes. Priority 0x3B
             // (well below everything): losing a beat only delays the file,
@@ -1794,6 +1944,10 @@ int main(int argc, char* argv[])
                 std::setvbuf(lf, nullptr, _IONBF, 0);
                 brls::Logger::setLogOutput(lf);
             }
+#else
+            std::setvbuf(lf, nullptr, _IONBF, 0);
+            brls::Logger::setLogOutput(lf);
+#endif
         }
     }
 
@@ -1801,6 +1955,17 @@ int main(int argc, char* argv[])
     // did this, but that front-end is no longer compiled, so curl was being used
     // (Stremio login) without ever being initialised.
     curl_global_init(CURL_GLOBAL_DEFAULT);
+
+#ifdef __SWITCH__
+    // Space Grotesk has no Cyrillic: in Russian the whole UI uses the system
+    // font (which has it) rather than mixing two typefaces in every label.
+    brls::SwitchFontLoader::useBundledFont = !i18n::needsSystemFont();
+#endif
+    // borealis' own words (the footer's "Back", "Exit", Options' "On"/"Off")
+    // follow the console language unless told otherwise: tell it the app's,
+    // so a Russian UI on an English console does not end in "Back".
+    brls::Platform::APP_LOCALE_DEFAULT =
+        i18n::lang() == "ru" ? "ru" : i18n::lang() == "fr" ? "fr" : "en-US";
 
     if (!brls::Application::init())
     {
@@ -1831,6 +1996,8 @@ int main(int argc, char* argv[])
     brls::Application::getWindowSizeChangedEvent()->subscribe(applyUiScale);
 
     brls::Application::pushActivity(new brls::Activity(buildBrowser()));
+    // First run without Jackett: its setup on top, once.
+    maybeOfferJackettSetup();
 
     // A quiet check: it only ever surfaces when there IS a newer release, so a
     // missing network or an unreachable GitHub costs nothing but a log line.
@@ -1839,8 +2006,10 @@ int main(int argc, char* argv[])
             if (r.ok && r.installable()) update::promptInstall(r);
         });
 
+    // PC only: NX_AUTOTEST runs a scripted pass over the UI (app/autotest.hpp).
+    bool scripted = autotest::init();
     while (brls::Application::mainLoop())
-        ;
+        if (scripted) autotest::tick();
 
     // Only now: hbloader keeps the running .nro open and libnx reads our romfs
     // out of it, so the file cannot be replaced until the app is done with it.

@@ -182,6 +182,11 @@ class Application
      */
     static void crash(std::string text);
 
+    // LOCAL PATCH (NX-torrent-player): called once per frame after the UI is
+    // drawn and before the buffers are swapped -- the moment the frame can be
+    // read back (the PC build's scripted UI check takes its screenshots here).
+    static void setFrameEndHook(std::function<void()> hook);
+
     static void quit();
 
     /**
@@ -365,6 +370,7 @@ class Application
     static void removeWatchedKeys(const BrlsKeyCombination key);
 
   private:
+    inline static std::function<void()> frameEndHook;  // LOCAL PATCH, see setFrameEndHook
     inline static bool inited               = false;
     inline static bool quitRequested        = false;
     inline static bool debuggingViewEnabled = false;

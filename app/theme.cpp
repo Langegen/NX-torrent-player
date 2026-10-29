@@ -82,6 +82,14 @@ bool isLight() { return lightLatched; }
 
 NVGcolor accent() { return current().accent; }
 
+NVGcolor accentText()
+{
+    NVGcolor a = current().accent;
+    NVGcolor lifted = nvgRGBf(a.r + (1.0f - a.r) * 0.45f, a.g + (1.0f - a.g) * 0.45f,
+                              a.b + (1.0f - a.b) * 0.45f);
+    return pick(lifted, a);
+}
+
 NVGcolor gradTop()
 {
     return pick(current().gradTop, overWhite(current().accent, 0.18f));
@@ -110,6 +118,7 @@ NVGcolor textDim() { return pick(nvgRGB(190, 190, 195), nvgRGB(84, 84, 92)); }
 NVGcolor textMuted() { return pick(nvgRGB(150, 150, 155), nvgRGB(116, 116, 124)); }
 NVGcolor textFaint() { return pick(nvgRGB(110, 110, 115), nvgRGB(150, 150, 158)); }
 NVGcolor textWarn() { return pick(nvgRGB(205, 140, 140), nvgRGB(168, 54, 54)); }
+NVGcolor textGood() { return pick(nvgRGB(0x9b, 0xe3, 0x8b), nvgRGB(0x2f, 0x7d, 0x22)); }
 
 NVGcolor surface() { return pick(nvgRGB(0x2c, 0x2c, 0x31), nvgRGB(0xe9, 0xe9, 0xee)); }
 NVGcolor surfaceSunken()
@@ -222,6 +231,17 @@ void applyAccent()
         // default primary text is near-black, made for a light fill).
         t->addColor("brls/button/primary_enabled_background", accent);
         t->addColor("brls/button/primary_enabled_text", white);
+        // Values in Options, the selected item in a list picker and the
+        // Options sidebar's marker were borealis' cyan: on palette now. Text
+        // on the dark field takes the lighter tint (the accent itself is too
+        // dark to read there); on the light field the accent reads fine.
+        NVGcolor onField = t == &brls::Theme::getDarkTheme() ? glow : accent;
+        t->addColor("brls/list/listItem_value_color", onField);
+        t->addColor("brls/sidebar/active_item", onField);
+        // The Options sidebar over the app's field: a veil, not a grey slab.
+        bool dark = t == &brls::Theme::getDarkTheme();
+        t->addColor("brls/sidebar/background",
+                    dark ? nvgRGBA(255, 255, 255, 14) : nvgRGBA(0, 0, 0, 10));
     }
 
     if (repaintHook) repaintHook();

@@ -16,6 +16,12 @@
 // Natural/alphabetical string comparison (e.g. S01E01 < S01E02 < S01E10).
 bool naturalCompare(const std::string& a, const std::string& b);
 
+// Picker labels for the video files of one torrent, index-matched to `paths`:
+// the file name, prefixed by its folder when two videos share a name -- season
+// packs ship "Season 1/E01.mkv" and "Season 2/E01.mkv", which were otherwise
+// two identical rows.
+std::vector<std::string> pickerNames(const std::vector<std::string>& paths);
+
 struct Row
 {
     std::string label;
@@ -75,6 +81,11 @@ class ListActivity : public brls::Activity
 // Entry point: opens a library item. Films skip straight to the addon list;
 // series go through season/episode pickers first.
 void openLibraryItem(const std::string& authKey, const stremio::LibItem& item);
+
+// What the player is handed for an addon stream: a magnet (public trackers
+// attached) for an infoHash, the URL for a direct http(s) link, "" when it
+// cannot be played.
+std::string stremioStreamSource(const stremio::Stream& s);
 
 // Opens one episode's detail screen (synopsis + source cards) straight from its
 // id, without going through the series/season pickers. For the player's

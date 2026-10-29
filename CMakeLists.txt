@@ -14,12 +14,14 @@ cmake_dependent_option(USE_SYSTEM_FMT "" OFF "NOT USE_SHARED_LIB" ON)
 cmake_dependent_option(USE_SYSTEM_TINYXML2 "" OFF "NOT USE_SHARED_LIB" ON)
 cmake_dependent_option(USE_SYSTEM_TWEENY "" OFF "NOT USE_SHARED_LIB" ON)
 
+set(CMAKE_NO_SYSTEM_FROM_IMPORTED ON)
+
 include(${BOREALIS_LIBRARY}/cmake/toolchain.cmake)
 
 project(NX-torrent-player)
 set(VERSION_MAJOR "0")
-set(VERSION_MINOR "5")
-set(VERSION_ALTER "0")
+set(VERSION_MINOR "6")
+set(VERSION_ALTER "1")
 set(PROJECT_AUTHOR "shodowlo")
 # On-device app name shown in the Homebrew Menu.
 set(APP_TITLE "NX Torrent Player")
@@ -30,9 +32,18 @@ set(PROJECT_TITLEID "0x010000000000A123")
 # entirely -- a local HTTP server serving a fake release JSON is how the update
 # flow gets tested without publishing one:
 #   cmake . -DUPDATE_API_URL=http://192.168.1.20:8000/latest.json
-set(UPDATE_REPO "shodowlo/NX-torrent-player" CACHE STRING "GitHub owner/name for updates")
+# This fork publishes its own releases: pointing at upstream made the updater
+# replace the fork with an upstream build (losing Jackett, History, ...).
+set(UPDATE_REPO "Langegen/NX-torrent-player" CACHE STRING "GitHub owner/name for updates")
 set(UPDATE_API_URL "https://api.github.com/repos/${UPDATE_REPO}/releases/latest"
     CACHE STRING "Release API endpoint the updater polls")
+# A tag's release (its changelog), the tag appended. Same repo as above.
+set(UPDATE_TAG_URL "https://api.github.com/repos/${UPDATE_REPO}/releases/tags/"
+    CACHE STRING "Release-by-tag endpoint, the tag is appended")
+# The TMDB key a build ships with (a v3 key or a v4 read token), used when the
+# user has not entered one in Options. Empty by default: the home screen then
+# asks for one. CI can pass it from a secret: -DTMDB_API_KEY=...
+set(TMDB_API_KEY "" CACHE STRING "Default TMDB API key / read token")
 set(PROJECT_ICON ${CMAKE_CURRENT_SOURCE_DIR}/assets/icon.jpg)
 set(PROJECT_RESOURCES ${CMAKE_CURRENT_SOURCE_DIR}/library/borealis/resources)
 
@@ -42,7 +53,9 @@ find_package(Threads REQUIRED)
 list(APPEND APP_PLATFORM_LIB ${CMAKE_THREAD_LIBS_INIT})
 
 find_package(PkgConfig REQUIRED)
-set(PKG_CONFIG_USE_STATIC_LIBS ON)  # Switch links everything statically
+if (PLATFORM_SWITCH)
+    set(PKG_CONFIG_USE_STATIC_LIBS ON)  # Switch links everything statically
+endif ()
 pkg_check_modules(MPV REQUIRED IMPORTED_TARGET mpv)
 pkg_check_modules(CURL REQUIRED IMPORTED_TARGET libcurl)
 # Metahub serves some Stremio posters as WebP, which nanovg's stb_image cannot
@@ -58,10 +71,12 @@ set(ENGINE_SRC
     ${ENGINE_DIR}/bencode.c ${ENGINE_DIR}/torrent.c ${ENGINE_DIR}/torrentfs.c
     ${ENGINE_DIR}/peer.c ${ENGINE_DIR}/swarm.c ${ENGINE_DIR}/magnet.c
     ${ENGINE_DIR}/udp_tracker.c ${ENGINE_DIR}/dht.c ${ENGINE_DIR}/dhtclient.c
-    ${ENGINE_DIR}/udpdiag.c ${ENGINE_DIR}/stream.c
+    ${ENGINE_DIR}/udpdiag.c ${ENGINE_DIR}/stream.c ${ENGINE_DIR}/httpsrc.c
     ${ENGINE_DIR}/utp.cpp ${ENGINE_DIR}/utp_utils.cpp ${ENGINE_DIR}/utpbridge.cpp)
-# libutp needs -DPOSIX for its socket types (SOCKADDR_STORAGE etc).
-set_source_files_properties(${ENGINE_SRC} PROPERTIES COMPILE_DEFINITIONS "POSIX")
+# libutp needs -DPOSIX for its socket types (SOCKADDR_STORAGE etc) on Switch.
+if (PLATFORM_SWITCH)
+    set_source_files_properties(${ENGINE_SRC} PROPERTIES COMPILE_DEFINITIONS "POSIX")
+endif ()
 list(APPEND MAIN_SRC ${ENGINE_SRC})
 
 if (PLATFORM_SWITCH)
@@ -82,7 +97,9 @@ target_compile_options(${PROJECT_NAME} PRIVATE -Wformat -Werror=format)
 # Options, and is what the updater compares against the latest tag.
 target_compile_definitions(${PROJECT_NAME} PRIVATE
     APP_VERSION="${VERSION_MAJOR}.${VERSION_MINOR}.${VERSION_ALTER}"
-    UPDATE_API_URL="${UPDATE_API_URL}")
+    UPDATE_API_URL="${UPDATE_API_URL}"
+    UPDATE_TAG_URL="${UPDATE_TAG_URL}"
+    TMDB_API_KEY="${TMDB_API_KEY}")
 
 if (PLATFORM_SWITCH)
     # Bundle borealis' resources into the nro's romfs (borealis reads them from
@@ -119,6 +136,29 @@ if (PLATFORM_SWITCH)
         COMMAND ${NX_ELF2NRO_EXE} ${PROJECT_NAME}.elf ${PROJECT_NAME}.nro --icon=${PROJECT_ICON} --nacp=${PROJECT_NAME}.nacp --romfsdir=${CMAKE_BINARY_DIR}/resources
     )
 
+endif ()
+
+if (NOT PLATFORM_SWITCH)
+    add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory ${PROJECT_RESOURCES} ${CMAKE_BINARY_DIR}/resources
+        COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_CURRENT_SOURCE_DIR}/assets/NX-torrent-player-bg-rounded.png ${CMAKE_BINARY_DIR}/resources/NX-torrent-player-bg-rounded.png
+        COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_CURRENT_SOURCE_DIR}/assets/video-icon.png ${CMAKE_BINARY_DIR}/resources/video-icon.png
+        COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_CURRENT_SOURCE_DIR}/assets/magnet-icon.png ${CMAKE_BINARY_DIR}/resources/magnet-icon.png
+        COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_CURRENT_SOURCE_DIR}/assets/stremio-icon.png ${CMAKE_BINARY_DIR}/resources/stremio-icon.png
+        COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_CURRENT_SOURCE_DIR}/assets/local-tab-icon.png ${CMAKE_BINARY_DIR}/resources/local-icon.png
+        COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_CURRENT_SOURCE_DIR}/assets/SpaceGrotesk-Medium.ttf ${CMAKE_BINARY_DIR}/resources/SpaceGrotesk-Medium.ttf
+        COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_CURRENT_SOURCE_DIR}/assets/cacert.pem ${CMAKE_BINARY_DIR}/resources/cacert.pem
+    )
+    if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/pc_deps/mpv/libmpv-2.dll")
+        add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different ${CMAKE_CURRENT_SOURCE_DIR}/pc_deps/mpv/libmpv-2.dll ${CMAKE_BINARY_DIR}/libmpv-2.dll
+        )
+    endif ()
+endif ()
+
+if (NOT PLATFORM_SWITCH)
+    target_include_directories(${PROJECT_NAME} BEFORE PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/compat)
 endif ()
 
 target_include_directories(${PROJECT_NAME} PRIVATE

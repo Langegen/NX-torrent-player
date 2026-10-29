@@ -38,6 +38,8 @@
 #include "http.hpp"
 #include "json.hpp"
 #include "theme.hpp"
+#include "widgets.hpp"
+#include "workers.hpp"
 #include "i18n.hpp"
 
 namespace
@@ -1146,11 +1148,32 @@ std::string cachedPosterPath(const std::string& id)
 // Downloads one image into `path` and calls back on the UI thread with it ("" on
 // failure). Shared by the list thumbnails and the full-size background: both
 // have to survive a host that answers WebP, or an HTML error page.
+// Downloads in flight, by file: the same poster is often on screen twice (a
+// title both trending and popular) and asked for in the same frame. One
+// download, every caller told. UI thread only.
+static std::map<std::string, std::vector<std::function<void(std::string)>>> imagesInFlight;
+
 static void downloadImageAsync(const std::string& id, const std::string& url,
                         const std::string& path,
-                        std::function<void(std::string)> done)
+                        std::function<void(std::string)> doneOne)
 {
-    brls::async([id, url, path, done]() {
+    auto waiting = imagesInFlight.find(path);
+    if (waiting != imagesInFlight.end())
+    {
+        waiting->second.push_back(std::move(doneOne));
+        return;
+    }
+    imagesInFlight[path].push_back(std::move(doneOne));
+    auto done = [path](std::string result) {
+        auto it = imagesInFlight.find(path);
+        if (it == imagesInFlight.end()) return;
+        auto callbacks = std::move(it->second);
+        imagesInFlight.erase(it);
+        for (auto& cb : callbacks) cb(result);
+    };
+
+    // Low priority: what someone is waiting on (details, a search) goes first.
+    workers::run([id, url, path, done]() {
         std::string body, err;
         // Ask for a format stb_image can actually decode.
         static const char* kAcceptImg = "Accept: image/jpeg,image/png;q=0.9";
@@ -1199,10 +1222,16 @@ static void downloadImageAsync(const std::string& id, const std::string& url,
 
         if (ok && isImage)
         {
-            if (FILE* f = std::fopen(path.c_str(), "wb"))
+            // Written whole, then put in place: a reader never sees half a
+            // file (the cache is shared with other downloads running now).
+            std::string tmp = path + ".part";
+            if (FILE* f = std::fopen(tmp.c_str(), "wb"))
             {
-                std::fwrite(body.data(), 1, body.size(), f);
-                std::fclose(f);
+                bool wrote = std::fwrite(body.data(), 1, body.size(), f) == body.size();
+                wrote      = std::fclose(f) == 0 && wrote;
+                std::remove(path.c_str());
+                ok = wrote && std::rename(tmp.c_str(), path.c_str()) == 0;
+                if (!ok) std::remove(tmp.c_str());
             }
             else
                 ok = false;
@@ -1214,7 +1243,7 @@ static void downloadImageAsync(const std::string& id, const std::string& url,
 
         std::string result = ok ? path : std::string();
         brls::sync([done, result]() { done(result); });
-    });
+    }, workers::Priority::Low);
 }
 
 // The artwork URL for `id`, or "" if there is none to be had. Not every library
@@ -1348,7 +1377,7 @@ void fetchAddonsAsync(const std::string& authKey,
         return;
     }
 
-    brls::async([authKey, done]() {
+    workers::run([authKey, done]() {
         AddonsResult r;
         std::string body =
             "{\"authKey\":\"" + json::escape(authKey) + "\",\"update\":true}";
@@ -1453,7 +1482,7 @@ void fetchMetaAsync(const std::string& addonBase, const std::string& type,
         return;
     }
 
-    brls::async([addonBase, type, id, key, done]() {
+    workers::run([addonBase, type, id, key, done]() {
         MetaResult r;
         std::string url =
             addonBase + "/meta/" + http::urlEncode(type) + "/" + http::urlEncode(id) + ".json";
@@ -1520,7 +1549,7 @@ void fetchStreamsAsync(const std::string& addonBase, const std::string& type,
                        const std::string& id,
                        std::function<void(StreamsResult)> done)
 {
-    brls::async([addonBase, type, id, done]() {
+    workers::run([addonBase, type, id, done]() {
         StreamsResult r;
         std::string url = addonBase + "/stream/" + http::urlEncode(type) + "/" +
                           http::urlEncode(id) + ".json";
@@ -1613,7 +1642,7 @@ void fetchSubtitlesAsync(const std::string& authKey, const std::string& type,
             return;
         }
 
-        brls::async([list, type, videoId, done]() {
+        workers::run([list, type, videoId, done]() {
             SubtitlesResult r;
             // One addon at a time rather than in parallel. These run while the
             // engine is streaming, and the console's socket pool is what the
@@ -1685,7 +1714,7 @@ void downloadSubtitleAsync(const Subtitle& sub,
     }
 
     std::string url = sub.url;
-    brls::async([url, path, done]() {
+    workers::run([url, path, done]() {
         std::string err;
         bool ok = http::download(url, path, err);
         if (!ok)
@@ -1736,7 +1765,7 @@ void fetchCatalogGenresAsync(const std::string& addonBase,
         return;
     }
 
-    brls::async([addonBase, type, catalogId, key, done]() {
+    workers::run([addonBase, type, catalogId, key, done]() {
         std::vector<std::string> genres;
         std::string resp, err;
         if (!http::get(addonBase + "/manifest.json", resp, err))
@@ -1781,7 +1810,7 @@ void fetchCatalogAsync(const std::string& addonBase, const std::string& type,
                        const std::string& catalogId, const CatalogQuery& query,
                        std::function<void(LibraryResult)> done)
 {
-    brls::async([addonBase, type, catalogId, query, done]() {
+    workers::run([addonBase, type, catalogId, query, done]() {
         LibraryResult r;
         std::string url = catalogUrl(addonBase, type, catalogId, query);
         std::string resp, err;
@@ -1817,7 +1846,7 @@ void fetchCatalogAsync(const std::string& addonBase, const std::string& type,
 void fetchSearchAsync(const std::string& query,
                       std::function<void(LibraryResult)> done)
 {
-    brls::async([query, done]() {
+    workers::run([query, done]() {
         LibraryResult r;
         r.ok         = true;
         const char* types[] = { "movie", "series" };
@@ -3567,86 +3596,6 @@ NVGcolor tabBgAt(float px, float py)
     return nvgRGBAf(a.r + (b.r - a.r) * t, a.g + (b.g - a.g) * t,
                     a.b + (b.b - a.b) * t, 1.0f);
 }
-
-// A strip that fades its cards out at whichever edge still has content beyond
-// it, so they dissolve into the background instead of being cut off -- the same
-// treatment the episode and addon scrollers get. The scrim is the background
-// colour sampled AT the edge, fading to transparent inward; an edge with
-// nothing past it is left alone, so the first card at rest is never dimmed.
-class FadeStrip : public brls::HScrollingFrame
-{
-  public:
-    void setContentView(brls::View* view)
-    {
-        content = view;
-        brls::HScrollingFrame::setContentView(view);
-    }
-
-    void draw(NVGcontext* vg, float x, float y, float w, float h,
-              brls::Style style, brls::FrameContext* ctx) override
-    {
-        brls::HScrollingFrame::draw(vg, x, y, w, h, style, ctx);
-
-        const float fade = 64.0f;
-        float offset     = getContentOffsetX();
-        float rightLimit = content ? content->getWidth() - w : 0.0f;
-        float midY       = y + h * 0.5f;
-
-        if (offset > 2.0f)  // scrolled: cards run off the left
-        {
-            NVGcolor edge = tabBgAt(x, midY);
-            NVGcolor gone = edge;
-            gone.a        = 0.0f;
-            nvgBeginPath(vg);
-            nvgRect(vg, x, y, fade, h);
-            nvgFillPaint(vg, nvgLinearGradient(vg, x, y, x + fade, y, edge, gone));
-            nvgFill(vg);
-        }
-        if (offset < rightLimit - 2.0f)  // more cards off the right
-        {
-            NVGcolor edge = tabBgAt(x + w, midY);
-            NVGcolor gone = edge;
-            gone.a        = 0.0f;
-            nvgBeginPath(vg);
-            nvgRect(vg, x + w - fade, y, fade, h);
-            nvgFillPaint(vg,
-                         nvgLinearGradient(vg, x + w - fade, y, x + w, y, gone, edge));
-            nvgFill(vg);
-        }
-    }
-
-  private:
-    brls::View* content = nullptr;
-};
-
-// A poster with only its top corners rounded: it meets the card's footer flush,
-// and a rounded bottom edge cut two notches of card background out of the
-// artwork. brls::Image rounds all four corners, so this repeats its draw with a
-// varying-radius rect -- everything it needs is protected, not private.
-class TopRoundedImage : public brls::Image
-{
-  public:
-    void draw(NVGcontext* vg, float x, float y, float w, float h,
-              brls::Style style, brls::FrameContext* ctx) override
-    {
-        if (this->texture == 0) return;
-
-        float ix = x + this->imageX;
-        float iy = y + this->imageY;
-        this->paint.xform[4] = ix;
-        this->paint.xform[5] = iy;
-
-        float r = this->getCornerRadius();
-        nvgBeginPath(vg);
-        if (this->getClipsToBounds())
-            nvgRoundedRectVarying(vg, x, y, w, h, r, r, 0.0f, 0.0f);
-        else
-            nvgRoundedRectVarying(vg, ix, iy, this->imageWidth,
-                                  this->imageHeight, r, r, 0.0f, 0.0f);
-        nvgFillPaint(vg, a(this->paint));
-        nvgFill(vg);
-    }
-};
 
 // The card's panel: the surface the title, the meta line and the progress bar
 // sit on. It drops its own fill while the row is focused -- the cursor draws a

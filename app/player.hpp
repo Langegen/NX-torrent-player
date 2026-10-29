@@ -9,6 +9,7 @@
 #include <string>
 #include <vector>
 
+#include "content.hpp"  // content::Item, a catalog title in WatchInfo
 #include "stremio.hpp"  // stremio::Subtitle, for the addon subtitle picker
 
 struct mpv_handle;
@@ -69,10 +70,24 @@ struct WatchInfo
     // just the player (local). A Stremio play sits under the addon + source
     // lists, so 3 returns to the library (film) or the episode list (series).
     int endPop = 1;
+
+    // A catalog title (TMDB card -> sources): progress goes to the library
+    // (library.hpp) against the title and the episode, and "next episode"
+    // opens from the library instead of through Stremio. tmdbId 0 = not one.
+    content::Item content;
+    int season  = 0;
+    int episode = 0;
+    // Activities to pop before opening the next episode: the player, plus the
+    // sources screen it was started from (the next episode brings its own).
+    int nextPop = 1;
 };
 
 // Formats seconds into "M:SS" or "H:MM:SS"
 std::string fmtTime(double s);
+
+// True for an http(s) URL the player streams directly (not a link to a
+// .torrent file, which is still a torrent).
+bool isDirectUrl(const std::string& source);
 
 // Prompts the user with a dialog to resume from saved position if valid history exists,
 // or starts from the beginning if requested or if no history exists.
@@ -209,6 +224,17 @@ class MpvView : public brls::Box
     bool boostApplied = false;
 
     torrentfs* tfs = nullptr;
+    // The source is an http(s) URL played as is (a Stremio url stream, a
+    // TorrServer link), not a torrent: there is no engine, tfs stays null and
+    // mpv reads the URL -- https through our nxhttps:// stream (stream.c),
+    // since this FFmpeg has no https of its own.
+    bool direct = false;
+    std::string playUrl;         // what mpv opens when direct
+    // A torrent handed to TorrServer (Options -> Network): resolved to the
+    // server's HTTP stream in startEngine, then played as direct. History
+    // keeps the torrent as the source, so a resume works either way.
+    bool viaTorrServer = false;
+    double obsCacheSpeed = 0.0;  // mpv "cache-speed", bytes/s (direct only)
     mpv_handle* mpv = nullptr;
     mpv_render_context* renderCtx = nullptr;
 
@@ -299,6 +325,8 @@ class MpvView : public brls::Box
     bool fileLoaded    = false;  // mpv opened the stream (header downloaded)
     bool overlayHidden = false;  // loading screen has been taken down
     bool ended         = false;  // reached EOF; the auto-close is scheduled
+    bool openFailed    = false;  // mpv could not open the source; the reason
+                                 // stays on the loading screen
     int shownPct       = -1;     // last buffering % pushed to the bar
 
     // Download-speed sampling.

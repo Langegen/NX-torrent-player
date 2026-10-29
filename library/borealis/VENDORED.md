@@ -64,6 +64,12 @@ primary carries Latin glyphs, so a `FONT_REGULAR` fallback was never reached for
 Latin. Falls back to the stock system-Chinese-primary setup if the romfs file is
 missing. The `.ttf` is bundled by the top-level CMakeLists.
 
+`SwitchFontLoader::useBundledFont` (a public static, declared in
+`include/borealis/platforms/switch/switch_font.hpp`, default `true`) turns the
+bundled font off: the app clears it before `Application::init()` when the UI is
+in Russian, since Space Grotesk has no Cyrillic and a label would otherwise mix
+two typefaces.
+
 The patch is marked with a `LOCAL PATCH` comment in the source.
 
 ### 5. `library/lib/views/label.cpp` — three-dot ellipsis
@@ -105,6 +111,24 @@ the accent and `color2` to a lighter tint of it. Setting both to the same colour
 invisible however they are sized, since they then match what they travel over.
 
 Both patches are marked with a `LOCAL PATCH` comment in the source.
+
+### 6. `resources/i18n/ru/hints.json`, `resources/i18n/fr/hints.json` — added
+
+The footer's own words ("Back", "Exit", "OK") are looked up as `hints/back`
+etc. -- i.e. in a `hints.json` (the key's first part is the file name).
+Upstream's `ru/` and `fr/` only carry an older `brls.json` (keys under
+`brls/hints/...`), which nothing looks up, so a Russian UI fell back to English.
+These two files are the same keys as `en-US/hints.json`, translated. The app
+picks the locale itself (`Platform::APP_LOCALE_DEFAULT`, set in `main()` from
+its own language setting).
+
+### 7. `core/application.{hpp,cpp}` — a frame-end hook
+
+`Application::setFrameEndHook(fn)` runs `fn` once per frame after `nvgEndFrame`
+and before the video context swaps the buffers: the one moment a finished frame
+can be read back. Only the PC build's scripted UI check (`app/autotest.cpp`,
+`NX_AUTOTEST=script`) sets it, to take screenshots; nothing is set on the
+console. Marked `LOCAL PATCH` in both files.
 
 ## Updating
 

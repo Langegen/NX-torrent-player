@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <ctime>
 #include <iomanip>
+#include <memory>
 #include <sstream>
 #include <vector>
 
@@ -47,11 +48,21 @@ std::string formatDate(int64_t timestamp)
 {
     if (timestamp <= 0) return "";
     std::time_t t = (std::time_t)timestamp;
+    // Local time, not UTC: libnx's __libnx_init_time() reads the console's
+    // time zone (timeToCalendarTimeWithMyRule) at startup and sets TZ from it.
     std::tm* tm = std::localtime(&t);
     if (!tm) return "";
     char buf[64];
     std::strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M", tm);
     return buf;
+}
+
+// True if `v` is `ancestor` or sits under it.
+bool isUnder(brls::View* v, brls::View* ancestor)
+{
+    for (; v; v = v->getParent())
+        if (v == ancestor) return true;
+    return false;
 }
 
 class HistoryTabRoot : public brls::Box
@@ -65,20 +76,55 @@ class HistoryTabRoot : public brls::Box
         rebuild();
     }
 
+    ~HistoryTabRoot() override
+    {
+        *alive = false;
+    }
+
     void draw(NVGcontext* vg, float x, float y, float width, float height,
               brls::Style style, brls::FrameContext* ctx) override
     {
         brls::Box::draw(vg, x, y, width, height, style, ctx);
-        if (history::generation() != seenGen)
+        // The list changes under us when the player records progress or a
+        // dialog removes an entry. Rebuild only once we are the top activity
+        // again: while a dialog (or the player) sits above us, borealis'
+        // focus stack holds a raw pointer to the row that opened it, and
+        // freeing that row would crash when the dialog closes and hands the
+        // focus back.
+        if (history::generation() != seenGen && !rebuildQueued && isOnTop())
         {
-            seenGen = history::generation();
-            brls::sync([this]() { rebuild(); });
+            rebuildQueued = true;
+            auto live     = alive;
+            brls::sync([this, live]() {
+                if (!*live) return;  // the tab was switched away meanwhile
+                rebuildQueued = false;
+                if (!isOnTop()) return;  // draw() retries next frame
+                seenGen = history::generation();
+                rebuild();
+            });
         }
     }
 
     void rebuild()
     {
+        // clearViews() frees the rows, and the focused one with them: park the
+        // focus on ourselves first (hidden highlight), then hand it to the row
+        // at the same place in the new list. Leaving it on a freed row is an
+        // immediate crash on the next input (see StremioTab::parkFocusOffList).
+        int focusIdx       = -1;
+        brls::View* cur    = brls::Application::getCurrentFocus();
+        if (cur && isUnder(cur, this))
+        {
+            focusIdx = 0;
+            for (size_t i = 0; i < rows.size(); i++)
+                if (isUnder(cur, rows[i])) focusIdx = (int)i;
+            this->setFocusable(true);
+            this->setHideHighlight(true);
+            brls::Application::giveFocus(this);
+        }
+
         this->clearViews();
+        rows.clear();
 
         std::vector<history::Item> items = history::all();
         if (items.empty())
@@ -96,6 +142,10 @@ class HistoryTabRoot : public brls::Box
             emptyBox->addView(label);
 
             this->addView(emptyBox);
+            // Nothing focusable is left: if we parked the focus on ourselves,
+            // it stays here (B still returns to the tab bar), otherwise the
+            // tab is not focusable at all.
+            if (focusIdx < 0) this->setFocusable(false);
             return;
         }
 
@@ -108,14 +158,37 @@ class HistoryTabRoot : public brls::Box
 
         for (const auto& it : items)
         {
-            list->addView(createItemRow(it));
+            brls::Box* row = createItemRow(it);
+            rows.push_back(row);
+            list->addView(row);
         }
 
         scroll->setContentView(list);
         this->addView(scroll);
+
+        if (focusIdx >= 0)
+        {
+            int idx = std::min(focusIdx, (int)rows.size() - 1);
+            this->setFocusable(false);
+            brls::Application::giveFocus(rows[idx]);
+        }
+        else
+        {
+            this->setFocusable(false);
+        }
     }
 
   private:
+    bool isOnTop()
+    {
+        auto stack = brls::Application::getActivitiesStack();
+        return !stack.empty() && stack.back() == this->getParentActivity();
+    }
+
+    std::shared_ptr<bool> alive = std::make_shared<bool>(true);
+    std::vector<brls::Box*> rows;  // owned by the list; cleared with it
+    bool rebuildQueued          = false;
+
     brls::Box* createItemRow(const history::Item& item)
     {
         auto* row = new brls::Box();
@@ -141,11 +214,17 @@ class HistoryTabRoot : public brls::Box
         meta->setMarginTop(8.0f);
 
         // Source badge
+        // Stored in English ("Link", "Torrent"...): shown in the UI language;
+        // names (Jackett, Stremio) as they are.
         std::string srcType = item.sourceType.empty() ? "Local" : item.sourceType;
+        std::string shown   = srcType == "Link"      ? tr("Link")
+                              : srcType == "Torrent" ? tr("Torrent")
+                              : srcType == "Local"   ? tr("Local file")
+                                                     : srcType;
         auto* srcBadge = new brls::Label();
-        srcBadge->setText("[" + srcType + "]");
+        srcBadge->setText("[" + shown + "]");
         srcBadge->setFontSize(15.0f);
-        srcBadge->setTextColor(theme::accent());
+        srcBadge->setTextColor(theme::accentText());
         srcBadge->setMarginRight(14.0f);
         meta->addView(srcBadge);
 
@@ -154,7 +233,7 @@ class HistoryTabRoot : public brls::Box
         if (item.completed)
         {
             statusLbl->setText(tr("Completed"));
-            statusLbl->setTextColor(theme::accent());
+            statusLbl->setTextColor(theme::accentText());
         }
         else
         {

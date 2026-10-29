@@ -5,6 +5,8 @@
 #include <functional>
 #include <cstdint>
 
+#include "jackett_diag.hpp"
+
 namespace jackett
 {
 
@@ -58,15 +60,34 @@ void searchAsync(const std::string& query, Category category,
 // Sorts items in-place according to SortBy.
 void sortItems(std::vector<Item>& items, SortBy sort);
 
-// Tests connectivity with the specified URL and API key.
-// Callback is invoked on the UI thread (via brls::sync).
+// What a Diagnosis means and what to do about it, in the UI language, for
+// the server at `base`. "" for Problem::None.
+std::string explain(const Diagnosis& d, const std::string& base);
+
+// Tests connectivity with the specified URL and API key: a search, so the
+// indexers are checked too. Callback is invoked on the UI thread (via
+// brls::sync); on success `msg` says how many indexers answered ("Jackett
+// works. Indexers: 12"), on failure what is wrong and what to do.
 void testConnectionAsync(const std::string& url, const std::string& apiKey,
                          std::function<void(bool ok, const std::string& msg)> cb);
 
 // Downloads a .torrent file from Jackett to `destPath`.
-// Callback is invoked on the UI thread with (ok, errorMsg).
+// Callback is invoked on the UI thread with (ok, errorMsg, magnet). When the
+// indexer answers with a redirect to a magnet: URI instead of a file, ok is
+// true, no file is written and `magnet` carries the URI.
 void downloadTorrentAsync(const std::string& link, const std::string& destPath,
-                          std::function<void(bool ok, const std::string& err)> cb);
+                          std::function<void(bool ok, const std::string& err,
+                                             const std::string& magnet)> cb);
+
+// Where the .torrent for a result's link is kept for playback (stable per
+// link, under APPDATA_JACKETT). Creates the folder.
+std::string cachedTorrentPath(const std::string& link);
+
+// Deletes the files in APPDATA_JACKETT that no history entry points at: they
+// are only kept so an entry can resume, and nothing else ever removes them.
+// Call after history::load(), before anything can start a playback (a file
+// fetched for a result being played is not in the history yet).
+void pruneCache();
 
 // Saves a torrent item to the local library (downloads .torrent to APPDATA_TORRENTS
 // or appends magnet to APPDATA_MAGNETS).

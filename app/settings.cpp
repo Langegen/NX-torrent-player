@@ -16,6 +16,9 @@
 
 #include "config.hpp"
 #include "jackett.hpp"
+#include "http.hpp"
+#include "torrserver.hpp"
+#include "tmdb.hpp"
 #include "theme.hpp"
 #include "update.hpp"
 #include "stremio.hpp"
@@ -25,6 +28,7 @@ extern "C" {
 }
 
 #include "i18n.hpp"
+#include "widgets.hpp"  // ui::FieldFrame
 
 namespace
 {
@@ -48,6 +52,16 @@ class AsyncLabel : public brls::Label
     std::shared_ptr<bool> alive = std::make_shared<bool>(true);
 };
 
+// And for a button that a background job relabels: the connection tests run
+// for up to half a minute, and switching the Options sidebar frees the pane
+// (and the button) meanwhile.
+class AsyncButton : public brls::Button
+{
+  public:
+    ~AsyncButton() override { *alive = false; }
+    std::shared_ptr<bool> alive = std::make_shared<bool>(true);
+};
+
 // The same guard for a Box that a background job fills with rows -- the Account
 // screen's addon list, whose fetch can land after B has popped it.
 class AsyncBox : public brls::Box
@@ -62,6 +76,7 @@ brls::View* playbackPane();
 brls::View* streamingPane();
 brls::View* stremioPane();
 brls::View* jackettPane();
+brls::View* networkPane();
 brls::View* aboutPane();
 
 // ---------------------------------------------------------------------------
@@ -146,13 +161,19 @@ brls::View* generalPane()
     auto* startup = new brls::SelectorCell();
     int curStartupIdx = (cfg.startupTab == config::Tab::STREMIO) ? 1 :
                         (cfg.startupTab == config::Tab::JACKETT) ? 2 :
-                        (cfg.startupTab == config::Tab::HISTORY) ? 3 : 0;
-    startup->init(tr("Category on startup"), { tr("Local"), tr("Stremio"), "Jackett", tr("History") },
+                        (cfg.startupTab == config::Tab::HISTORY) ? 3 :
+                        (cfg.startupTab == config::Tab::HOME)    ? 4 :
+                        (cfg.startupTab == config::Tab::BOOKMARKS) ? 5 : 0;
+    startup->init(tr("Category on startup"),
+                  { tr("Local"), tr("Stremio"), "Jackett", tr("History"), tr("Home"),
+                    tr("Bookmarks") },
                   curStartupIdx, [](int sel) {
                       config::get().startupTab =
                           (sel == 1) ? config::Tab::STREMIO :
                           (sel == 2) ? config::Tab::JACKETT :
-                          (sel == 3) ? config::Tab::HISTORY : config::Tab::LOCAL;
+                          (sel == 3) ? config::Tab::HISTORY :
+                          (sel == 4) ? config::Tab::HOME :
+                          (sel == 5) ? config::Tab::BOOKMARKS : config::Tab::LOCAL;
                       config::save();
                   });
     list->addView(startup);
@@ -453,6 +474,7 @@ brls::View* jackettPane()
     urlCell->registerClickAction([urlCell](brls::View*) {
         brls::Application::getImeManager()->openForText(
             [urlCell](std::string out) {
+                out = jackett::normalizeUrl(out);  // "192.168.1.5" -> http://...:9117
                 config::get().jackettUrl = out;
                 config::save();
                 urlCell->setDetailText(out.empty() ? tr("Not set") : out);
@@ -488,7 +510,7 @@ brls::View* jackettPane()
     list->addView(caption(
         tr("The API Key shown in the top right corner of the Jackett web interface (leave empty if disabled).")));
 
-    auto* testBtn = new brls::Button();
+    auto* testBtn = new AsyncButton();
     testBtn->setText(tr("Test connection"));
     testBtn->setMargins(14.0f, 20.0f, 18.0f, 20.0f);
     testBtn->registerClickAction([testBtn](brls::View*) {
@@ -501,17 +523,191 @@ brls::View* jackettPane()
         testBtn->setText(tr("Testing..."));
         jackett::testConnectionAsync(
             config::get().jackettUrl, config::get().jackettApiKey,
-            [testBtn](bool ok, const std::string& msg) {
-                testBtn->setState(brls::ButtonState::ENABLED);
-                testBtn->setText(tr("Test connection"));
+            [testBtn, live = testBtn->alive](bool ok, const std::string& msg) {
+                if (*live)
+                {
+                    testBtn->setState(brls::ButtonState::ENABLED);
+                    testBtn->setText(tr("Test connection"));
+                }
+                // Either way the message says what was found or what to fix.
+                note(ok ? msg : tr("Connection failed: ") + msg);
+            });
+        return true;
+    });
+    list->addView(testBtn);
+
+    return pane;
+}
+
+brls::View* networkPane()
+{
+    brls::Box* list = nullptr;
+    auto* pane      = newPane(&list);
+    config::Config& cfg = config::get();
+
+    auto* hdr = new brls::Header();
+    hdr->setTitle("TorrServer");
+    list->addView(hdr);
+
+    auto* tsCell = new brls::DetailCell();
+    tsCell->setText(tr("Server URL"));
+    tsCell->setDetailText(cfg.torrServerUrl.empty() ? tr("Off") : cfg.torrServerUrl);
+    tsCell->registerClickAction([tsCell](brls::View*) {
+        brls::Application::getImeManager()->openForText(
+            [tsCell](std::string out) {
+                config::get().torrServerUrl = torrserver::normalizeBase(out);
+                config::save();
+                const std::string& v = config::get().torrServerUrl;
+                tsCell->setDetailText(v.empty() ? tr("Off") : v);
+            },
+            tr("TorrServer URL"), tr("e.g. http://192.168.1.10:8090"), 256,
+            config::get().torrServerUrl);
+        return true;
+    });
+    list->addView(tsCell);
+    list->addView(caption(
+        tr("When set, torrents are streamed by your TorrServer and played here as "
+           "a plain video stream, instead of being downloaded by the console. "
+           "Leave empty to use the built-in engine.")));
+
+    auto* tsTest = new AsyncButton();
+    tsTest->setText(tr("Test connection"));
+    tsTest->setMargins(14.0f, 20.0f, 18.0f, 20.0f);
+    tsTest->registerClickAction([tsTest](brls::View*) {
+        if (config::get().torrServerUrl.empty())
+        {
+            note(tr("Please set Server URL first."));
+            return true;
+        }
+        tsTest->setState(brls::ButtonState::DISABLED);
+        tsTest->setText(tr("Testing..."));
+        torrserver::testConnectionAsync(
+            config::get().torrServerUrl,
+            [tsTest, live = tsTest->alive](bool ok, const std::string& msg) {
+                if (*live)
+                {
+                    tsTest->setState(brls::ButtonState::ENABLED);
+                    tsTest->setText(tr("Test connection"));
+                }
                 if (ok)
-                    note(tr("Connection successful!"));
+                    note(tr("Connected to TorrServer ") + msg);
                 else
                     note(tr("Connection failed: ") + msg);
             });
         return true;
     });
-    list->addView(testBtn);
+    list->addView(tsTest);
+
+    auto* phdr = new brls::Header();
+    phdr->setTitle(tr("Proxy"));
+    list->addView(phdr);
+
+    auto* proxyCell = new brls::DetailCell();
+    proxyCell->setText(tr("Proxy"));
+    proxyCell->setDetailText(cfg.proxyUrl.empty() ? tr("Off") : cfg.proxyUrl);
+    proxyCell->registerClickAction([proxyCell](brls::View*) {
+        brls::Application::getImeManager()->openForText(
+            [proxyCell](std::string out) {
+                while (!out.empty() && out.back() == ' ') out.pop_back();
+                config::get().proxyUrl = out;
+                config::save();
+                http::applyProxy();
+                proxyCell->setDetailText(out.empty() ? tr("Off") : out);
+            },
+            tr("Proxy"), tr("e.g. http://host:3128 or socks5h://host:1080"), 256,
+            config::get().proxyUrl);
+        return true;
+    });
+    list->addView(proxyCell);
+    list->addView(caption(
+        tr("Used for catalogs, addons, posters and https video links. Servers on "
+           "your local network (Jackett, TorrServer) are always reached directly.")));
+
+    auto* thdr = new brls::Header();
+    thdr->setTitle("TMDB");
+    list->addView(thdr);
+
+    auto maskKey = [](const std::string& k) -> std::string {
+        if (k.empty()) return tr("Not set");
+        if (k.size() <= 8) return "********";
+        return k.substr(0, 4) + "..." + k.substr(k.size() - 4);
+    };
+    auto* tmdbKey = new brls::DetailCell();
+    tmdbKey->setText(tr("API key"));
+    tmdbKey->setDetailText(maskKey(cfg.tmdbApiKey));
+    tmdbKey->registerClickAction([tmdbKey, maskKey](brls::View*) {
+        brls::Application::getImeManager()->openForText(
+            [tmdbKey, maskKey](std::string out) {
+                while (!out.empty() && out.back() == ' ') out.pop_back();
+                config::get().tmdbApiKey = out;
+                config::save();
+                tmdbKey->setDetailText(maskKey(out));
+            },
+            tr("TMDB API key"), tr("API key (v3) or read access token (v4)"), 512,
+            config::get().tmdbApiKey);
+        return true;
+    });
+    list->addView(tmdbKey);
+
+    auto* tmdbUrl = new brls::DetailCell();
+    tmdbUrl->setText(tr("API address"));
+    tmdbUrl->setDetailText(cfg.tmdbApiUrl.empty() ? "api.themoviedb.org" : cfg.tmdbApiUrl);
+    tmdbUrl->registerClickAction([tmdbUrl](brls::View*) {
+        brls::Application::getImeManager()->openForText(
+            [tmdbUrl](std::string out) {
+                while (!out.empty() && (out.back() == ' ' || out.back() == '/')) out.pop_back();
+                config::get().tmdbApiUrl = out;
+                config::save();
+                tmdbUrl->setDetailText(out.empty() ? "api.themoviedb.org" : out);
+            },
+            tr("TMDB API address"), "https://api.themoviedb.org/3", 256,
+            config::get().tmdbApiUrl);
+        return true;
+    });
+    list->addView(tmdbUrl);
+    list->addView(caption(
+        tr("The catalog on the Home tab comes from TMDB. A free key is issued at "
+           "themoviedb.org (Settings -> API). Leave the address empty unless you use "
+           "a mirror. Changes apply when you reopen the Home tab.")));
+
+    auto* tmdbTest = new AsyncButton();
+    tmdbTest->setText(tr("Test connection"));
+    tmdbTest->setMargins(14.0f, 20.0f, 6.0f, 20.0f);
+    tmdbTest->registerClickAction([tmdbTest](brls::View*) {
+        if (!tmdb::configured())
+        {
+            note(tr("Enter the TMDB API key first."));
+            return true;
+        }
+        tmdbTest->setState(brls::ButtonState::DISABLED);
+        tmdbTest->setText(tr("Testing..."));
+        // A cleared cache makes it a real request rather than a stored answer.
+        tmdb::clearCache();
+        tmdb::fetchRowAsync(tmdb::Row::Trending, [tmdbTest, live = tmdbTest->alive](
+                                                     tmdb::ListResult r) {
+            if (*live)
+            {
+                tmdbTest->setState(brls::ButtonState::ENABLED);
+                tmdbTest->setText(tr("Test connection"));
+            }
+            if (r.ok && !r.items.empty())
+                note(tr("Connection successful!"));
+            else
+                note(tr("Connection failed: ") + (r.error.empty() ? tr("empty answer") : r.error));
+        });
+        return true;
+    });
+    list->addView(tmdbTest);
+
+    auto* tmdbClear = new brls::Button();
+    tmdbClear->setText(tr("Clear TMDB cache"));
+    tmdbClear->setMargins(6.0f, 20.0f, 18.0f, 20.0f);
+    tmdbClear->registerClickAction([](brls::View*) {
+        tmdb::clearCache();
+        note(tr("TMDB cache cleared."));
+        return true;
+    });
+    list->addView(tmdbClear);
 
     return pane;
 }
@@ -551,15 +747,18 @@ brls::View* aboutPane()
     });
     list->addView(changelog);
 
-    auto* checkNow = new brls::Button();
+    auto* checkNow = new AsyncButton();
     checkNow->setText(tr("Check now"));
     checkNow->setMargins(4.0f, 20.0f, 18.0f, 20.0f);
     checkNow->registerClickAction([checkNow](brls::View*) {
         checkNow->setState(brls::ButtonState::DISABLED);
         checkNow->setText(tr("Checking..."));
-        update::checkAsync([checkNow](update::Release r) {
-            checkNow->setState(brls::ButtonState::ENABLED);
-            checkNow->setText(tr("Check now"));
+        update::checkAsync([checkNow, live = checkNow->alive](update::Release r) {
+            if (*live)
+            {
+                checkNow->setState(brls::ButtonState::ENABLED);
+                checkNow->setText(tr("Check now"));
+            }
             // Asked for explicitly, so unlike the startup check this one says
             // something either way.
             if (!r.ok)
@@ -652,9 +851,10 @@ brls::View* SettingsActivity::createContentView()
     tabs->addTab(tr("Streaming"), [] { return streamingPane(); });
     tabs->addTab("Stremio", [] { return stremioPane(); });
     tabs->addTab("Jackett", [] { return jackettPane(); });
+    tabs->addTab(tr("Network"), [] { return networkPane(); });
     tabs->addTab(tr("About"), [] { return aboutPane(); });
 
-    auto* frame = new brls::AppletFrame();
+    auto* frame = new ui::FieldFrame();
     frame->pushContentView(tabs);
     // After pushContentView: it overwrites the title with the content view's.
     frame->setTitle(tr("Options"));
@@ -699,7 +899,7 @@ brls::View* AccountActivity::createContentView()
 
         root->addView(box);
 
-        auto* frame = new brls::AppletFrame();
+        auto* frame = new ui::FieldFrame();
         frame->pushContentView(root);
         frame->setTitle(tr("Account"));
         return frame;
@@ -917,7 +1117,7 @@ brls::View* AccountActivity::createContentView()
     });
     root->addView(logout);
 
-    auto* frame = new brls::AppletFrame();
+    auto* frame = new ui::FieldFrame();
     frame->pushContentView(root);
     frame->setTitle(tr("Account"));
     return frame;

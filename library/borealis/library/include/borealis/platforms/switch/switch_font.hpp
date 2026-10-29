@@ -26,6 +26,13 @@ class SwitchFontLoader : public FontLoader
 {
   public:
     void loadFonts() override;
+
+    // LOCAL PATCH (see VENDORED.md): whether to make the app's bundled
+    // romfs:/SpaceGrotesk-Medium.ttf the primary font. Set before
+    // Application::init(). The app turns it off for a language the font has
+    // no glyphs for (Russian), so the UI is one system font instead of Space
+    // Grotesk for Latin and the system font for everything else.
+    static bool useBundledFont;
 };
 
 } // namespace brls

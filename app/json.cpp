@@ -1,5 +1,6 @@
 #include "json.hpp"
 
+#include <cstdlib>
 #include <cstring>
 
 // A JSON reader sized to what this app actually receives: flat "key": value
@@ -170,7 +171,7 @@ std::string escape(const std::string& s)
     return out;
 }
 
-long integer(const std::string& body, const char* key, long dflt)
+long long integer(const std::string& body, const char* key, long long dflt)
 {
     std::string pat = std::string("\"") + key + "\"";
     size_t from = 0;
@@ -191,7 +192,7 @@ long integer(const std::string& body, const char* key, long dflt)
             bool neg = body[v] == '-';
             if (neg) v++;
             if (v >= body.size() || body[v] < '0' || body[v] > '9') return dflt;
-            long n = 0;
+            long long n = 0;
             while (v < body.size() && body[v] >= '0' && body[v] <= '9')
                 n = n * 10 + (body[v++] - '0');
             return neg ? -n : n;
@@ -278,6 +279,119 @@ std::vector<std::string> objects(const std::string& body, const char* key)
         {
             break;  // end of the result array
         }
+    }
+    return out;
+}
+
+std::string topLevel(const std::string& obj)
+{
+    // Copy the text, but inside any nested {...} or [...] keep only the
+    // brackets themselves: then a lookup can only land on the outer object's
+    // own keys. String contents are copied as they are (a brace in a title is
+    // not structure).
+    std::string out;
+    out.reserve(obj.size());
+    int depth  = 0;  // 1 = inside the outer object
+    bool inStr = false;
+    for (size_t i = 0; i < obj.size(); i++)
+    {
+        char c = obj[i];
+        bool keep = depth <= 1;
+        if (inStr)
+        {
+            if (keep) out += c;
+            if (c == '\\' && i + 1 < obj.size())
+            {
+                if (keep) out += obj[i + 1];
+                i++;
+            }
+            else if (c == '"')
+                inStr = false;
+            continue;
+        }
+        if (c == '"')
+        {
+            inStr = true;
+            if (keep) out += c;
+            continue;
+        }
+        if (c == '{' || c == '[')
+        {
+            if (depth <= 1) out += c;
+            depth++;
+            continue;
+        }
+        if (c == '}' || c == ']')
+        {
+            depth--;
+            if (depth <= 1) out += c;
+            continue;
+        }
+        if (keep) out += c;
+    }
+    return out;
+}
+
+std::string object(const std::string& body, const char* key)
+{
+    std::string pat = std::string("\"") + key + "\"";
+    size_t from = 0;
+    while (from < body.size())
+    {
+        size_t k = body.find(pat, from);
+        if (k == std::string::npos) return "";
+        size_t v = k + pat.size();
+        while (v < body.size() && (body[v] == ' ' || body[v] == '\t' ||
+                                   body[v] == '\r' || body[v] == '\n')) v++;
+        if (v < body.size() && body[v] == ':')
+        {
+            v++;
+            while (v < body.size() && (body[v] == ' ' || body[v] == '\t' ||
+                                       body[v] == '\r' || body[v] == '\n')) v++;
+            if (v >= body.size() || body[v] != '{') return "";
+            int depth  = 0;
+            bool inStr = false;
+            for (size_t i = v; i < body.size(); i++)
+            {
+                char c = body[i];
+                if (inStr)
+                {
+                    if (c == '\\') i++;
+                    else if (c == '"') inStr = false;
+                    continue;
+                }
+                if (c == '"') inStr = true;
+                else if (c == '{') depth++;
+                else if (c == '}' && --depth == 0)
+                    return body.substr(v, i - v + 1);
+            }
+            return "";
+        }
+        from = k + 1;
+    }
+    return "";
+}
+
+std::vector<long> integers(const std::string& body, const char* key)
+{
+    std::vector<long> out;
+    std::string pat = std::string("\"") + key + "\"";
+    size_t k = body.find(pat);
+    if (k == std::string::npos) return out;
+    size_t open = body.find_first_not_of(" \t\r\n:", k + pat.size());
+    if (open == std::string::npos || body[open] != '[') return out;
+    const char* p = body.c_str() + open + 1;
+    while (*p && *p != ']')
+    {
+        char* end = nullptr;
+        long v = std::strtol(p, &end, 10);
+        if (end == p)
+        {
+            p++;  // a comma or a space
+            continue;
+        }
+        out.push_back(v);
+        p = end;
     }
     return out;
 }

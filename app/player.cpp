@@ -10,6 +10,13 @@
 #include <glad/glad.h>
 #include <GLFW/glfw3.h>
 
+#ifdef ABSOLUTE
+#undef ABSOLUTE
+#endif
+#ifdef RELATIVE
+#undef RELATIVE
+#endif
+
 #include <mpv/client.h>
 #include <mpv/render.h>
 #include <mpv/render_gl.h>
@@ -24,11 +31,16 @@
 #include "browse.hpp"  // openEpisodeById, for the next-episode card
 #include "config.hpp"
 #include "history.hpp"
+#include "library.hpp"
+#include "sources.hpp"  // openNextEpisode
+#include "http.hpp"
+#include "torrserver.hpp"
 #include "stremio.hpp"  // cached artwork -> blurred background
 #include "theme.hpp"    // muted text for the in-menu hints
 
 extern "C" {
 #include "torrentfs.h"
+#include "httpsrc.h"
 #include "stream.h"
 #include "torrent.h"  // magnet metadata-fetch progress counters
 }
@@ -201,6 +213,59 @@ std::string fmtTime(double s)
     return buf;
 }
 
+bool isDirectUrl(const std::string& source)
+{
+    if (source.rfind("http://", 0) != 0 && source.rfind("https://", 0) != 0)
+        return false;
+    std::string path = source.substr(0, source.find_first_of("?#"));
+    return !(path.size() >= 8 &&
+             path.compare(path.size() - 8, 8, ".torrent") == 0);
+}
+
+namespace
+{
+// "https://host:8090/a/b/Film.2024.mkv?x=1" -> "host:8090". For the loading
+// screen and the ZR panel: where the bytes come from, without the token-laden
+// query a debrid link carries.
+std::string urlHost(const std::string& url)
+{
+    size_t b = url.find("://");
+    b = (b == std::string::npos) ? 0 : b + 3;
+    size_t e = url.find_first_of("/?#", b);
+    return url.substr(b, e == std::string::npos ? std::string::npos : e - b);
+}
+
+// What TorrServer is given for a source: a magnet or an http link to a
+// .torrent as is; a .torrent on the SD card -- which the server cannot reach --
+// as a magnet built from its info hash and trackers. "" on failure (err set).
+std::string torrServerLink(const std::string& source, std::string& err)
+{
+    if (source.rfind("magnet:", 0) == 0 || source.rfind("http://", 0) == 0 ||
+        source.rfind("https://", 0) == 0)
+        return source;
+
+    torrent_meta t;
+    char e[256] = { 0 };
+    if (torrent_load(&t, source.c_str(), e, sizeof(e)) != 0)
+    {
+        err = e;
+        return "";
+    }
+    static const char* hex = "0123456789abcdef";
+    std::string m = "magnet:?xt=urn:btih:";
+    for (int i = 0; i < 20; i++)
+    {
+        m += hex[t.info_hash[i] >> 4];
+        m += hex[t.info_hash[i] & 0xF];
+    }
+    if (t.name[0]) m += "&dn=" + http::urlEncode(t.name);
+    for (int i = 0; i < t.tracker_count && i < 12; i++)
+        m += "&tr=" + http::urlEncode(t.trackers[i]);
+    torrent_unload(&t);
+    return m;
+}
+} // namespace
+
 MpvView::MpvView(const std::string& source, const PlayerArt& art,
                  const std::string& titleOverride, int fileIndex,
                  WatchInfo watchInfo, const std::string& sourceType)
@@ -211,10 +276,17 @@ MpvView::MpvView(const std::string& source, const PlayerArt& art,
     , currentTitle(titleOverride)
     , currentSourceType(sourceType)
 {
+    direct = isDirectUrl(source);
+    if (direct)
+        playUrl = source;
+    else
+        viaTorrServer = !torrserver::base().empty();
     if (currentSourceType.empty())
     {
         if (!this->watch.itemId.empty())
             currentSourceType = "Stremio";
+        else if (direct)
+            currentSourceType = "Link";
         else if (source.find(".torrent") != std::string::npos)
             currentSourceType = "Torrent";
         else if (source.rfind("magnet:", 0) == 0)
@@ -256,6 +328,8 @@ MpvView::MpvView(const std::string& source, const PlayerArt& art,
         }
         else
         {
+            // A URL's query is a token, not a name.
+            if (direct) title = title.substr(0, title.find_first_of("?#"));
             size_t slash = title.find_last_of("/\\");
             if (slash != std::string::npos) title = title.substr(slash + 1);
             if (title.size() > 8 &&
@@ -278,6 +352,50 @@ MpvView::MpvView(const std::string& source, const PlayerArt& art,
 // it inline froze the whole app on a black screen until it finished or failed.
 void MpvView::startEngine(const std::string& source, int fileIndex)
 {
+    // A URL needs no engine: mpv opens it itself (the connect happens on mpv's
+    // own thread, inside loadfile).
+    if (direct)
+    {
+        if (statusLabel) statusLabel->setText(tr("Connecting..."));
+        if (!startMpv() && statusLabel)
+            statusLabel->setText(tr("Player initialisation failed"));
+        return;
+    }
+
+    // TorrServer streams it: ask the server for the file's URL (for a
+    // magnet without a file index it first waits for the metadata), then
+    // play that like any other link.
+    if (viaTorrServer)
+    {
+        if (statusLabel) statusLabel->setText(tr("Waiting for TorrServer..."));
+        auto liveFlag = this->alive;
+        std::string base = torrserver::base();
+        brls::async([this, liveFlag, source, fileIndex, base]() {
+            std::string url, err;
+            std::string link = torrServerLink(source, err);
+            bool ok = !link.empty() &&
+                      torrserver::resolve(base, link, fileIndex, url, err);
+            brls::sync([this, liveFlag, ok, url, err]() {
+                if (!*liveFlag) return;
+                if (!ok)
+                {
+                    brls::Logger::error("[torrserver] {}", err);
+                    if (statusLabel)
+                        statusLabel->setText(std::string(tr("Failed: ")) + err);
+                    openFailed = true;
+                    return;
+                }
+                brls::Logger::info("[torrserver] playing through {}", urlHost(url));
+                playUrl = url;
+                direct  = true;
+                if (statusLabel) statusLabel->setText(tr("Connecting..."));
+                if (!startMpv() && statusLabel)
+                    statusLabel->setText(tr("Player initialisation failed"));
+            });
+        });
+        return;
+    }
+
     if (statusLabel)
         statusLabel->setText(source.rfind("magnet:", 0) == 0
                                  ? tr("Fetching metadata...")
@@ -422,6 +540,10 @@ bool MpvView::startMpv()
     // (black frame). This is what the other Switch mpv players set too.
     mpv_set_option_string(mpv, "opengl-glfinish", "yes");
     mpv_set_option_string(mpv, "vd-lavc-dr", "yes");
+    // A dead host should fail the open with a reason, not hang on the
+    // loading screen (FFmpeg's http has no timeout of its own by default).
+    if (direct)
+        mpv_set_option_string(mpv, "network-timeout", "30");
 
     if (mpv_initialize(mpv) < 0)
     {
@@ -467,6 +589,35 @@ bool MpvView::startMpv()
     mpv_observe_property(mpv, 0, "demuxer-cache-idle", MPV_FORMAT_FLAG);
     mpv_observe_property(mpv, 0, "time-pos", MPV_FORMAT_DOUBLE);
     mpv_observe_property(mpv, 0, "duration", MPV_FORMAT_DOUBLE);
+
+    if (direct)
+    {
+        mpv_observe_property(mpv, 0, "cache-speed", MPV_FORMAT_DOUBLE);
+        // http:// (and HLS over it) is FFmpeg's own; https:// is not compiled
+        // into this FFmpeg, so it goes through curl as nxhttps://.
+        std::string url = playUrl;
+        std::string proxy = http::proxyFor(url);  // "" for a local server
+        if (url.rfind("https://", 0) == 0)
+        {
+            httpsrc_set_proxy(proxy.c_str());
+            stream_register_http(mpv);
+            url = "nx" + url;
+        }
+        else if (proxy.rfind("http://", 0) == 0)
+        {
+            // FFmpeg's http speaks to an http proxy only, not socks.
+            mpv_set_property_string(mpv, "http-proxy", proxy.c_str());
+        }
+        else if (!proxy.empty())
+        {
+            brls::Logger::warning("[player] a socks proxy cannot carry an http:// "
+                                  "stream; connecting directly");
+        }
+        const char* cmd[] = { "loadfile", url.c_str(), nullptr };
+        mpv_command(mpv, cmd);
+        brls::Logger::info("loadfile direct stream from {}", urlHost(playUrl));
+        return true;
+    }
 
     // Wire our torrent:// stream (source/stream.c) and start playback.
     stream_register(mpv, tfs);
@@ -832,7 +983,7 @@ brls::Box* panelSection(const char* title, float marginTop)
     auto* l = new brls::Label();
     l->setText(title);
     l->setFontSize(17.0f);
-    l->setTextColor(theme::accent());
+    l->setTextColor(theme::accentText());
     l->setMarginBottom(6.0f);
     box->addView(l);
 
@@ -1013,6 +1164,22 @@ void MpvView::goToNextEpisode()
     std::string next    = watch.nextVideoId;
     PlayerArt showArt   = art;
     int pops            = watch.endPop;
+    if (watch.content.tmdbId > 0) pops = watch.nextPop;
+
+    // A catalog title: the next episode comes from the library -- the same
+    // season pack when the last one came from one, else its sources screen.
+    if (watch.content.tmdbId > 0)
+    {
+        content::Item item = watch.content;
+        int season = watch.season, episode = watch.episode + 1;
+        brls::Logger::info("[player] next episode -> S{}E{} (pop {})", season, episode, pops);
+        brls::sync([pops, item, season, episode]() {
+            popActivitiesThen(pops, [item, season, episode]() {
+                openNextEpisode(item, season, episode);
+            });
+        });
+        return;
+    }
 
     brls::Logger::info("[player] next episode -> {} (pop {})", next, pops);
     // Deferred: we are inside draw()'s update pass (or a tap handler), and
@@ -1479,6 +1646,19 @@ void MpvView::pumpEvents()
                 // Played to the end (not stop/error): close the player and
                 // return. B is handled separately and pops only one level.
                 auto* ef = (mpv_event_end_file*)ev->data;
+                // The open itself failed (a direct URL that is dead, refused,
+                // or not a video). Say why on the loading screen; B leaves.
+                if (ef && ef->reason == MPV_END_FILE_REASON_ERROR && !fileLoaded &&
+                    statusLabel)
+                {
+                    std::string why = stream_http_err[0] ? stream_http_err
+                                                         : mpv_error_string(ef->error);
+                    brls::Logger::error("[mpv event] open failed: {}", why);
+                    statusLabel->setText(std::string(tr("Failed: ")) + why);
+                    if (statsLabel) statsLabel->setText("");
+                    openFailed = true;
+                    break;
+                }
                 if (ef && ef->reason == MPV_END_FILE_REASON_EOF && !ended)
                 {
                     ended   = true;
@@ -1521,6 +1701,8 @@ void MpvView::pumpEvents()
                         obsPos = v;
                     else if (std::strcmp(p->name, "duration") == 0)
                         obsDur = v;
+                    else if (std::strcmp(p->name, "cache-speed") == 0)
+                        obsCacheSpeed = v;
                 }
                 else if (p->format == MPV_FORMAT_FLAG &&
                          std::strcmp(p->name, "demuxer-cache-idle") == 0)
@@ -2117,14 +2299,18 @@ void MpvView::buildLoadingOverlay(const std::string& title)
 
 void MpvView::updateLoadingOverlay()
 {
-    if (!loadingOverlay)
+    if (!loadingOverlay || openFailed)
+        return;
+    // Still asking TorrServer: the status line already says so, and the
+    // engine's metadata counters below belong to some earlier magnet.
+    if (viaTorrServer && !direct)
         return;
 
     // The engine isn't open yet: for a magnet that means we're walking the
     // swarm for whoever will serve the metadata, one peer at a time. Show that
     // count -- without it the screen looks frozen for a minute and there is no
     // way to tell a slow fetch from a hung one.
-    if (!tfs)
+    if (!tfs && !direct)
     {
         int tried = torrent_meta_peers_tried;
         int total = torrent_meta_peers_total;
@@ -2135,12 +2321,8 @@ void MpvView::updateLoadingOverlay()
             else if (torrent_meta_state == META_ANNOUNCE)
                 statusLabel->setText(tr("Announcing to trackers..."));
             else if (total > 0)
-            {
-                char b[96];
-                std::snprintf(b, sizeof(b), "Metadata: peer %d / %d", tried,
-                              total);
-                statusLabel->setText(b);
-            }
+                statusLabel->setText(std::string(tr("Metadata: peer ")) +
+                                     std::to_string(tried) + " / " + std::to_string(total));
         }
         return;
     }
@@ -2182,7 +2364,17 @@ void MpvView::updateLoadingOverlay()
     // Text stats: refresh ~twice a second (each setText relayouts).
     auto now  = std::chrono::steady_clock::now();
     double dt = std::chrono::duration<double>(now - lastSample).count();
-    if (dt >= 0.5)
+    if (dt >= 0.5 && direct)
+    {
+        lastSample = now;
+        statusLabel->setText(fileLoaded ? tr("Buffering...") : tr("Connecting..."));
+        char sbuf[192];
+        std::snprintf(sbuf, sizeof(sbuf), "%s \xC2\xB7 %.1f%s",
+                      urlHost(playUrl).c_str(),
+                      obsCacheSpeed / (1024.0 * 1024.0), tr(" MB/s"));
+        statsLabel->setText(sbuf);
+    }
+    else if (dt >= 0.5)
     {
         int64_t bytes = tfs ? torrentfs_bytes_recv(tfs) : 0;
         speedBps      = (double)(bytes - lastBytes) / dt;
@@ -2206,10 +2398,11 @@ void MpvView::updateLoadingOverlay()
 
         char sbuf[192];
         double spd = speedBps / (1024.0 * 1024.0);
+        // "Peers: 12" rather than "12 peers": no plural forms to translate.
         std::snprintf(sbuf, sizeof(sbuf),
-                      "%d peer%s · %.1f MB/s · %lld / %lld pieces",
-                      peers, peers == 1 ? "" : "s", spd, (long long)piecesDone,
-                      (long long)piecesTotal);
+                      "%s%d \xC2\xB7 %.1f%s \xC2\xB7 %s%lld / %lld",
+                      tr("Peers: "), peers, spd, tr(" MB/s"), tr("Pieces: "),
+                      (long long)piecesDone, (long long)piecesTotal);
         statsLabel->setText(sbuf);
     }
 }
@@ -2242,6 +2435,31 @@ void MpvView::updateInfoOverlay()
     double dt = std::chrono::duration<double>(now - infoLastSample).count();
     if (dt < 0.5)
         return;
+
+    // A URL: no engine, so what mpv knows is all there is to show.
+    if (direct || viaTorrServer)
+    {
+        infoLastSample = now;
+        bool viaCurl   = playUrl.rfind("https://", 0) == 0;
+        char m[512];
+        std::snprintf(m, sizeof(m),
+                      "%s\n"
+                      "Host: %s\n"
+                      "Transport: %s\n"
+                      "Speed: %.1f MB/s\n"
+                      "Buffered ahead: %.0f s\n"
+                      "Last error: %s",
+                      !viaTorrServer ? "DIRECT STREAM"
+                      : direct       ? "TORRSERVER STREAM"
+                                     : "TORRSERVER: waiting for the stream URL",
+                      playUrl.empty() ? "-" : urlHost(playUrl).c_str(),
+                      viaCurl ? "https (curl, range requests)" : "http (FFmpeg)",
+                      obsCacheSpeed / (1024.0 * 1024.0), obsCacheSecs,
+                      stream_http_err[0] ? stream_http_err : "-");
+        infoLabel->setText(m);
+        if (infoLabel2) infoLabel2->setText("");
+        return;
+    }
 
     // Before torrentfs_open returns there is no engine to report on -- but that
     // is exactly the phase (a magnet's metadata fetch) that used to look hung,
@@ -2546,10 +2764,33 @@ void MpvView::updateInfoOverlay()
 
 void MpvView::logStats()
 {
+    auto now = std::chrono::steady_clock::now();
+
+    // A URL has no engine to log, but the Stremio watch-state sync rides on
+    // this 2 s cadence too and must keep running.
+    if (direct)
+    {
+        if (!statsStarted)
+        {
+            statsStarted    = true;
+            statsLastSample = now;
+            return;
+        }
+        if (std::chrono::duration<double>(now - statsLastSample).count() < 2.0)
+            return;
+        statsLastSample = now;
+        if (ready && mpv)
+        {
+            if (obsPos > 0) lastPosSec = obsPos;
+            if (obsDur > 0) lastDurSec = obsDur;
+            maybePushWatchState(false);
+        }
+        return;
+    }
+
     if (!tfs)
         return;
 
-    auto now = std::chrono::steady_clock::now();
     if (!statsStarted)
     {
         statsStarted    = true;
@@ -2743,7 +2984,16 @@ void MpvView::maybeUpdateHistory(bool force)
     it.stremioType = watch.type;
     it.id = history::makeId(it.source, it.fileIndex, it.stremioVideoId);
 
-    history::record(it);
+    // Only the final write (the player closing) waits for the SD card; the
+    // periodic one is handed to a background thread so it cannot drop a frame.
+    history::record(it, force);
+
+    // A catalog title: progress against the film / the episode, whatever file
+    // it came from (library.cpp writes in the background).
+    if (watch.content.tmdbId > 0)
+        library::recordProgress(watch.content, watch.season, watch.episode, lastPosSec,
+                                lastDurSec, finished, currentSource, currentFileIndex,
+                                currentSourceType);
 }
 
 // Enter scrub mode: pause and pin the cursor to where playback currently is.
@@ -3026,24 +3276,29 @@ void startPlaybackPrompt(const std::string& source, const PlayerArt& art,
                          const std::string& title, int fileIndex,
                          WatchInfo watch, const std::string& sourceType)
 {
-    const history::Item* item = history::find(source, fileIndex, watch.videoId);
+    history::Item item;
+    bool known = history::find(source, fileIndex, watch.videoId, item);
     double resumePos = 0.0;
     double resumeDur = 0.0;
     std::string itemTitle = title;
 
-    if (item)
+    if (known && history::hasValidResume(item))
     {
-        if (history::hasValidResume(*item))
-        {
-            resumePos = item->positionSec;
-            resumeDur = item->durationSec;
-            if (itemTitle.empty()) itemTitle = item->title;
-        }
+        resumePos = item.positionSec;
+        resumeDur = item.durationSec;
+        if (itemTitle.empty()) itemTitle = item.title;
     }
     else if (watch.resumeSec > 15.0)
     {
+        // The account's position: for a file never played here, or one the
+        // history has as finished (watched to the end here, then further on
+        // another device). Asked about either way -- it used to be applied
+        // without a word when the history entry was finished.
         resumePos = watch.resumeSec;
+        if (known && itemTitle.empty()) itemTitle = item.title;
     }
+    // Nothing to offer: from the start, whatever a caller passed in.
+    if (resumePos < 15.0) watch.resumeSec = 0.0;
 
     if (resumePos >= 15.0)
     {

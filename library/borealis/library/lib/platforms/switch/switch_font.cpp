@@ -24,6 +24,8 @@
 namespace brls
 {
 
+bool SwitchFontLoader::useBundledFont = true;  // LOCAL PATCH, see the header
+
 void SwitchFontLoader::loadFonts()
 {
     PlFontData font;
@@ -47,7 +49,8 @@ void SwitchFontLoader::loadFonts()
     // as fallbacks for the glyphs it lacks. Loading it merely as FONT_REGULAR did
     // not work: the system Chinese font that used to be the primary carries Latin
     // glyphs, so the fallback to Space Grotesk was never reached for Latin text.
-    bool sg = Application::loadFontFromFile(FONT_CHINESE_SIMPLIFIED,
+    bool sg = useBundledFont &&
+              Application::loadFontFromFile(FONT_CHINESE_SIMPLIFIED,
                                             "romfs:/SpaceGrotesk-Medium.ttf");
     if (sg)
     {
@@ -66,7 +69,10 @@ void SwitchFontLoader::loadFonts()
     {
         // Space Grotesk missing: stock behaviour -- system Simplified Chinese is
         // the primary, Standard its Latin fallback.
-        Logger::error("switch: Space Grotesk not found, falling back to system fonts");
+        if (useBundledFont)
+            Logger::error("switch: Space Grotesk not found, falling back to system fonts");
+        else
+            Logger::info("switch: system fonts only (bundled font turned off)");
         rc = plGetSharedFontByType(&font, PlSharedFontType_ChineseSimplified);
         if (R_SUCCEEDED(rc) &&
             Application::loadFontFromMemory(FONT_CHINESE_SIMPLIFIED, font.address, font.size, false))
