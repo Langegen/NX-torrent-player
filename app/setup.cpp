@@ -180,7 +180,7 @@ class JackettSetupView : public brls::Box
             checkBtn->setText(ok ? tr("Done") : tr("Check and save"));
             // Nothing left to skip once it works.
             skipBtn->setVisibility(ok ? brls::Visibility::GONE : brls::Visibility::VISIBLE);
-            say(msg, ok ? nvgRGB(0x9b, 0xe3, 0x8b) : theme::textWarn());
+            say(msg, ok ? theme::textGood() : theme::textWarn());
         });
     }
 };
@@ -190,7 +190,7 @@ class JackettSetupActivity : public brls::Activity
   public:
     brls::View* createContentView() override
     {
-        auto* frame = new brls::AppletFrame(new JackettSetupView());
+        auto* frame = new ui::FieldFrame(new JackettSetupView());
         frame->setTitle("Jackett");
         // "Set up Jackett" heads the view: no second title above it.
         frame->setHeaderVisibility(brls::Visibility::GONE);

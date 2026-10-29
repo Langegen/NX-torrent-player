@@ -17,6 +17,7 @@
 #include "player.hpp"
 #include "torrent_play.hpp"
 #include "theme.hpp"
+#include "widgets.hpp"  // ui::FieldFrame
 
 extern "C" {
 #include "torrent.h"
@@ -645,7 +646,7 @@ void openJackettSearch(const std::string& query, int category)
     auto view        = std::make_shared<JackettView>(root);
     root->controller = view;
 
-    auto* frame = new brls::AppletFrame(root);
+    auto* frame = new ui::FieldFrame(root);
     frame->setTitle("Jackett");
     brls::Application::pushActivity(new brls::Activity(frame));
     // After the push: a search left unconfigured shows its setup prompt

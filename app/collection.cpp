@@ -161,7 +161,7 @@ void openCollection(const std::string& title, const tmdb::ListQuery& q)
     root->addView(scroll);
     grid->load(q, scroll);
 
-    auto* frame = new brls::AppletFrame(root);
+    auto* frame = new ui::FieldFrame(root);
     frame->setTitle("");
     // The heading is the collection's name: no empty title bar above it.
     frame->setHeaderVisibility(brls::Visibility::GONE);

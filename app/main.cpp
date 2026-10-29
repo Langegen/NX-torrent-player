@@ -54,6 +54,7 @@
 #include "jackett_tab.hpp"
 #include "setup.hpp"
 #include "autotest.hpp"
+#include "widgets.hpp"  // ui::paintField
 #include "history.hpp"
 #include "history_tab.hpp"
 #include "bookmarks.hpp"
@@ -1253,22 +1254,16 @@ class BrowserFrame : public brls::AppletFrame
         stremio::setLibraryCountSink(nullptr);
     }
 
-    // Both the background gradient and the header mark are Stremio-tab-only.
+    // The header mark is Stremio-tab-only (the field is on every tab).
     void setOnStremio(bool on) { this->onStremio = on; }
 
     void draw(NVGcontext* vg, float x, float y, float width, float height,
               brls::Style style, brls::FrameContext* ctx) override
     {
-        if (this->onStremio)
-        {
-            NVGpaint gradient =
-                nvgLinearGradient(vg, x + width, y, x, y + height,
-                                  theme::gradTop(), theme::gradBottom());
-            nvgBeginPath(vg);
-            nvgRect(vg, x, y, width, height);
-            nvgFillPaint(vg, gradient);
-            nvgFill(vg);
-        }
+        // Every tab on the app's field now, not only Stremio's: the flat theme
+        // grey read as unfinished, and the strips' edge fades (tabBgAt) were
+        // blending into this gradient on every tab anyway.
+        ui::paintField(vg, x, y, width, height);
         brls::AppletFrame::draw(vg, x, y, width, height, style, ctx);
 
         // The Stremio mark, drawn on top of the header's icon slot rather than

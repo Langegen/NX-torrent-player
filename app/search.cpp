@@ -436,7 +436,7 @@ void openCatalogSearch()
         return;
     }
     auto* screen = new SearchScreen();
-    auto* frame  = new brls::AppletFrame(screen);
+    auto* frame  = new ui::FieldFrame(screen);
     frame->setTitle(tr("Search"));
     brls::Application::pushActivity(new brls::Activity(frame));
 }

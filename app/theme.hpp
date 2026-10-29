@@ -72,6 +72,7 @@ NVGcolor textDim();     // secondary labels
 NVGcolor textMuted();   // captions, empty states, Options hints
 NVGcolor textFaint();   // the faintest tier (a disabled search result)
 NVGcolor textWarn();    // an unavailable / error line
+NVGcolor textGood();    // a success line, "best choice"
 
 NVGcolor surface();        // a card sitting on the field
 NVGcolor surfaceSunken();  // a thumbnail well, one step below a card

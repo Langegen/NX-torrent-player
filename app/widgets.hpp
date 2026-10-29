@@ -14,6 +14,28 @@
 // the field is painted): what a fade has to blend into.
 NVGcolor tabBgAt(float px, float py);
 
+namespace ui
+{
+// The app's background field, behind every screen but the player and the
+// card (which has its own backdrop): the accent's tint at the top right
+// fading to black (dark) or white (light) at the bottom left, over the whole
+// frame -- header, content and footer alike. tabBgAt() samples the same.
+void paintField(NVGcontext* vg, float x, float y, float w, float h);
+
+// An AppletFrame on that field.
+class FieldFrame : public brls::AppletFrame
+{
+  public:
+    using brls::AppletFrame::AppletFrame;
+    void draw(NVGcontext* vg, float x, float y, float w, float h, brls::Style style,
+              brls::FrameContext* ctx) override
+    {
+        paintField(vg, x, y, w, h);
+        brls::AppletFrame::draw(vg, x, y, w, h, style, ctx);
+    }
+};
+} // namespace ui
+
 // A strip that fades its cards out at whichever edge still has content beyond
 // it, so they dissolve into the background instead of being cut off -- the same
 // treatment the episode and addon scrollers get. The scrim is the background

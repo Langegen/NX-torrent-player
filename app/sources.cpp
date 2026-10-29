@@ -869,7 +869,7 @@ class SourcesView : public brls::Box
             b->addView(l);
             tags->addView(b);
         };
-        if (best) tag(tr("best choice"), nvgRGB(0x9b, 0xe3, 0x8b));
+        if (best) tag(tr("best choice"), theme::textGood());
         for (const auto& x : release::tags(s.info)) tag(x, theme::textDim());
         if (item.isSeries() && s.info.fullSeason)
             tag(s.info.seasonTo > s.info.season ? tr("several seasons") : tr("whole season"),
@@ -970,7 +970,7 @@ class SourcesView : public brls::Box
 void openSourcesScreen(const content::Item& item, int season, int episode,
                        int episodesInSeason)
 {
-    auto* frame = new brls::AppletFrame(new SourcesView(item, season, episode, episodesInSeason));
+    auto* frame = new ui::FieldFrame(new SourcesView(item, season, episode, episodesInSeason));
     frame->setTitle("");
     // "Torrents" and the title head the view itself: no empty bar above them.
     frame->setHeaderVisibility(brls::Visibility::GONE);

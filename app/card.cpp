@@ -109,7 +109,13 @@ class CardView : public brls::Box
         st->backdrop->setPositionTop(0.0f);
         st->backdrop->setPositionLeft(0.0f);
         st->backdrop->setWidthPercentage(100.0f);
-        st->backdrop->setHeightPercentage(100.0f);
+        // The whole screen, footer included: the backdrop runs on under the
+        // button hints instead of stopping at a grey bar. Not in the light
+        // theme, whose dark hint text needs the light field under it.
+        if (theme::isLight())
+            st->backdrop->setHeightPercentage(100.0f);
+        else
+            st->backdrop->setHeight(brls::Application::contentHeight);
         st->backdrop->setScalingType(brls::ImageScalingType::FILL);
         st->backdrop->setClipsToBounds(true);
         addView(st->backdrop);
@@ -163,7 +169,10 @@ class CardView : public brls::Box
         v->setPositionTop(0.0f);
         v->setPositionLeft(0.0f);
         v->setWidthPercentage(100.0f);
-        v->setHeightPercentage(100.0f);
+        if (theme::isLight())
+            v->setHeightPercentage(100.0f);
+        else
+            v->setHeight(brls::Application::contentHeight);  // under the footer too
     }
 
     static brls::Label* whiteLabel(const std::string& text, float size, int alpha)
@@ -622,7 +631,7 @@ class CardActivity : public brls::Activity
 
     brls::View* createContentView() override
     {
-        auto* frame = new brls::AppletFrame(new CardView(item));
+        auto* frame = new ui::FieldFrame(new CardView(item));
         frame->setTitle("");
         // The backdrop is the card: no empty title bar across its top.
         frame->setHeaderVisibility(brls::Visibility::GONE);

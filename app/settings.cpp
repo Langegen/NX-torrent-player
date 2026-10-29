@@ -28,6 +28,7 @@ extern "C" {
 }
 
 #include "i18n.hpp"
+#include "widgets.hpp"  // ui::FieldFrame
 
 namespace
 {
@@ -830,7 +831,7 @@ brls::View* SettingsActivity::createContentView()
     tabs->addTab(tr("Network"), [] { return networkPane(); });
     tabs->addTab(tr("About"), [] { return aboutPane(); });
 
-    auto* frame = new brls::AppletFrame();
+    auto* frame = new ui::FieldFrame();
     frame->pushContentView(tabs);
     // After pushContentView: it overwrites the title with the content view's.
     frame->setTitle(tr("Options"));
@@ -875,7 +876,7 @@ brls::View* AccountActivity::createContentView()
 
         root->addView(box);
 
-        auto* frame = new brls::AppletFrame();
+        auto* frame = new ui::FieldFrame();
         frame->pushContentView(root);
         frame->setTitle(tr("Account"));
         return frame;
@@ -1093,7 +1094,7 @@ brls::View* AccountActivity::createContentView()
     });
     root->addView(logout);
 
-    auto* frame = new brls::AppletFrame();
+    auto* frame = new ui::FieldFrame();
     frame->pushContentView(root);
     frame->setTitle(tr("Account"));
     return frame;

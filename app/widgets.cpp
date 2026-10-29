@@ -7,6 +7,19 @@
 namespace ui
 {
 
+void paintField(NVGcontext* vg, float x, float y, float w, float h)
+{
+    // Top right -> bottom left, as tabBgAt() reads it back (the strips' edge
+    // fades must land on exactly this colour).
+    nvgSave(vg);
+    nvgBeginPath(vg);
+    nvgRect(vg, x, y, w, h);
+    nvgFillPaint(vg, nvgLinearGradient(vg, x + w, y, x, y + h, theme::gradTop(),
+                                       theme::gradBottom()));
+    nvgFill(vg);
+    nvgRestore(vg);
+}
+
 namespace
 {
 constexpr float kRadius = 8.0f;
@@ -257,6 +270,10 @@ brls::Button* actionButton(const std::string& text, bool primary,
     // The mock-ups' pills: smaller than borealis' stock button, the main one
     // in the accent, the others a translucent fill rather than an outline.
     b->setStyle(primary ? &brls::BUTTONSTYLE_PRIMARY : &brls::BUTTONSTYLE_BORDERLESS);
+    // On a picture the text is white whatever the theme: the light theme's
+    // dark label vanished on the darkened artwork. Before the fill:
+    // setTextColor re-applies the style, which resets the background.
+    if (!primary && onImage) b->setTextColor(nvgRGB(255, 255, 255));
     if (!primary)
         b->setBackgroundColor(onImage ? nvgRGBA(255, 255, 255, 34) : theme::scrim(26));
     b->setFontSize(17.0f);
@@ -279,7 +296,10 @@ void setPillActive(brls::Button* b, bool active, bool onImage)
     // too (with transparent) made a selected filter or season look unselected.
     b->setStyle(active ? &brls::BUTTONSTYLE_PRIMARY : &brls::BUTTONSTYLE_BORDERLESS);
     if (!active)
+    {
+        if (onImage) b->setTextColor(nvgRGB(255, 255, 255));  // before: it resets the fill
         b->setBackgroundColor(onImage ? nvgRGBA(255, 255, 255, 34) : theme::scrim(26));
+    }
 }
 
 } // namespace ui
