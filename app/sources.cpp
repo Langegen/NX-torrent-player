@@ -547,8 +547,8 @@ class SourcesView : public brls::Box
 
         if (!jackettOn && !stremioOn)
         {
-            status->setText(tr("To find sources, sign in to Stremio or set up Jackett in "
-                               "Options."));
+            status->setText(tr("To find sources, set up Jackett in Options (or sign in to "
+                               "Stremio)."));
             return;
         }
 

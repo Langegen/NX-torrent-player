@@ -214,6 +214,15 @@ bool parseDetails(const std::string& body, content::Kind kind,
         if (!n.empty()) out.cast.push_back(n);
         if (out.cast.size() >= 6) break;
     }
+
+    // "recommendations": a list answer of its own, nested. Its titles are of
+    // the same kind (TMDB recommends films for a film, shows for a show).
+    std::string rec = json::object(body, "recommendations");
+    if (!rec.empty())
+    {
+        out.similar = parseList(rec, imageBase, kind == content::Kind::Series ? 1 : 0);
+        if (out.similar.size() > 20) out.similar.resize(20);
+    }
     return true;
 }
 
@@ -521,7 +530,7 @@ void fetchDetailsAsync(content::Kind kind, int id,
     Settings s = settings();
     std::string path = std::string(kind == content::Kind::Series ? "/tv/" : "/movie/") +
                        std::to_string(id);
-    std::string url = requestUrl(s, path, { { "append_to_response", "external_ids,credits" } });
+    std::string url = requestUrl(s, path, { { "append_to_response", "external_ids,credits,recommendations" } });
     brls::async([s, url, kind, done]() {
         DetailsResult r;
         std::string body;

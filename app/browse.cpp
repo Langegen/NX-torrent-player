@@ -582,9 +582,9 @@ void showStreams(const stremio::Addon& addon, const std::string& type,
                 // YouTube id, an external page) does not -- say so up front
                 // rather than failing after the tap.
                 if (playableSource(s).empty())
-                    row.detail = "unsupported";
+                    row.detail = tr("unsupported");
                 else if (s.infoHash.empty())
-                    row.detail = "link";
+                    row.detail = tr("link");
 
                 rows.push_back(row);
             }
@@ -1107,7 +1107,7 @@ class AddonSourcePicker : public brls::Activity
         if (playableSource(s).empty())
         {
             auto* u = new brls::Label();
-            u->setText("unsupported");
+            u->setText(tr("unsupported"));
             u->setFontSize(15.0f);
             u->setTextColor(theme::textWarn());
             u->setMarginTop(8.0f);

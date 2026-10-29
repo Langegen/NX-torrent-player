@@ -2321,12 +2321,8 @@ void MpvView::updateLoadingOverlay()
             else if (torrent_meta_state == META_ANNOUNCE)
                 statusLabel->setText(tr("Announcing to trackers..."));
             else if (total > 0)
-            {
-                char b[96];
-                std::snprintf(b, sizeof(b), "Metadata: peer %d / %d", tried,
-                              total);
-                statusLabel->setText(b);
-            }
+                statusLabel->setText(std::string(tr("Metadata: peer ")) +
+                                     std::to_string(tried) + " / " + std::to_string(total));
         }
         return;
     }
@@ -2373,9 +2369,9 @@ void MpvView::updateLoadingOverlay()
         lastSample = now;
         statusLabel->setText(fileLoaded ? tr("Buffering...") : tr("Connecting..."));
         char sbuf[192];
-        std::snprintf(sbuf, sizeof(sbuf), "%s \xC2\xB7 %.1f MB/s",
+        std::snprintf(sbuf, sizeof(sbuf), "%s \xC2\xB7 %.1f%s",
                       urlHost(playUrl).c_str(),
-                      obsCacheSpeed / (1024.0 * 1024.0));
+                      obsCacheSpeed / (1024.0 * 1024.0), tr(" MB/s"));
         statsLabel->setText(sbuf);
     }
     else if (dt >= 0.5)
@@ -2402,10 +2398,11 @@ void MpvView::updateLoadingOverlay()
 
         char sbuf[192];
         double spd = speedBps / (1024.0 * 1024.0);
+        // "Peers: 12" rather than "12 peers": no plural forms to translate.
         std::snprintf(sbuf, sizeof(sbuf),
-                      "%d peer%s · %.1f MB/s · %lld / %lld pieces",
-                      peers, peers == 1 ? "" : "s", spd, (long long)piecesDone,
-                      (long long)piecesTotal);
+                      "%s%d \xC2\xB7 %.1f%s \xC2\xB7 %s%lld / %lld",
+                      tr("Peers: "), peers, spd, tr(" MB/s"), tr("Pieces: "),
+                      (long long)piecesDone, (long long)piecesTotal);
         statsLabel->setText(sbuf);
     }
 }
@@ -3285,19 +3282,23 @@ void startPlaybackPrompt(const std::string& source, const PlayerArt& art,
     double resumeDur = 0.0;
     std::string itemTitle = title;
 
-    if (known)
+    if (known && history::hasValidResume(item))
     {
-        if (history::hasValidResume(item))
-        {
-            resumePos = item.positionSec;
-            resumeDur = item.durationSec;
-            if (itemTitle.empty()) itemTitle = item.title;
-        }
+        resumePos = item.positionSec;
+        resumeDur = item.durationSec;
+        if (itemTitle.empty()) itemTitle = item.title;
     }
     else if (watch.resumeSec > 15.0)
     {
+        // The account's position: for a file never played here, or one the
+        // history has as finished (watched to the end here, then further on
+        // another device). Asked about either way -- it used to be applied
+        // without a word when the history entry was finished.
         resumePos = watch.resumeSec;
+        if (known && itemTitle.empty()) itemTitle = item.title;
     }
+    // Nothing to offer: from the start, whatever a caller passed in.
+    if (resumePos < 15.0) watch.resumeSec = 0.0;
 
     if (resumePos >= 15.0)
     {

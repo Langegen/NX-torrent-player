@@ -79,7 +79,11 @@ static const char* kMovie = R"J({"backdrop_path":"/bd.jpg","genres":[{"id":878,"
  "id":693134,"imdb_id":"tt15239678","original_title":"Dune: Part Two","overview":"…",
  "poster_path":"/p.jpg","release_date":"2024-02-27","runtime":166,"title":"Дюна: Часть вторая",
  "vote_average":8.1,"belongs_to_collection":{"id":726871,"name":"Дюна (Коллекция)"},
- "external_ids":{"imdb_id":"tt15239678"}})J";
+ "external_ids":{"imdb_id":"tt15239678"},
+ "recommendations":{"page":1,"results":[
+  {"id":438631,"title":"Дюна","original_title":"Dune","media_type":"movie","poster_path":"/r1.jpg",
+   "release_date":"2021-09-15","genre_ids":[878,12],"vote_average":7.8},
+  {"id":0,"title":"broken"}],"total_pages":2}})J";
 
 static const char* kSeason = R"J({"_id":"x","air_date":"2023-11-09","episodes":[
  {"air_date":"2023-11-09","episode_number":1,"name":"Пришиться","overview":"o1","runtime":53,
@@ -189,6 +193,13 @@ static void test_details()
     CHECK(m.item.imdbId == "tt15239678");
     CHECK(m.item.runtimeMin == 166);
     CHECK(m.item.posterUrlLarge == "https://image.tmdb.org/t/p/w342/p.jpg");
+    // Recommendations: their ids and titles don't leak into the film's own.
+    CHECK(m.item.tmdbId == 693134);
+    CHECK(m.similar.size() == 1);
+    CHECK(m.similar[0].tmdbId == 438631 && m.similar[0].title == "Дюна");
+    CHECK(m.similar[0].kind == content::Kind::Movie);
+    CHECK(m.similar[0].posterUrl == "https://image.tmdb.org/t/p/w185/r1.jpg");
+    CHECK(d.similar.empty());
     CHECK(!tmdb::parseDetails("{}", content::Kind::Movie, IMG, m));
     std::printf("      PASSED\n");
 }

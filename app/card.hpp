@@ -1,6 +1,13 @@
 #pragma once
 
+#include <memory>
+
 #include "content.hpp"
+
+namespace brls
+{
+class Box;
+}
 
 // The film / series card (roadmap mock-up "Карточка"): the backdrop across the
 // screen darkened on the left, the poster, the title, a row of chips (TMDB
@@ -15,3 +22,8 @@ void openContentCard(const content::Item& item);
 // straight to its sources; a series opens the card, since an episode has to
 // be picked first.
 void watchContent(const content::Item& item);
+
+// A catalog poster: A opens the title's card, Y puts it in the bookmarks as
+// Planned (or takes it out). The home rows, collections and the card's
+// "More like this".
+brls::Box* catalogPoster(const content::Item& item, std::shared_ptr<bool> alive, float w);

@@ -32,6 +32,8 @@ const Pair kRu[] = {
     { "This addon only offers 4K sources, which are hidden in Options.",
       "Этот аддон предлагает только 4K-источники, а они скрыты в настройках." },
     { "Source", "Источник" },
+    { "unsupported", "не поддерживается" },
+    { "link", "ссылка" },
     { "Pick a source", "Выберите источник" },
     { "Unsupported source: only torrents and direct video links can be played.",
       "Источник не поддерживается: воспроизводятся только торренты и прямые "
@@ -203,6 +205,10 @@ const Pair kRu[] = {
     { "Searching DHT for peers...", "Поиск пиров в DHT..." },
     { "Announcing to trackers...", "Опрос трекеров..." },
     { "Downloading header...", "Загрузка заголовка..." },
+    { "Metadata: peer ", "Метаданные: пир " },
+    { "Peers: ", "Пиры: " },
+    { "Pieces: ", "Части: " },
+    { " MB/s", " МБ/с" },
     { "NEEDED", "НУЖЕН" },
     { "INFLIGHT", "В ПУТИ" },
     { "DONE", "ГОТОВ" },
@@ -455,13 +461,14 @@ const Pair kRu[] = {
     { "Seasons: ", "Сезонов: " },
     { "Episodes: ", "Серий: " },
     { "Starring: ", "В ролях: " },
+    { "More like this", "Похожие" },
     { "Still loading, try again in a moment.",
       "Данные ещё загружаются, попробуйте через секунду." },
     { "Set up Jackett in Options to search torrents.",
       "Настройте Jackett в настройках, чтобы искать торренты." },
-    { "To find sources, sign in to Stremio or set up Jackett in Options.",
-      "Чтобы найти источники, войдите в Stremio или настройте Jackett в "
-      "настройках." },
+    { "To find sources, set up Jackett in Options (or sign in to Stremio).",
+      "Чтобы найти источники, настройте Jackett в настройках (или войдите в "
+      "Stremio)." },
 
     // ---- sources screen -------------------------------------------------------
     { " releases", " раздач" },

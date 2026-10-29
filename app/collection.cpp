@@ -103,18 +103,7 @@ void PosterGrid::add(const content::Item& it)
         row->setMarginBottom(kGap);
         addView(row);
     }
-    content::Item copy = it;
-    auto* card = ui::posterCard(it.title, it.key(), it.posterUrl, alive,
-                                [copy]() { openContentCard(copy); }, kPosterW);
-    card->registerAction(tr("Bookmark"), brls::BUTTON_Y, [copy](brls::View*) {
-        library::Entry e;
-        bool marked = library::find(copy.key(), e) && e.status != library::Status::None;
-        library::setStatus(copy, marked ? library::Status::None : library::Status::Planned);
-        brls::Application::notify(marked ? tr("Removed from bookmarks")
-                                         : tr("Added to bookmarks: Planned"));
-        return true;
-    });
-    row->addView(card);
+    row->addView(catalogPoster(it, alive, kPosterW));
     shown++;
 }
 

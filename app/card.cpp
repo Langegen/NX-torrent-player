@@ -58,7 +58,7 @@ void openSources(const content::Item& it, int season, int episode, int episodesI
     bool stremioOn = !stremio::loadAuthKey().empty() && !it.imdbId.empty();
     if (!jackettOn && !stremioOn)
     {
-        note(tr("To find sources, sign in to Stremio or set up Jackett in Options."));
+        note(tr("To find sources, set up Jackett in Options (or sign in to Stremio)."));
         return;
     }
     openSourcesScreen(it, season, episode, episodesInSeason);
@@ -84,6 +84,8 @@ struct CardState
     brls::Box* seasonBar       = nullptr;
     std::vector<brls::Button*> seasonBtns;
     brls::Box* episodes        = nullptr;
+    brls::Box* similarSection  = nullptr;  // "More like this"
+    brls::Box* similarRow      = nullptr;
 };
 
 class CardView : public brls::Box
@@ -125,6 +127,7 @@ class CardView : public brls::Box
         body->setPadding(34.0f, 60.0f, 40.0f, 60.0f);
         buildTop(body);
         buildSeasons(body);
+        buildSimilar(body);
         scroll->setContentView(body);
         addView(scroll);
 
@@ -378,6 +381,35 @@ class CardView : public brls::Box
         body->addView(st->seasonsSection);
     }
 
+    // TMDB's recommendations under everything else, as on the home rows: A
+    // opens that title's card on top of this one, Y bookmarks it.
+    void buildSimilar(brls::Box* body)
+    {
+        st->similarSection = new brls::Box();
+        st->similarSection->setAxis(brls::Axis::COLUMN);
+        st->similarSection->setMarginTop(26.0f);
+        st->similarSection->setVisibility(brls::Visibility::GONE);
+
+        auto* h = whiteLabel(tr("More like this"), 20.0f, 235);
+        h->setMarginBottom(10.0f);
+        st->similarSection->addView(h);
+
+        st->similarRow = new brls::Box();
+        st->similarSection->addView(ui::strip(st->similarRow, kSimilarW * 1.5f + 22.0f, false));
+        body->addView(st->similarSection);
+    }
+
+    static constexpr float kSimilarW = 140.0f;
+
+    void showSimilar()
+    {
+        if (st->d.similar.empty()) return;
+        st->similarRow->clearViews();  // never focused: only filled once
+        for (const auto& it : st->d.similar)
+            st->similarRow->addView(catalogPoster(it, alive, kSimilarW));
+        st->similarSection->setVisibility(brls::Visibility::VISIBLE);
+    }
+
     void loadDetails()
     {
         auto weak = std::weak_ptr<CardState>(st);
@@ -410,6 +442,7 @@ class CardView : public brls::Box
             }
             s->playBtn->setText(playLabel());
             if (s->d.item.isSeries() && !s->d.seasons.empty()) showSeasons();
+            showSimilar();
             loadImdbRating();
         });
     }
@@ -574,6 +607,21 @@ class CardActivity : public brls::Activity
 void openContentCard(const content::Item& item)
 {
     brls::Application::pushActivity(new CardActivity(item));
+}
+
+brls::Box* catalogPoster(const content::Item& item, std::shared_ptr<bool> alive, float w)
+{
+    auto* card = ui::posterCard(item.title, item.key(), item.posterUrl, alive,
+                                [item]() { openContentCard(item); }, w);
+    card->registerAction(tr("Bookmark"), brls::BUTTON_Y, [item](brls::View*) {
+        library::Entry e;
+        bool marked = library::find(item.key(), e) && e.status != library::Status::None;
+        library::setStatus(item, marked ? library::Status::None : library::Status::Planned);
+        brls::Application::notify(marked ? tr("Removed from bookmarks")
+                                         : tr("Added to bookmarks: Planned"));
+        return true;
+    });
+    return card;
 }
 
 void watchContent(const content::Item& item)

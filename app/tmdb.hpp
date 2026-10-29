@@ -60,7 +60,8 @@ std::string errorMessage(const std::string& body);
 std::vector<content::Item> parseList(const std::string& json,
                                      const std::string& imageBase, int kind);
 
-// /movie/{id} or /tv/{id} with append_to_response=external_ids,credits.
+// /movie/{id} or /tv/{id} with append_to_response=external_ids,credits,
+// recommendations (the card's "More like this" row).
 bool parseDetails(const std::string& json, content::Kind kind,
                   const std::string& imageBase, content::Details& out);
 

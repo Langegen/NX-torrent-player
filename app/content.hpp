@@ -78,6 +78,7 @@ struct Details
     Item item;
     std::vector<Season> seasons;     // series only, specials last
     std::vector<std::string> cast;   // a few names, top billing first
+    std::vector<Item> similar;       // TMDB's recommendations, same kind
 };
 
 } // namespace content

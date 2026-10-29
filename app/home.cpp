@@ -79,25 +79,9 @@ std::string smallBackdrop(std::string url)
     return url;
 }
 
-// Y on a poster: in the bookmarks as Planned, or out again.
-void toggleBookmark(const content::Item& it)
-{
-    library::Entry e;
-    bool marked = library::find(it.key(), e) && e.status != library::Status::None;
-    library::setStatus(it, marked ? library::Status::None : library::Status::Planned);
-    brls::Application::notify(marked ? tr("Removed from bookmarks")
-                                     : tr("Added to bookmarks: Planned"));
-}
-
 brls::Box* catalogCard(const content::Item& it, std::shared_ptr<bool> alive)
 {
-    auto* card = ui::posterCard(it.title, it.key(), it.posterUrl, alive,
-                                [it]() { openContentCard(it); }, kPosterW);
-    card->registerAction(tr("Bookmark"), brls::BUTTON_Y, [it](brls::View*) {
-        toggleBookmark(it);
-        return true;
-    });
-    return card;
+    return catalogPoster(it, alive, kPosterW);
 }
 
 // The rows of each view: what the header says and where the titles come from.
