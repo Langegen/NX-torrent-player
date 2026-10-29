@@ -152,6 +152,7 @@ std::vector<content::Item> parseList(const std::string& body,
         }
         content::Item it;
         readCommon(top, k, imageBase, it);
+        for (long g : json::integers(obj, "genre_ids")) it.genreIds.push_back((int)g);
         if (it.tmdbId <= 0 || it.title.empty()) continue;
         out.push_back(std::move(it));
     }
@@ -236,6 +237,75 @@ std::vector<content::Episode> parseSeason(const std::string& body,
         out.push_back(std::move(e));
     }
     return out;
+}
+
+ListQuery discoverQuery(const Discover& d)
+{
+    bool tv = d.kind == content::Kind::Series;
+    ListQuery q;
+    q.path = tv ? "/discover/tv" : "/discover/movie";
+    q.kind = tv ? 1 : 0;
+    const char* date = tv ? "first_air_date" : "primary_release_date";
+    if (d.genre > 0) q.params.push_back({ "with_genres", std::to_string(d.genre) });
+    if (d.yearFrom > 0)
+        q.params.push_back({ std::string(date) + ".gte", std::to_string(d.yearFrom) + "-01-01" });
+    if (d.yearTo > 0)
+        q.params.push_back({ std::string(date) + ".lte", std::to_string(d.yearTo) + "-12-31" });
+    switch (d.sort)
+    {
+        case Discover::Sort::Rating:
+            q.params.push_back({ "sort_by", "vote_average.desc" });
+            // Rated by enough people that the top is not a page of unknowns.
+            q.params.push_back({ "vote_count.gte", "300" });
+            break;
+        case Discover::Sort::Newest:
+            q.params.push_back({ "sort_by", std::string(date) + ".desc" });
+            q.params.push_back({ "vote_count.gte", "20" });
+            break;
+        default:
+            q.params.push_back({ "sort_by", "popularity.desc" });
+            break;
+    }
+    return q;
+}
+
+ListQuery searchQuery(const std::string& text, int kind, int year)
+{
+    ListQuery q;
+    q.kind = kind;
+    if (kind < 0)
+    {
+        q.path   = "/search/multi";
+        q.params = { { "query", text }, { "include_adult", "false" } };
+        return q;
+    }
+    bool tv  = kind == 1;
+    q.path   = tv ? "/search/tv" : "/search/movie";
+    q.params = { { "query", text }, { "include_adult", "false" } };
+    if (year > 0)
+        q.params.push_back({ tv ? "first_air_date_year" : "primary_release_year",
+                             std::to_string(year) });
+    return q;
+}
+
+const std::vector<std::pair<int, const char*>>& genres(content::Kind kind)
+{
+    static const std::vector<std::pair<int, const char*>> movie = {
+        { 28, "Action" },      { 12, "Adventure" },  { 16, "Animation" },
+        { 35, "Comedy" },      { 80, "Crime" },      { 99, "Documentary" },
+        { 18, "Drama" },       { 10751, "Family" },  { 14, "Fantasy" },
+        { 36, "Historical" },     { 27, "Horror" },     { 10402, "Music" },
+        { 9648, "Mystery" },   { 10749, "Romance" }, { 878, "Science fiction" },
+        { 53, "Thriller" },    { 10752, "War" },     { 37, "Western" },
+    };
+    static const std::vector<std::pair<int, const char*>> tv = {
+        { 10759, "Action & Adventure" }, { 16, "Animation" },  { 35, "Comedy" },
+        { 80, "Crime" },                 { 99, "Documentary" }, { 18, "Drama" },
+        { 10751, "Family" },             { 10762, "Kids" },     { 9648, "Mystery" },
+        { 10764, "Reality" },            { 10765, "Sci-Fi & Fantasy" },
+        { 10768, "War & Politics" },     { 37, "Western" },
+    };
+    return kind == content::Kind::Series ? tv : movie;
 }
 
 // ============================================================================
@@ -369,17 +439,74 @@ void fetchList(const std::string& path,
         std::string body;
         if (fetchCached(s, url, ttl, body, r.error))
         {
-            r.items = parseList(body, s.imageBase, kind);
-            r.ok    = true;
+            r.items      = parseList(body, s.imageBase, kind);
+            r.ok         = true;
+            r.page       = (int)json::integer(body, "page", 1);
+            r.totalPages = (int)json::integer(body, "total_pages", 1);
+            // TMDB serves at most 500 pages, whatever it says the total is.
+            if (r.totalPages > 500) r.totalPages = 500;
         }
         brls::sync([done, r]() { done(r); });
     });
 }
 } // namespace
 
+ListQuery rowQuery(Row row)
+{
+    ListQuery q;
+    q.path = rowPath(row);
+    q.kind = rowKind(row);
+    return q;
+}
+
+ListQuery pathQuery(const std::string& path, content::Kind kind)
+{
+    ListQuery q;
+    q.path = path;
+    q.kind = kind == content::Kind::Series ? 1 : 0;
+    return q;
+}
+
+ListQuery genreQuery(content::Kind kind, int genreId)
+{
+    Discover d;
+    d.kind  = kind;
+    d.genre = genreId;
+    ListQuery q = discoverQuery(d);
+    // Enough votes that the row is not a page of unknowns.
+    q.params.push_back({ "vote_count.gte", "150" });
+    return q;
+}
+
+void fetchQueryAsync(const ListQuery& q, int page, std::function<void(ListResult)> done)
+{
+    auto params = q.params;
+    if (page > 1) params.push_back({ "page", std::to_string(page) });
+    bool search = q.path.rfind("/search/", 0) == 0;
+    fetchList(q.path, params, q.kind, search ? kSearchTtl : kListTtl, std::move(done));
+}
+
 void fetchRowAsync(Row row, std::function<void(ListResult)> done)
 {
     fetchList(rowPath(row), {}, rowKind(row), kListTtl, std::move(done));
+}
+
+void fetchPathAsync(const std::string& path,
+                    const std::vector<std::pair<std::string, std::string>>& params,
+                    content::Kind kind, std::function<void(ListResult)> done)
+{
+    fetchList(path, params, kind == content::Kind::Series ? 1 : 0, kListTtl, std::move(done));
+}
+
+void fetchGenreAsync(content::Kind kind, int genreId, std::function<void(ListResult)> done)
+{
+    bool tv = kind == content::Kind::Series;
+    fetchList(tv ? "/discover/tv" : "/discover/movie",
+              { { "with_genres", std::to_string(genreId) },
+                { "sort_by", "popularity.desc" },
+                // Enough votes that the row is not a page of unknowns.
+                { "vote_count.gte", "150" } },
+              tv ? 1 : 0, kListTtl, std::move(done));
 }
 
 void searchAsync(const std::string& query, std::function<void(ListResult)> done)

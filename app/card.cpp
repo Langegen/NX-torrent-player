@@ -5,12 +5,10 @@
 #include <cstdio>
 #include <memory>
 
-#include "browse.hpp"       // openLibraryItem / openEpisodeById: Stremio sources
 #include "config.hpp"
 #include "i18n.hpp"
-#include "jackett.hpp"      // jackett::Category
-#include "jackett_tab.hpp"  // openJackettSearch
-#include "player.hpp"       // PlayerArt
+#include "library.hpp"
+#include "sources.hpp"
 #include "stremio.hpp"
 #include "theme.hpp"
 #include "tmdb.hpp"
@@ -37,13 +35,6 @@ void note(const std::string& msg)
     d->open();
 }
 
-std::string twoDigits(int n)
-{
-    char b[16];
-    std::snprintf(b, sizeof(b), "%02d", n);
-    return b;
-}
-
 std::string runtimeText(int min)
 {
     if (min <= 0) return "";
@@ -58,50 +49,19 @@ std::string ratingText(double r)
     return b;
 }
 
-// Where an episode or a film is looked for. Stremio's addons first: they key
-// on the IMDb id and answer with ready sources. Jackett otherwise, searched by
-// name. Neither set up: say what would make this work.
-void openSources(const content::Item& it, int season, int episode)
+// The sources screen for a film, a whole show (season 0) or one episode. It
+// gathers from Jackett and the Stremio addons both; with neither set up there
+// is nothing it could show, so say what would make it work instead.
+void openSources(const content::Item& it, int season, int episode, int episodesInSeason = 0)
 {
-    std::string authKey = stremio::loadAuthKey();
-    if (!authKey.empty() && !it.imdbId.empty())
+    bool jackettOn = !config::get().jackettUrl.empty();
+    bool stremioOn = !stremio::loadAuthKey().empty() && !it.imdbId.empty();
+    if (!jackettOn && !stremioOn)
     {
-        if (!it.isSeries())
-        {
-            stremio::LibItem li;
-            li.id     = it.imdbId;
-            li.name   = it.title;
-            li.type   = "movie";
-            li.poster = it.posterUrlLarge;
-            li.year   = it.year;
-            openLibraryItem(authKey, li);
-            return;
-        }
-        if (season > 0 || episode > 0)
-        {
-            PlayerArt art;
-            art.posterPath = stremio::cachedPosterPath(it.key());
-            art.bgId       = it.key() + "_bd";
-            art.bgUrl      = it.backdropUrl;
-            std::string vid = it.imdbId + ":" + std::to_string(season) + ":" +
-                              std::to_string(episode);
-            openEpisodeById(authKey, it.imdbId, vid, art);
-            return;
-        }
-    }
-
-    if (!config::get().jackettUrl.empty())
-    {
-        std::string q = it.title;
-        if (!it.isSeries() && !it.year.empty()) q += " " + it.year;
-        if (it.isSeries() && season > 0 && episode > 0)
-            q += " S" + twoDigits(season) + "E" + twoDigits(episode);
-        openJackettSearch(q, (int)(it.isSeries() ? jackett::Category::SERIES
-                                                 : jackett::Category::MOVIES));
+        note(tr("To find sources, sign in to Stremio or set up Jackett in Options."));
         return;
     }
-
-    note(tr("To find sources, sign in to Stremio or set up Jackett in Options."));
+    openSourcesScreen(it, season, episode, episodesInSeason);
 }
 
 // The card's state, shared by the callbacks that fill it in.
@@ -109,6 +69,7 @@ struct CardState
 {
     content::Details d;
     bool detailsLoaded = false;
+    std::string imdbRating;  // "7.9", from Cinemeta; "" until known
     int seasonIdx      = 0;   // into d.seasons
     int seasonReq      = 0;   // bumps on every switch: late answers are dropped
     std::shared_ptr<bool> alive = std::make_shared<bool>(true);
@@ -118,6 +79,7 @@ struct CardState
     brls::Label* overview      = nullptr;
     brls::Label* cast          = nullptr;
     brls::Button* playBtn      = nullptr;
+    brls::Button* markBtn      = nullptr;  // the bookmark status
     brls::Box* seasonsSection  = nullptr;
     brls::Box* seasonBar       = nullptr;
     std::vector<brls::Button*> seasonBtns;
@@ -214,11 +176,11 @@ class CardView : public brls::Box
         top->setAlignItems(brls::AlignItems::FLEX_START);
 
         auto* poster = new brls::Image();
-        poster->setDimensions(220.0f, 330.0f);
+        poster->setDimensions(180.0f, 270.0f);
         poster->setScalingType(brls::ImageScalingType::FILL);
         poster->setClipsToBounds(true);
         poster->setCornerRadius(12.0f);
-        poster->setMarginRight(40.0f);
+        poster->setMarginRight(34.0f);
         poster->setShadowType(brls::ShadowType::GENERIC);
         poster->setShadowVisibility(true);
         ui::attachArt(poster, it.key(), it.posterUrlLarge, alive);
@@ -229,15 +191,15 @@ class CardView : public brls::Box
         info->setGrow(1.0f);
         info->setShrink(1.0f);
 
-        info->addView(whiteLabel(it.title, 40.0f, 255));
+        info->addView(whiteLabel(it.title, 36.0f, 255));
 
         st->chips = new brls::Box();
         st->chips->setAxis(brls::Axis::ROW);
-        st->chips->setMarginTop(16.0f);
+        st->chips->setMarginTop(12.0f);
         info->addView(st->chips);
         fillChips();
 
-        st->overview = whiteLabel(trimmed(it.overview), 19.0f, 225);
+        st->overview = whiteLabel(trimmed(it.overview), 17.0f, 225);
         st->overview->setMarginTop(18.0f);
         info->addView(st->overview);
 
@@ -248,28 +210,30 @@ class CardView : public brls::Box
 
         auto* actions = new brls::Box();
         actions->setAxis(brls::Axis::ROW);
-        actions->setMarginTop(24.0f);
+        actions->setMarginTop(18.0f);
 
         auto weak = std::weak_ptr<CardState>(st);
         st->playBtn = ui::actionButton(playLabel(), true, [weak]() {
             if (auto s = weak.lock()) watch(*s);
-        });
+        }, true);
         actions->addView(st->playBtn);
 
+        // Every release of the film, or of the season on screen (packs and
+        // single episodes alike).
         actions->addView(ui::actionButton(tr("Torrents"), false, [weak]() {
             auto s = weak.lock();
             if (!s) return;
-            if (config::get().jackettUrl.empty())
-            {
-                note(tr("Set up Jackett in Options to search torrents."));
-                return;
-            }
-            content::Item i = s->d.item;
-            std::string q = i.title;
-            if (!i.isSeries() && !i.year.empty()) q += " " + i.year;
-            openJackettSearch(q, (int)(i.isSeries() ? jackett::Category::SERIES
-                                                    : jackett::Category::MOVIES));
-        }));
+            int season = 0;
+            if (s->d.item.isSeries() && s->seasonIdx < (int)s->d.seasons.size())
+                season = s->d.seasons[s->seasonIdx].number;
+            openSources(s->d.item, season, 0);
+        }, true));
+
+        // Bookmark: a status from the library (Watching / Planned / ...).
+        st->markBtn = ui::actionButton(markLabel(), false, [weak]() {
+            if (auto s = weak.lock()) pickStatus(s);
+        }, true);
+        actions->addView(st->markBtn);
         info->addView(actions);
 
         top->addView(info);
@@ -279,7 +243,7 @@ class CardView : public brls::Box
     static std::string trimmed(const std::string& s)
     {
         // A synopsis can run to a page; the card has room for a paragraph.
-        const size_t kMax = 420;
+        const size_t kMax = 300;
         if (s.size() <= kMax) return s;
         size_t cut = s.rfind(' ', kMax);
         if (cut == std::string::npos) cut = kMax;
@@ -288,16 +252,84 @@ class CardView : public brls::Box
         return s.substr(0, cut) + "...";
     }
 
+    // The main button says what it will do: continue where the library left
+    // off ("Continue S1 E5"), the episode after a finished one, or the start.
     std::string playLabel() const
     {
+        const std::string play = "\xE2\x96\xB6  ";
         const content::Details& d = st->d;
-        if (d.item.isSeries() && !d.seasons.empty())
+        library::Entry en;
+        if (library::find(d.item.key(), en))
         {
-            const content::Season& s = d.seasons[0];
-            return std::string("\xE2\x96\xB6  ") + tr("Watch S") + std::to_string(s.number) +
-                   tr(" E") + "1";
+            library::Next n = library::nextOf(en);
+            if (n.kind == library::Next::Kind::Resume)
+                return play + (d.item.isSeries()
+                                   ? tr("Continue S") + std::to_string(n.season) + tr(" E") +
+                                         std::to_string(n.episode)
+                                   : std::string(tr("Continue")));
+            if (n.kind == library::Next::Kind::NextEp)
+                return play + tr("Watch S") + std::to_string(n.season) + tr(" E") +
+                       std::to_string(n.episode);
         }
-        return std::string("\xE2\x96\xB6  ") + tr("Watch");
+        if (d.item.isSeries() && !d.seasons.empty())
+            return play + tr("Watch S") + std::to_string(d.seasons[0].number) + tr(" E") + "1";
+        return play + tr("Watch");
+    }
+
+    std::string markLabel() const
+    {
+        library::Entry en;
+        library::Status s = library::find(st->d.item.key(), en) ? en.status
+                                                                 : library::Status::None;
+        switch (s)
+        {
+            case library::Status::Watching:  return tr("Watching");
+            case library::Status::Planned:   return tr("Planned");
+            case library::Status::Completed: return tr("Completed");
+            case library::Status::Dropped:   return tr("Dropped");
+            default:                         return std::string("+  ") + tr("Bookmark");
+        }
+    }
+
+    // The status list, as borealis' own selector shows one.
+    static void pickStatus(std::shared_ptr<CardState> s)
+    {
+        static const library::Status kOrder[] = {
+            library::Status::Watching, library::Status::Planned, library::Status::Completed,
+            library::Status::Dropped, library::Status::None,
+        };
+        std::vector<std::string> labels = { tr("Watching"), tr("Planned"), tr("Completed"),
+                                            tr("Dropped"), tr("Remove from bookmarks") };
+        library::Entry en;
+        library::Status cur = library::find(s->d.item.key(), en) ? en.status
+                                                                  : library::Status::None;
+        int sel = 0;
+        for (int i = 0; i < 5; i++)
+            if (kOrder[i] == cur) sel = i;
+        std::weak_ptr<CardState> weak = s;
+        auto* dd = new brls::Dropdown(tr("Bookmark"), labels, [weak](int i) {
+            auto c = weak.lock();
+            if (!c || i < 0 || i >= 5) return;
+            library::setStatus(c->d.item, kOrder[i]);
+        }, sel);
+        brls::Application::pushActivity(new brls::Activity(dd));
+    }
+
+    // Library changes (a status picked, an episode watched): relabel. Polled:
+    // the player writes the library from its own screen, on top of this one.
+    uint32_t seenGen = 0;
+
+    void draw(NVGcontext* vg, float x, float y, float w, float h, brls::Style style,
+              brls::FrameContext* ctx) override
+    {
+        uint32_t gen = library::generation();
+        if (gen != seenGen)
+        {
+            seenGen = gen;
+            if (st->playBtn) st->playBtn->setText(playLabel());
+            if (st->markBtn) st->markBtn->setText(markLabel());
+        }
+        brls::Box::draw(vg, x, y, w, h, style, ctx);
     }
 
     void fillChips()
@@ -306,6 +338,9 @@ class CardView : public brls::Box
         const content::Details& d = st->d;
         const content::Item& it   = d.item;
         if (it.rating > 0.05) st->chips->addView(ui::chip(ratingText(it.rating), true));
+        if (!st->imdbRating.empty())
+            st->chips->addView(ui::chip("IMDb " + st->imdbRating, nvgRGB(0xf5, 0xc5, 0x18),
+                                        nvgRGB(0x10, 0x10, 0x10)));
         if (!it.year.empty()) st->chips->addView(ui::chip(it.year));
         for (size_t i = 0; i < it.genres.size() && i < 2; i++)
             st->chips->addView(ui::chip(it.genres[i]));
@@ -329,7 +364,7 @@ class CardView : public brls::Box
     {
         st->seasonsSection = new brls::Box();
         st->seasonsSection->setAxis(brls::Axis::COLUMN);
-        st->seasonsSection->setMarginTop(30.0f);
+        st->seasonsSection->setMarginTop(22.0f);
         st->seasonsSection->setVisibility(brls::Visibility::GONE);
 
         st->seasonBar = new brls::Box();
@@ -339,7 +374,7 @@ class CardView : public brls::Box
 
         st->episodes = new brls::Box();
         // 300 wide at 16:9, plus room for the focus glow.
-        st->seasonsSection->addView(ui::strip(st->episodes, 169.0f + 24.0f, false));
+        st->seasonsSection->addView(ui::strip(st->episodes, 236.0f * 9.0f / 16.0f + 22.0f, false));
         body->addView(st->seasonsSection);
     }
 
@@ -375,6 +410,22 @@ class CardView : public brls::Box
             }
             s->playBtn->setText(playLabel());
             if (s->d.item.isSeries() && !s->d.seasons.empty()) showSeasons();
+            loadImdbRating();
+        });
+    }
+
+    // TMDB has no IMDb rating; Cinemeta (Stremio's catalog, keyed on the IMDb
+    // id, no account needed) does. Shown next to TMDB's once it lands.
+    void loadImdbRating()
+    {
+        if (st->d.item.imdbId.empty()) return;
+        auto weak = std::weak_ptr<CardState>(st);
+        stremio::fetchMetaAsync("https://v3-cinemeta.strem.io", st->d.item.stremioType(),
+                                st->d.item.imdbId, [this, weak](stremio::MetaResult r) {
+            auto s = weak.lock();
+            if (!s || !*s->alive || !r.ok || r.imdbRating.empty()) return;
+            s->imdbRating = r.imdbRating;
+            fillChips();
         });
     }
 
@@ -389,7 +440,7 @@ class CardView : public brls::Box
             std::string name = s.number == 0 ? tr("Specials")
                                              : tr("Season ") + std::to_string(s.number);
             int idx = (int)i;
-            auto* b = ui::actionButton(name, false, [this, idx]() { selectSeason(idx); });
+            auto* b = ui::actionButton(name, false, [this, idx]() { selectSeason(idx); }, true);
             st->seasonBar->addView(b);
             st->seasonBtns.push_back(b);
         }
@@ -423,8 +474,7 @@ class CardView : public brls::Box
 
         st->seasonIdx = idx;
         for (size_t i = 0; i < st->seasonBtns.size(); i++)
-            st->seasonBtns[i]->setStyle((int)i == idx ? &brls::BUTTONSTYLE_PRIMARY
-                                                      : &brls::BUTTONSTYLE_BORDERED);
+            ui::setPillActive(st->seasonBtns[i], (int)i == idx, true);
 
         st->episodes->clearViews();
         auto* wait = whiteLabel(tr("Loading..."), 18.0f, 180);
@@ -444,19 +494,27 @@ class CardView : public brls::Box
                 s->episodes->addView(whiteLabel(r.ok ? tr("No episodes") : r.error, 18.0f, 180));
                 return;
             }
+            int count = (int)r.episodes.size();
+            library::Entry lib;
+            bool haveLib = library::find(s->d.item.key(), lib);
             for (const auto& e : r.episodes)
             {
+                // Watched part of it, from the library: a full bar when done.
+                double prog = -1.0;
+                if (const library::EpisodeProgress* p =
+                        haveLib ? lib.episode(e.season, e.number) : nullptr)
+                    prog = p->done ? 1.0 : (p->dur > 0 ? p->pos / p->dur : -1.0);
                 std::string title = std::to_string(e.number) + ". " +
                                     (e.title.empty() ? tr("Episode ") + std::to_string(e.number)
                                                      : e.title);
                 std::string id = s->d.item.key() + "_s" + std::to_string(e.season) +
                                  "e" + std::to_string(e.number);
                 int season = e.season, number = e.number;
-                auto onClick = [weak, season, number]() {
-                    if (auto c = weak.lock()) openSources(c->d.item, season, number);
+                auto onClick = [weak, season, number, count]() {
+                    if (auto c = weak.lock()) openSources(c->d.item, season, number, count);
                 };
-                s->episodes->addView(ui::wideCard(title, id, e.stillUrl, "", -1.0,
-                                                  s->alive, onClick, 300.0f));
+                s->episodes->addView(ui::wideCard(title, id, e.stillUrl, "", prog,
+                                                  s->alive, onClick, 236.0f));
             }
         });
     }
@@ -471,6 +529,16 @@ class CardView : public brls::Box
             note(tr("Still loading, try again in a moment."));
             return;
         }
+        // Something to continue: straight back to it (the file that was
+        // playing, or the next episode).
+        library::Entry en;
+        if (library::find(s.d.item.key(), en) &&
+            library::nextOf(en).kind != library::Next::Kind::None)
+        {
+            en.item = s.d.item;  // the fresher snapshot (IMDb id, artwork)
+            continueContent(en);
+            return;
+        }
         if (!s.d.item.isSeries())
         {
             openSources(s.d.item, 0, 0);
@@ -481,7 +549,7 @@ class CardView : public brls::Box
             note(tr("No episodes"));
             return;
         }
-        openSources(s.d.item, s.d.seasons[0].number, 1);
+        openSources(s.d.item, s.d.seasons[0].number, 1, s.d.seasons[0].episodeCount);
     }
 };
 

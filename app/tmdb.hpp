@@ -68,6 +68,38 @@ bool parseDetails(const std::string& json, content::Kind kind,
 std::vector<content::Episode> parseSeason(const std::string& json,
                                           const std::string& imageBase);
 
+// A list request that can be asked for page after page: a collection's
+// screen, the search's results. kind as parseList takes it.
+struct ListQuery
+{
+    std::string path;
+    std::vector<std::pair<std::string, std::string>> params;
+    int kind = -1;
+};
+
+// Discover: the catalog filtered and sorted.
+struct Discover
+{
+    content::Kind kind = content::Kind::Movie;
+    int genre    = 0;  // TMDB genre id, 0 = any
+    int yearFrom = 0;  // 0 = no bound
+    int yearTo   = 0;
+    enum class Sort
+    {
+        Popular,
+        Rating,
+        Newest,
+    } sort = Sort::Popular;
+};
+ListQuery discoverQuery(const Discover& d);
+
+// A text search. kind -1 = films and shows (TMDB's multi search, which takes
+// no year); 0 / 1 = one kind, optionally of one year.
+ListQuery searchQuery(const std::string& text, int kind = -1, int year = 0);
+
+// TMDB's genres for films / shows: id and English name (translate with tr()).
+const std::vector<std::pair<int, const char*>>& genres(content::Kind kind);
+
 // ---- the app side -----------------------------------------------------------
 
 // From config (and the build's default key).
@@ -92,7 +124,17 @@ struct ListResult
     bool ok = false;
     std::vector<content::Item> items;
     std::string error;
+    int page       = 1;
+    int totalPages = 1;
 };
+
+// The query behind one of the home rows (so its "See all" page can page on).
+ListQuery rowQuery(Row row);
+ListQuery pathQuery(const std::string& path, content::Kind kind);
+ListQuery genreQuery(content::Kind kind, int genreId);
+
+// One page (1-based) of a query.
+void fetchQueryAsync(const ListQuery& q, int page, std::function<void(ListResult)> done);
 struct DetailsResult
 {
     bool ok = false;
@@ -108,6 +150,12 @@ struct SeasonResult
 
 // All run on a worker thread and call back on the UI thread.
 void fetchRowAsync(Row row, std::function<void(ListResult)> done);
+// Any list endpoint of one kind ("/movie/upcoming", "/tv/on_the_air").
+void fetchPathAsync(const std::string& path,
+                    const std::vector<std::pair<std::string, std::string>>& params,
+                    content::Kind kind, std::function<void(ListResult)> done);
+// The most popular titles of a TMDB genre id (28 action, 18 drama...).
+void fetchGenreAsync(content::Kind kind, int genreId, std::function<void(ListResult)> done);
 void searchAsync(const std::string& query, std::function<void(ListResult)> done);
 void fetchDetailsAsync(content::Kind kind, int id,
                        std::function<void(DetailsResult)> done);

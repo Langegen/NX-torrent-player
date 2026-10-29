@@ -10,6 +10,13 @@
 #include <glad/glad.h>
 #include <GLFW/glfw3.h>
 
+#ifdef ABSOLUTE
+#undef ABSOLUTE
+#endif
+#ifdef RELATIVE
+#undef RELATIVE
+#endif
+
 #include <mpv/client.h>
 #include <mpv/render.h>
 #include <mpv/render_gl.h>
@@ -24,6 +31,8 @@
 #include "browse.hpp"  // openEpisodeById, for the next-episode card
 #include "config.hpp"
 #include "history.hpp"
+#include "library.hpp"
+#include "sources.hpp"  // openNextEpisode
 #include "http.hpp"
 #include "torrserver.hpp"
 #include "stremio.hpp"  // cached artwork -> blurred background
@@ -1155,6 +1164,22 @@ void MpvView::goToNextEpisode()
     std::string next    = watch.nextVideoId;
     PlayerArt showArt   = art;
     int pops            = watch.endPop;
+    if (watch.content.tmdbId > 0) pops = watch.nextPop;
+
+    // A catalog title: the next episode comes from the library -- the same
+    // season pack when the last one came from one, else its sources screen.
+    if (watch.content.tmdbId > 0)
+    {
+        content::Item item = watch.content;
+        int season = watch.season, episode = watch.episode + 1;
+        brls::Logger::info("[player] next episode -> S{}E{} (pop {})", season, episode, pops);
+        brls::sync([pops, item, season, episode]() {
+            popActivitiesThen(pops, [item, season, episode]() {
+                openNextEpisode(item, season, episode);
+            });
+        });
+        return;
+    }
 
     brls::Logger::info("[player] next episode -> {} (pop {})", next, pops);
     // Deferred: we are inside draw()'s update pass (or a tap handler), and
@@ -2965,6 +2990,13 @@ void MpvView::maybeUpdateHistory(bool force)
     // Only the final write (the player closing) waits for the SD card; the
     // periodic one is handed to a background thread so it cannot drop a frame.
     history::record(it, force);
+
+    // A catalog title: progress against the film / the episode, whatever file
+    // it came from (library.cpp writes in the background).
+    if (watch.content.tmdbId > 0)
+        library::recordProgress(watch.content, watch.season, watch.episode, lastPosSec,
+                                lastDurSec, finished, currentSource, currentFileIndex,
+                                currentSourceType);
 }
 
 // Enter scrub mode: pause and pin the cursor to where playback currently is.

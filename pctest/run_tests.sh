@@ -4,6 +4,8 @@
 #   test_httpsrc -- HTTP range reads for https playback (pctest/test_httpsrc.c)
 #   test_net     -- TorrServer URLs and the proxy bypass (pctest/test_net.cpp)
 #   test_tmdb    -- TMDB answers and the JSON helpers (pctest/test_tmdb.cpp)
+#   test_release -- release names, ranking, episode files (pctest/test_release.cpp)
+#   test_library -- the library's JSON, Continue, import merge (pctest/test_library.cpp)
 #
 # Needs a C compiler and libcurl headers (Debian/Ubuntu: build-essential
 # libcurl4-openssl-dev; MSYS2/Cygwin: gcc libcurl-devel). No mbedtls: SHA-1
@@ -49,6 +51,19 @@ ${CXX:-g++} -O1 -g -Wall -std=c++17 \
     pctest/test_tmdb.cpp \
     -o "$out/test_tmdb"
 
+${CXX:-g++} -O1 -g -Wall -std=c++17 \
+    -Iapp \
+    app/release.cpp \
+    pctest/test_release.cpp \
+    -o "$out/test_release"
+
+${CXX:-g++} -O1 -g -Wall -std=c++17 \
+    -DLIBRARY_NO_UI -Iapp \
+    app/library.cpp \
+    app/json.cpp \
+    pctest/test_library.cpp \
+    -o "$out/test_library"
+
 "$out/test_suite"
 echo
 "$out/test_httpsrc"
@@ -56,3 +71,7 @@ echo
 "$out/test_net"
 echo
 "$out/test_tmdb"
+echo
+"$out/test_release"
+echo
+"$out/test_library"

@@ -158,12 +158,24 @@ brls::Box* wideCard(const std::string& title, const std::string& artId,
                     double progress, std::shared_ptr<bool> alive,
                     std::function<void()> onClick, float w = 320.0f);
 
+// The tile at the end of a row that opens its whole collection: a poster's
+// size, the label centred on the plain card fill.
+brls::Box* moreTile(const std::string& text, float w, std::function<void()> onClick);
+
 // A small rounded label: the meta line on the card ("2024", "Drama").
 // `strong` uses the accent-free green the rating chip wants.
 brls::Box* chip(const std::string& text, bool strong = false);
+// The same with its own colours (IMDb's yellow with dark text).
+brls::Box* chip(const std::string& text, NVGcolor bg, NVGcolor fg);
 
-// A pill button in the card's action row. `primary` takes the accent.
+// A pill button (the mock-ups' "▶ Watch", "Details", season chips). `primary`
+// takes the accent; the others are a translucent fill -- white when they sit on
+// a picture (`onImage`), the theme's scrim otherwise.
 brls::Button* actionButton(const std::string& text, bool primary,
-                           std::function<void()> onClick);
+                           std::function<void()> onClick, bool onImage = false);
+
+// Switches a pill between the accent (selected) and the plain fill: season
+// chips, filters, the Home / Movies / Shows switch.
+void setPillActive(brls::Button* b, bool active, bool onImage = false);
 
 } // namespace ui

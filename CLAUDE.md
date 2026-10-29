@@ -41,7 +41,12 @@ rewrites the container paths.
   `config` (config.json), `http` (curl + proxy), `torrserver`, `i18n` (+
   `i18n_ru.cpp`, one table per language), `home` (the TMDB home tab), `card`
   (film/series card), `tmdb` (client + SD cache), `content` (the model the
-  catalog screens share), `widgets` (strips, poster/wide cards, chips, shades)
+  catalog screens share), `widgets` (strips, poster/wide cards, chips, shades),
+  `sources` (the release list for a film/episode: Jackett + Stremio addons),
+  `release` (release-name parsing, ranking, episode-in-pack matching),
+  `torrent_play` (open a Jackett result or magnet and pick the file to play),
+  `library` (bookmarks + per-title/per-episode progress, library.json),
+  `bookmarks` (the Bookmarks tab)
 - `engine/` — the torrent engine (C): `torrentfs` (piece picking, cache, the
   streaming read), `peer`, `swarm`, `torrent`, `udp_tracker`, `dht`, `magnet`,
   `stream` (the mpv `stream_cb` protocols: `torrent://` and `nxhttps://`),

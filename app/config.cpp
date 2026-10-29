@@ -127,6 +127,7 @@ Config& get() { return cfg; }
 
 std::string consoleLang()
 {
+#ifdef __SWITCH__
     // setGetSystemLanguage packs the code as chars in a u64 ("fr", "en-US"),
     // NOT as a SetLanguage enum -- the first two bytes are the ISO-639-1 part,
     // which is all we need. borealis already calls setInitialize().
@@ -136,6 +137,11 @@ std::string consoleLang()
     std::memcpy(buf, &code, 8);
     if (!buf[0] || !buf[1]) return "en";
     return std::string(buf, 2);
+#else
+    const char* l = std::getenv("LANG");
+    if (l && std::strlen(l) >= 2) return std::string(l, 2);
+    return "ru";
+#endif
 }
 
 std::string mpvLangList(const std::string& code)
@@ -246,7 +252,8 @@ void load()
     cfg.startupTab = (sTab == "stremio") ? Tab::STREMIO :
                      (sTab == "jackett") ? Tab::JACKETT :
                      (sTab == "history") ? Tab::HISTORY :
-                     (sTab == "home")    ? Tab::HOME : Tab::LOCAL;
+                     (sTab == "home")    ? Tab::HOME :
+                     (sTab == "bookmarks") ? Tab::BOOKMARKS : Tab::LOCAL;
     cfg.jackettUrl    = readStr(body, "jackettUrl", cfg.jackettUrl);
     cfg.jackettApiKey = readStr(body, "jackettApiKey", cfg.jackettApiKey);
     cfg.torrServerUrl = readStr(body, "torrServerUrl", cfg.torrServerUrl);
@@ -294,7 +301,8 @@ bool save()
     const char* sTabStr = (cfg.startupTab == Tab::STREMIO) ? "stremio" :
                           (cfg.startupTab == Tab::JACKETT) ? "jackett" :
                           (cfg.startupTab == Tab::HISTORY) ? "history" :
-                          (cfg.startupTab == Tab::HOME)    ? "home" : "local";
+                          (cfg.startupTab == Tab::HOME)    ? "home" :
+                          (cfg.startupTab == Tab::BOOKMARKS) ? "bookmarks" : "local";
     std::fprintf(f,
                  "{\n"
                  "  \"startupTab\": \"%s\",\n"

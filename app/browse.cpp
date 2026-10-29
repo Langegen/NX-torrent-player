@@ -2180,6 +2180,8 @@ class SeriesDetailActivity : public brls::Activity
 
 } // namespace
 
+std::string stremioStreamSource(const stremio::Stream& s) { return playableSource(s); }
+
 ListActivity::ListActivity(std::string title, std::string subtitle,
                            std::vector<Row> rows, std::function<void(int)> onSelect,
                            std::string iconPath)

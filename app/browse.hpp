@@ -82,6 +82,11 @@ class ListActivity : public brls::Activity
 // series go through season/episode pickers first.
 void openLibraryItem(const std::string& authKey, const stremio::LibItem& item);
 
+// What the player is handed for an addon stream: a magnet (public trackers
+// attached) for an infoHash, the URL for a direct http(s) link, "" when it
+// cannot be played.
+std::string stremioStreamSource(const stremio::Stream& s);
+
 // Opens one episode's detail screen (synopsis + source cards) straight from its
 // id, without going through the series/season pickers. For the player's
 // end-of-episode card: it only ever knew the next episode's id, so everything

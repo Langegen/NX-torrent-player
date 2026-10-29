@@ -1,5 +1,6 @@
 #include "widgets.hpp"
 
+#include "i18n.hpp"
 #include "stremio.hpp"  // fetchPosterAsync / fetchHqArtAsync: the shared art cache
 #include "theme.hpp"
 
@@ -8,17 +9,22 @@ namespace ui
 
 namespace
 {
-constexpr float kRadius = 10.0f;
+constexpr float kRadius = 8.0f;
 
 void makeFocusable(brls::Box* card, std::function<void()> onClick)
 {
     card->setFocusable(true);
     card->setHighlightCornerRadius(
         kRadius + brls::Application::getStyle()["brls/highlight/stroke_width"] / 2);
-    card->registerClickAction([onClick](brls::View*) {
-        if (onClick) onClick();
-        return true;
-    });
+    // "A Open" in the hint bar, as the mock-ups have it (the stock click
+    // action says "OK"). A tap fires any A action, so touch still works.
+    card->registerAction(
+        tr("Open"), brls::BUTTON_A,
+        [onClick](brls::View*) {
+            if (onClick) onClick();
+            return true;
+        },
+        false, false, brls::SOUND_CLICK);
     card->addGestureRecognizer(new brls::TapGestureRecognizer(card));
 }
 
@@ -85,9 +91,9 @@ brls::Label* heading(const std::string& text, float inset)
 {
     auto* l = new brls::Label();
     l->setText(text);
-    l->setFontSize(24.0f);
+    l->setFontSize(21.0f);
     l->setTextColor(theme::text());
-    l->setMargins(18.0f, 0.0f, 10.0f, inset);
+    l->setMargins(14.0f, 0.0f, 4.0f, inset);
     return l;
 }
 
@@ -123,13 +129,13 @@ brls::Box* posterCard(const std::string& title, const std::string& artId,
     card->setHeight(h);
     card->setCornerRadius(kRadius);
     card->setBackgroundColor(theme::scrim(20));
-    card->setMargins(0.0f, 18.0f, 0.0f, 0.0f);
+    card->setMargins(0.0f, 16.0f, 0.0f, 0.0f);
     makeFocusable(card, std::move(onClick));
 
     auto* img = fillImage(w, h);
     attachArt(img, artId, artUrl, alive);
     card->addView(img);
-    card->addView(titleBand(title, w, h * 0.42f, 17.0f));
+    card->addView(titleBand(title, w, h * 0.42f, w < 170.0f ? 15.0f : 17.0f));
 
     if (!badge.empty())
     {
@@ -161,13 +167,13 @@ brls::Box* wideCard(const std::string& title, const std::string& artId,
     card->setHeight(h);
     card->setCornerRadius(kRadius);
     card->setBackgroundColor(theme::scrim(20));
-    card->setMargins(0.0f, 18.0f, 0.0f, 0.0f);
+    card->setMargins(0.0f, 16.0f, 0.0f, 0.0f);
     makeFocusable(card, std::move(onClick));
 
     auto* img = fillImage(w, h);
     attachArt(img, artId, artUrl, alive, false, localPath);
     card->addView(img);
-    card->addView(titleBand(title, w, h * 0.55f, 18.0f));
+    card->addView(titleBand(title, w, h * 0.55f, w < 280.0f ? 16.0f : 18.0f));
 
     if (progress >= 0.0)
     {
@@ -187,6 +193,50 @@ brls::Box* wideCard(const std::string& title, const std::string& artId,
     return card;
 }
 
+brls::Box* moreTile(const std::string& text, float w, std::function<void()> onClick)
+{
+    auto* card = new brls::Box();
+    card->setWidth(w);
+    card->setHeight(w * 1.5f);
+    card->setCornerRadius(kRadius);
+    card->setBackgroundColor(theme::scrim(22));
+    card->setMargins(0.0f, 16.0f, 0.0f, 0.0f);
+    card->setAxis(brls::Axis::COLUMN);
+    card->setJustifyContent(brls::JustifyContent::CENTER);
+    card->setAlignItems(brls::AlignItems::CENTER);
+    makeFocusable(card, std::move(onClick));
+
+    auto* arrow = new brls::Label();
+    arrow->setText(">");
+    arrow->setFontSize(34.0f);
+    arrow->setTextColor(theme::textDim());
+    card->addView(arrow);
+    auto* l = new brls::Label();
+    l->setText(text);
+    l->setFontSize(17.0f);
+    l->setTextColor(theme::text());
+    l->setMarginTop(8.0f);
+    l->setHorizontalAlign(brls::HorizontalAlign::CENTER);
+    card->addView(l);
+    return card;
+}
+
+brls::Box* chip(const std::string& text, NVGcolor bg, NVGcolor fg)
+{
+    auto* c = new brls::Box();
+    c->setCornerRadius(6.0f);
+    c->setPadding(6.0f, 10.0f, 3.0f, 10.0f);
+    c->setMarginRight(10.0f);
+    c->setBackgroundColor(bg);
+    auto* l = new brls::Label();
+    l->setText(text);
+    l->setFontSize(17.0f);
+    l->setTextColor(fg);
+    l->setSingleLine(true);
+    c->addView(l);
+    return c;
+}
+
 brls::Box* chip(const std::string& text, bool strong)
 {
     auto* c = new brls::Box();
@@ -204,17 +254,33 @@ brls::Box* chip(const std::string& text, bool strong)
 }
 
 brls::Button* actionButton(const std::string& text, bool primary,
-                           std::function<void()> onClick)
+                           std::function<void()> onClick, bool onImage)
 {
     auto* b = new brls::Button();
     b->setText(text);
-    b->setStyle(primary ? &brls::BUTTONSTYLE_PRIMARY : &brls::BUTTONSTYLE_BORDERED);
-    b->setMarginRight(14.0f);
+    // The mock-ups' pills: smaller than borealis' stock button, the main one
+    // in the accent, the others a translucent fill rather than an outline.
+    b->setStyle(primary ? &brls::BUTTONSTYLE_PRIMARY : &brls::BUTTONSTYLE_BORDERLESS);
+    if (!primary)
+        b->setBackgroundColor(onImage ? nvgRGBA(255, 255, 255, 34) : theme::scrim(26));
+    b->setFontSize(17.0f);
+    b->setPadding(9.0f, 20.0f, 9.0f, 20.0f);
+    b->setCornerRadius(8.0f);
+    b->setHighlightCornerRadius(8.0f +
+                                brls::Application::getStyle()["brls/highlight/stroke_width"] / 2);
+    b->setMarginRight(12.0f);
     b->registerClickAction([onClick](brls::View*) {
         if (onClick) onClick();
         return true;
     });
     return b;
+}
+
+void setPillActive(brls::Button* b, bool active, bool onImage)
+{
+    b->setStyle(active ? &brls::BUTTONSTYLE_PRIMARY : &brls::BUTTONSTYLE_BORDERLESS);
+    b->setBackgroundColor(active ? nvgRGBA(0, 0, 0, 0)
+                                 : (onImage ? nvgRGBA(255, 255, 255, 34) : theme::scrim(26)));
 }
 
 } // namespace ui

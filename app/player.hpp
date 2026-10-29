@@ -9,6 +9,7 @@
 #include <string>
 #include <vector>
 
+#include "content.hpp"  // content::Item, a catalog title in WatchInfo
 #include "stremio.hpp"  // stremio::Subtitle, for the addon subtitle picker
 
 struct mpv_handle;
@@ -69,6 +70,16 @@ struct WatchInfo
     // just the player (local). A Stremio play sits under the addon + source
     // lists, so 3 returns to the library (film) or the episode list (series).
     int endPop = 1;
+
+    // A catalog title (TMDB card -> sources): progress goes to the library
+    // (library.hpp) against the title and the episode, and "next episode"
+    // opens from the library instead of through Stremio. tmdbId 0 = not one.
+    content::Item content;
+    int season  = 0;
+    int episode = 0;
+    // Activities to pop before opening the next episode: the player, plus the
+    // sources screen it was started from (the next episode brings its own).
+    int nextPop = 1;
 };
 
 // Formats seconds into "M:SS" or "H:MM:SS"

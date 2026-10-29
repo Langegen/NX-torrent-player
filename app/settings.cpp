@@ -151,15 +151,18 @@ brls::View* generalPane()
     int curStartupIdx = (cfg.startupTab == config::Tab::STREMIO) ? 1 :
                         (cfg.startupTab == config::Tab::JACKETT) ? 2 :
                         (cfg.startupTab == config::Tab::HISTORY) ? 3 :
-                        (cfg.startupTab == config::Tab::HOME)    ? 4 : 0;
+                        (cfg.startupTab == config::Tab::HOME)    ? 4 :
+                        (cfg.startupTab == config::Tab::BOOKMARKS) ? 5 : 0;
     startup->init(tr("Category on startup"),
-                  { tr("Local"), tr("Stremio"), "Jackett", tr("History"), tr("Home") },
+                  { tr("Local"), tr("Stremio"), "Jackett", tr("History"), tr("Home"),
+                    tr("Bookmarks") },
                   curStartupIdx, [](int sel) {
                       config::get().startupTab =
                           (sel == 1) ? config::Tab::STREMIO :
                           (sel == 2) ? config::Tab::JACKETT :
                           (sel == 3) ? config::Tab::HISTORY :
-                          (sel == 4) ? config::Tab::HOME : config::Tab::LOCAL;
+                          (sel == 4) ? config::Tab::HOME :
+                          (sel == 5) ? config::Tab::BOOKMARKS : config::Tab::LOCAL;
                       config::save();
                   });
     list->addView(startup);

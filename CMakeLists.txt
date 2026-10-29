@@ -14,6 +14,8 @@ cmake_dependent_option(USE_SYSTEM_FMT "" OFF "NOT USE_SHARED_LIB" ON)
 cmake_dependent_option(USE_SYSTEM_TINYXML2 "" OFF "NOT USE_SHARED_LIB" ON)
 cmake_dependent_option(USE_SYSTEM_TWEENY "" OFF "NOT USE_SHARED_LIB" ON)
 
+set(CMAKE_NO_SYSTEM_FROM_IMPORTED ON)
+
 include(${BOREALIS_LIBRARY}/cmake/toolchain.cmake)
 
 project(NX-torrent-player)
@@ -51,7 +53,9 @@ find_package(Threads REQUIRED)
 list(APPEND APP_PLATFORM_LIB ${CMAKE_THREAD_LIBS_INIT})
 
 find_package(PkgConfig REQUIRED)
-set(PKG_CONFIG_USE_STATIC_LIBS ON)  # Switch links everything statically
+if (PLATFORM_SWITCH)
+    set(PKG_CONFIG_USE_STATIC_LIBS ON)  # Switch links everything statically
+endif ()
 pkg_check_modules(MPV REQUIRED IMPORTED_TARGET mpv)
 pkg_check_modules(CURL REQUIRED IMPORTED_TARGET libcurl)
 # Metahub serves some Stremio posters as WebP, which nanovg's stb_image cannot
@@ -69,8 +73,10 @@ set(ENGINE_SRC
     ${ENGINE_DIR}/udp_tracker.c ${ENGINE_DIR}/dht.c ${ENGINE_DIR}/dhtclient.c
     ${ENGINE_DIR}/udpdiag.c ${ENGINE_DIR}/stream.c ${ENGINE_DIR}/httpsrc.c
     ${ENGINE_DIR}/utp.cpp ${ENGINE_DIR}/utp_utils.cpp ${ENGINE_DIR}/utpbridge.cpp)
-# libutp needs -DPOSIX for its socket types (SOCKADDR_STORAGE etc).
-set_source_files_properties(${ENGINE_SRC} PROPERTIES COMPILE_DEFINITIONS "POSIX")
+# libutp needs -DPOSIX for its socket types (SOCKADDR_STORAGE etc) on Switch.
+if (PLATFORM_SWITCH)
+    set_source_files_properties(${ENGINE_SRC} PROPERTIES COMPILE_DEFINITIONS "POSIX")
+endif ()
 list(APPEND MAIN_SRC ${ENGINE_SRC})
 
 if (PLATFORM_SWITCH)
@@ -130,6 +136,29 @@ if (PLATFORM_SWITCH)
         COMMAND ${NX_ELF2NRO_EXE} ${PROJECT_NAME}.elf ${PROJECT_NAME}.nro --icon=${PROJECT_ICON} --nacp=${PROJECT_NAME}.nacp --romfsdir=${CMAKE_BINARY_DIR}/resources
     )
 
+endif ()
+
+if (NOT PLATFORM_SWITCH)
+    add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory ${PROJECT_RESOURCES} ${CMAKE_BINARY_DIR}/resources
+        COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_CURRENT_SOURCE_DIR}/assets/NX-torrent-player-bg-rounded.png ${CMAKE_BINARY_DIR}/resources/NX-torrent-player-bg-rounded.png
+        COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_CURRENT_SOURCE_DIR}/assets/video-icon.png ${CMAKE_BINARY_DIR}/resources/video-icon.png
+        COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_CURRENT_SOURCE_DIR}/assets/magnet-icon.png ${CMAKE_BINARY_DIR}/resources/magnet-icon.png
+        COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_CURRENT_SOURCE_DIR}/assets/stremio-icon.png ${CMAKE_BINARY_DIR}/resources/stremio-icon.png
+        COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_CURRENT_SOURCE_DIR}/assets/local-tab-icon.png ${CMAKE_BINARY_DIR}/resources/local-icon.png
+        COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_CURRENT_SOURCE_DIR}/assets/SpaceGrotesk-Medium.ttf ${CMAKE_BINARY_DIR}/resources/SpaceGrotesk-Medium.ttf
+        COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_CURRENT_SOURCE_DIR}/assets/cacert.pem ${CMAKE_BINARY_DIR}/resources/cacert.pem
+    )
+    if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/pc_deps/mpv/libmpv-2.dll")
+        add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different ${CMAKE_CURRENT_SOURCE_DIR}/pc_deps/mpv/libmpv-2.dll ${CMAKE_BINARY_DIR}/libmpv-2.dll
+        )
+    endif ()
+endif ()
+
+if (NOT PLATFORM_SWITCH)
+    target_include_directories(${PROJECT_NAME} BEFORE PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/compat)
 endif ()
 
 target_include_directories(${PROJECT_NAME} PRIVATE

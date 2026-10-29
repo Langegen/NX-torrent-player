@@ -9,7 +9,9 @@
 #include <borealis.hpp>
 
 #include "config.hpp"
+#include "appdata.hpp"
 #include "netutil.hpp"
+#include <unistd.h>
 
 
 namespace http
@@ -61,6 +63,12 @@ static void verifyTls(CURL* curl, const std::string& url)
 {
 #ifdef __SWITCH__
     curl_easy_setopt(curl, CURLOPT_CAINFO, "romfs:/cacert.pem");
+#else
+    if (access(APP_RES("cacert.pem"), 0) == 0)
+        curl_easy_setopt(curl, CURLOPT_CAINFO, APP_RES("cacert.pem"));
+#ifdef CURLSSLOPT_NATIVE_CA
+    curl_easy_setopt(curl, CURLOPT_SSL_OPTIONS, CURLSSLOPT_NATIVE_CA);
+#endif
 #endif
     curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
     curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);

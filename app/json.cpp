@@ -1,5 +1,6 @@
 #include "json.hpp"
 
+#include <cstdlib>
 #include <cstring>
 
 // A JSON reader sized to what this app actually receives: flat "key": value
@@ -369,6 +370,30 @@ std::string object(const std::string& body, const char* key)
         from = k + 1;
     }
     return "";
+}
+
+std::vector<long> integers(const std::string& body, const char* key)
+{
+    std::vector<long> out;
+    std::string pat = std::string("\"") + key + "\"";
+    size_t k = body.find(pat);
+    if (k == std::string::npos) return out;
+    size_t open = body.find_first_not_of(" \t\r\n:", k + pat.size());
+    if (open == std::string::npos || body[open] != '[') return out;
+    const char* p = body.c_str() + open + 1;
+    while (*p && *p != ']')
+    {
+        char* end = nullptr;
+        long v = std::strtol(p, &end, 10);
+        if (end == p)
+        {
+            p++;  // a comma or a space
+            continue;
+        }
+        out.push_back(v);
+        p = end;
+    }
+    return out;
 }
 
 // Collects the plain strings of a JSON array like "types":["movie","series"].

@@ -90,7 +90,7 @@ static const char* kSeason = R"J({"_id":"x","air_date":"2023-11-09","episodes":[
 
 static void test_json_helpers()
 {
-    std::printf("[1/6] json::topLevel and json::object...\n");
+    std::printf("[1/7] json::topLevel and json::object...\n");
     std::string top = json::topLevel(kTv);
     CHECK(json::str(kTv, "name") == "Жора Крыжовников");      // the naive read
     CHECK(json::str(top, "name") == "Слово пацана. Кровь на асфальте");
@@ -108,7 +108,7 @@ static void test_json_helpers()
 
 static void test_urls()
 {
-    std::printf("[2/6] Request URLs, keys, languages, cache keys...\n");
+    std::printf("[2/7] Request URLs, keys, languages, cache keys...\n");
     tmdb::Settings s;
     s.apiKey = "0123456789abcdef0123456789abcdef";
     s.language = tmdb::languageFor("ru");
@@ -147,7 +147,7 @@ static void test_urls()
 
 static void test_list()
 {
-    std::printf("[3/6] A trending list: films and series, people skipped...\n");
+    std::printf("[3/7] A trending list: films and series, people skipped...\n");
     auto items = tmdb::parseList(kTrending, IMG, -1);
     CHECK(items.size() == 2);
     CHECK(items[0].kind == content::Kind::Movie);
@@ -170,7 +170,7 @@ static void test_list()
 
 static void test_details()
 {
-    std::printf("[4/6] Details: a series (nested names, specials last) and a film...\n");
+    std::printf("[4/7] Details: a series (nested names, specials last) and a film...\n");
     content::Details d;
     CHECK(tmdb::parseDetails(kTv, content::Kind::Series, IMG, d));
     CHECK(d.item.title == "Слово пацана. Кровь на асфальте");
@@ -195,7 +195,7 @@ static void test_details()
 
 static void test_season()
 {
-    std::printf("[5/6] A season's episodes...\n");
+    std::printf("[5/7] A season's episodes...\n");
     auto eps = tmdb::parseSeason(kSeason, IMG);
     CHECK(eps.size() == 2);
     CHECK(eps[0].title == "Пришиться");      // not the crew's "name"
@@ -208,9 +208,54 @@ static void test_season()
     std::printf("      PASSED\n");
 }
 
+static bool hasParam(const tmdb::ListQuery& q, const std::string& k, const std::string& v)
+{
+    for (const auto& p : q.params)
+        if (p.first == k && p.second == v) return true;
+    return false;
+}
+
+static void test_queries()
+{
+    std::printf("[7/7] Discover and search queries, genre ids...\n");
+    tmdb::Discover d;
+    d.kind     = content::Kind::Series;
+    d.genre    = 18;
+    d.yearFrom = 2010;
+    d.yearTo   = 2019;
+    d.sort     = tmdb::Discover::Sort::Rating;
+    auto q = tmdb::discoverQuery(d);
+    CHECK(q.path == "/discover/tv" && q.kind == 1);
+    CHECK(hasParam(q, "with_genres", "18"));
+    CHECK(hasParam(q, "first_air_date.gte", "2010-01-01"));
+    CHECK(hasParam(q, "first_air_date.lte", "2019-12-31"));
+    CHECK(hasParam(q, "sort_by", "vote_average.desc"));
+    CHECK(hasParam(q, "vote_count.gte", "300"));
+
+    tmdb::Discover m;  // a film, any genre, newest
+    m.sort = tmdb::Discover::Sort::Newest;
+    auto mq = tmdb::discoverQuery(m);
+    CHECK(mq.path == "/discover/movie" && mq.kind == 0);
+    CHECK(hasParam(mq, "sort_by", "primary_release_date.desc"));
+    for (const auto& p : mq.params) CHECK(p.first != "with_genres");
+
+    auto s = tmdb::searchQuery("Дюна", 0, 2024);
+    CHECK(s.path == "/search/movie" && hasParam(s, "primary_release_year", "2024"));
+    auto t = tmdb::searchQuery("Слово пацана", 1, 0);
+    CHECK(t.path == "/search/tv");
+    for (const auto& p : t.params) CHECK(p.first != "first_air_date_year");
+    CHECK(tmdb::searchQuery("x").path == "/search/multi");
+
+    auto items = tmdb::parseList(kTrending, IMG, -1);
+    CHECK(items[0].genreIds.size() == 2 && items[0].genreIds[0] == 878);
+    CHECK(json::integers(R"J({"a":[ 1, 22 ,333]})J", "a").size() == 3);
+    CHECK(tmdb::genres(content::Kind::Movie).size() > 10);
+    std::printf("      PASSED\n");
+}
+
 static void test_errors()
 {
-    std::printf("[6/6] TMDB error bodies...\n");
+    std::printf("[6/7] TMDB error bodies...\n");
     CHECK(tmdb::errorMessage(R"J({"success":false,"status_code":7,"status_message":"Invalid API key: You must be granted a valid key."})J")
               .rfind("Invalid API key", 0) == 0);
     CHECK(tmdb::errorMessage(kMovie).empty());
@@ -229,6 +274,7 @@ int main()
     test_details();
     test_season();
     test_errors();
+    test_queries();
     std::printf("\nALL TESTS PASSED\n");
     return 0;
 }

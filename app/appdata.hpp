@@ -2,7 +2,13 @@
 
 // All files the app writes live under one folder on the SD card instead of the
 // root. The directory is created at startup by ensureAppDataDir() in main.cpp.
+#ifdef __SWITCH__
 #define APPDATA_DIR      "sdmc:/switch/NX-torrent-player"
+#define APP_RES(p)       "romfs:/" p
+#else
+#define APPDATA_DIR      "./appdata"
+#define APP_RES(p)       "resources/" p
+#endif
 #define APPDATA_LOG      APPDATA_DIR "/nx-torrent-player.log"
 #define APPDATA_CACHE    APPDATA_DIR "/cache.bin"
 // Folder the user drops .torrent files into (scanned for the main menu list).
@@ -29,6 +35,8 @@
 // TMDB answers, one .json per request (see tmdb.cpp): fresh copies replace
 // the network, stale ones stand in for it when it is down.
 #define APPDATA_TMDB     APPDATA_DIR "/tmdb"
+// The library: bookmarks, per-title / per-episode progress (library.cpp).
+#define APPDATA_LIBRARY  APPDATA_DIR "/library.json"
 // Watch history and saved playback positions.
 #define APPDATA_HISTORY  APPDATA_DIR "/history.json"
 

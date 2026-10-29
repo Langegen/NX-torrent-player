@@ -112,6 +112,16 @@ invisible however they are sized, since they then match what they travel over.
 
 Both patches are marked with a `LOCAL PATCH` comment in the source.
 
+### 6. `resources/i18n/ru/hints.json`, `resources/i18n/fr/hints.json` — added
+
+The footer's own words ("Back", "Exit", "OK") are looked up as `hints/back`
+etc. -- i.e. in a `hints.json` (the key's first part is the file name).
+Upstream's `ru/` and `fr/` only carry an older `brls.json` (keys under
+`brls/hints/...`), which nothing looks up, so a Russian UI fell back to English.
+These two files are the same keys as `en-US/hints.json`, translated. The app
+picks the locale itself (`Platform::APP_LOCALE_DEFAULT`, set in `main()` from
+its own language setting).
+
 ## Updating
 
 Re-cloning upstream **drops the patch** — re-apply it, and check this file's

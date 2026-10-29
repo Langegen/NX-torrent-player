@@ -30,6 +30,7 @@ struct Item
     std::string backdropUrl;    // full width, for the card background
     double rating = 0.0;        // 0..10, 0 = none
     std::vector<std::string> genres;  // names; details only
+    std::vector<int> genreIds;        // TMDB genre ids; lists only
     int runtimeMin = 0;               // film length or a typical episode
     int seasonCount = 0;              // series only
 

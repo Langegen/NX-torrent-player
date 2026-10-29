@@ -46,8 +46,9 @@ THE SOFTWARE.
 #include <sys/socket.h>
 #include <netinet/in.h>
 #else
-#include <w32api.h>
-#define WINVER WindowsXP
+#ifndef _WIN32_WINNT
+#define _WIN32_WINNT 0x0600
+#endif
 #include <ws2tcpip.h>
 #endif
 
@@ -83,7 +84,9 @@ random(void)
 {
     return rand();
 }
+#if defined(_WIN32_WINNT) && _WIN32_WINNT < 0x0600
 extern const char *inet_ntop(int, const void *, char *, socklen_t);
+#endif
 
 #else
 
