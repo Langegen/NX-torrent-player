@@ -53,6 +53,7 @@
 #include "jackett.hpp"
 #include "jackett_tab.hpp"
 #include "setup.hpp"
+#include "autotest.hpp"
 #include "history.hpp"
 #include "history_tab.hpp"
 #include "bookmarks.hpp"
@@ -1338,6 +1339,8 @@ brls::View* buildTab(config::Tab tab)
         return buildHomeTab(1);
     if (tab == config::Tab::SHOWS)
         return buildHomeTab(2);
+    if (tab == config::Tab::ANIME)
+        return buildHomeTab(3);
     return buildLocalTab();
 }
 
@@ -1415,6 +1418,7 @@ void attachTopTabBar(brls::AppletFrame* frame, brls::Box* content)
     auto* homeBtn    = new brls::Button();
     auto* moviesBtn  = new brls::Button();
     auto* showsBtn   = new brls::Button();
+    auto* animeBtn   = new brls::Button();
     auto* marksBtn   = new brls::Button();
     auto* historyBtn = new brls::Button();
     auto* sourceBtn  = new brls::Button();
@@ -1430,7 +1434,8 @@ void attachTopTabBar(brls::AppletFrame* frame, brls::Box* content)
     };
     std::vector<TabButton> tabButtons = {
         { homeBtn, config::Tab::HOME },          { moviesBtn, config::Tab::MOVIES },
-        { showsBtn, config::Tab::SHOWS },        { marksBtn, config::Tab::BOOKMARKS },
+        { showsBtn, config::Tab::SHOWS },        { animeBtn, config::Tab::ANIME },
+        { marksBtn, config::Tab::BOOKMARKS },
         { historyBtn, config::Tab::HISTORY },
     };
 
@@ -1487,7 +1492,7 @@ void attachTopTabBar(brls::AppletFrame* frame, brls::Box* content)
             false, false, brls::SOUND_BACK);
     };
 
-    const char* tabNames[] = { "Home", "Movies", "Shows", "Bookmarks", "History" };
+    const char* tabNames[] = { "Home", "Movies", "Shows", "Anime", "Bookmarks", "History" };
     for (size_t i = 0; i < tabButtons.size(); i++)
     {
         brls::Button* b = tabButtons[i].btn;
@@ -1509,16 +1514,18 @@ void attachTopTabBar(brls::AppletFrame* frame, brls::Box* content)
     sourceBtn->setPadding(12.0f, 16.0f, 12.0f, 16.0f);
     sourceBtn->setMarginLeft(10.0f);
     sourceBtn->registerClickAction([select, curTab](brls::View*) {
-        const config::Tab tabs[] = { config::Tab::STREMIO, config::Tab::LOCAL,
-                                     config::Tab::JACKETT };
-        int sel = 0;
+        // Jackett first: it is the app's main source. Only the tab actually
+        // open is marked (from Home or History, none of these is).
+        const config::Tab tabs[] = { config::Tab::JACKETT, config::Tab::LOCAL,
+                                     config::Tab::STREMIO };
+        int sel = -1;
         for (int i = 0; i < 3; i++)
             if (*curTab == tabs[i]) sel = i;
         auto* dd = new brls::Dropdown(
-            tr("Sources"), { "Stremio", tr("Local"), "Jackett" },
+            tr("Sources"), { "Jackett", tr("Local"), "Stremio" },
             [select](int i) {
-                const config::Tab t[] = { config::Tab::STREMIO, config::Tab::LOCAL,
-                                          config::Tab::JACKETT };
+                const config::Tab t[] = { config::Tab::JACKETT, config::Tab::LOCAL,
+                                          config::Tab::STREMIO };
                 if (i >= 0 && i < 3) select(t[i]);
             },
             sel);
@@ -2004,8 +2011,10 @@ int main(int argc, char* argv[])
             if (r.ok && r.installable()) update::promptInstall(r);
         });
 
+    // PC only: NX_AUTOTEST runs a scripted pass over the UI (app/autotest.hpp).
+    bool scripted = autotest::init();
     while (brls::Application::mainLoop())
-        ;
+        if (scripted) autotest::tick();
 
     // Only now: hbloader keeps the running .nro open and libnx reads our romfs
     // out of it, so the file cannot be replaced until the app is done with it.

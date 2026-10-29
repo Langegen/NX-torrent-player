@@ -20,6 +20,7 @@ enum class Tab
     BOOKMARKS = 5,  // the library by status (bookmarks.cpp)
     MOVIES  = 6,  // the catalog's films (home.cpp)
     SHOWS   = 7,  // the catalog's series (home.cpp)
+    ANIME   = 8,  // the catalog's anime: Japanese animation (home.cpp)
 };
 
 // The default UI sizes, named so the Options screen can mark them in the list.

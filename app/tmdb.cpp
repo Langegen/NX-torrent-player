@@ -12,7 +12,9 @@
 #include <dirent.h>
 #include <sys/stat.h>
 
+#include <chrono>
 #include <ctime>
+#include <thread>
 
 #include <borealis.hpp>
 
@@ -128,6 +130,7 @@ void readCommon(const std::string& top, content::Kind kind,
     it.posterUrlLarge = imageUrl(imageBase, "w342", poster);
     it.backdropUrl    = imageUrl(imageBase, "w1280", json::str(top, "backdrop_path"));
     it.rating         = json::number(top, "vote_average", 0.0);
+    it.originalLanguage = json::str(top, "original_language");
 }
 } // namespace
 
@@ -255,7 +258,16 @@ ListQuery discoverQuery(const Discover& d)
     q.path = tv ? "/discover/tv" : "/discover/movie";
     q.kind = tv ? 1 : 0;
     const char* date = tv ? "first_air_date" : "primary_release_date";
-    if (d.genre > 0) q.params.push_back({ "with_genres", std::to_string(d.genre) });
+    if (d.anime)
+    {
+        // A comma is AND in with_genres: animation and the genre asked for.
+        std::string g = std::to_string(kAnimationGenre);
+        if (d.genre > 0 && d.genre != kAnimationGenre) g += "," + std::to_string(d.genre);
+        q.params.push_back({ "with_genres", g });
+        q.params.push_back({ "with_original_language", "ja" });
+    }
+    else if (d.genre > 0)
+        q.params.push_back({ "with_genres", std::to_string(d.genre) });
     if (d.yearFrom > 0)
         q.params.push_back({ std::string(date) + ".gte", std::to_string(d.yearFrom) + "-01-01" });
     if (d.yearTo > 0)
@@ -276,6 +288,17 @@ ListQuery discoverQuery(const Discover& d)
             break;
     }
     return q;
+}
+
+bool isAnime(const content::Item& it)
+{
+    if (it.originalLanguage != "ja") return false;
+    for (int g : it.genreIds)
+        if (g == kAnimationGenre) return true;
+    for (const auto& g : it.genres)  // details carry names, not ids
+        if (g == "Animation" || g == "\xD0\xBC\xD1\x83\xD0\xBB\xD1\x8C\xD1\x82\xD1\x84\xD0\xB8\xD0\xBB\xD1\x8C\xD0\xBC")
+            return true;  // "мультфильм"
+    return false;
 }
 
 ListQuery searchQuery(const std::string& text, int kind, int year)
@@ -395,6 +418,15 @@ bool fetchCached(const Settings& s, const std::string& url, long ttlSec,
     if (isBearerToken(s.apiKey)) auth = "Authorization: Bearer " + s.apiKey;
     std::string resp;
     bool ok = http::get(url, resp, err, auth.empty() ? nullptr : auth.c_str(), 20);
+    if (!ok)
+    {
+        // One more try: a flaky connection (Wi-Fi waking, a VPN or proxy
+        // settling) fails the odd request that the next one gets through.
+        // This runs on a worker thread, so the pause blocks nothing.
+        std::this_thread::sleep_for(std::chrono::milliseconds(800));
+        resp.clear();
+        ok = http::get(url, resp, err, auth.empty() ? nullptr : auth.c_str(), 20);
+    }
     if (ok)
     {
         std::string tmdbErr = errorMessage(resp);

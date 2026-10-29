@@ -28,6 +28,33 @@ bool mentionsKey(const std::string& low)
            has(low, "unauthorized");
 }
 
+bool endsWith(const std::string& s, const char* tail)
+{
+    std::string t = tail;
+    return s.size() >= t.size() && s.compare(s.size() - t.size(), t.size(), t) == 0;
+}
+
+// A machine on the home network, where Jackett runs on its own port 9117 --
+// as opposed to a public server (a Jacred mirror) on the standard one.
+bool isLocalHost(const std::string& hostIn)
+{
+    std::string host = lower(hostIn);
+    if (host.empty()) return false;
+    if (host[0] == '[') return true;  // an IPv6 literal
+    if (host == "localhost" || host.find('.') == std::string::npos) return true;
+    if (endsWith(host, ".local") || endsWith(host, ".lan") || endsWith(host, ".home") ||
+        endsWith(host, ".internal"))
+        return true;
+    // Four dotted numbers: an IPv4 address.
+    int dots = 0;
+    for (char c : host)
+    {
+        if (c == '.') dots++;
+        else if (!std::isdigit((unsigned char)c)) return false;
+    }
+    return dots == 3;
+}
+
 } // namespace
 
 Diagnosis diagnoseTransport(const std::string& err)
@@ -57,6 +84,14 @@ Diagnosis diagnoseAnswer(long status, const std::string& body, bool query)
     Diagnosis d;
     std::string low = lower(body);
 
+    // A 403 that is a web page comes from the web server in front (nginx
+    // refusing a network or a client), not from Jackett judging the key.
+    bool html = has(low, "<html") || has(low, "<!doctype");
+    if (status == 403 && html)
+    {
+        d.problem = Problem::Forbidden;
+        return d;
+    }
     if (status == 401 || status == 403)
     {
         d.problem = Problem::BadKey;
@@ -102,7 +137,10 @@ Diagnosis diagnoseAnswer(long status, const std::string& body, bool query)
         }
     }
     bool anyResult = !json::objects(body, "Results").empty();
-    if (d.indexers == 0 && !query)
+    // Jacred (jac.red and its mirrors: the Jackett API over a ready index)
+    // has no "Indexers" at all -- that is a working server, not an empty one.
+    d.hasIndexerList = has(body, "\"Indexers\"");
+    if (d.hasIndexerList && d.indexers == 0 && !query)
         d.problem = Problem::NoIndexers;
     else if (d.indexers > 0 && d.failed == d.indexers && !anyResult)
         d.problem = Problem::IndexersFailed;
@@ -128,7 +166,7 @@ std::string normalizeUrl(const std::string& typed)
         size_t colon     = host.rfind(':');
         bool port = colon != std::string::npos &&
                     (bracket == std::string::npos || colon > bracket);
-        if (!port)
+        if (!port && isLocalHost(host))
         {
             size_t slash = s.find('/');
             if (slash == std::string::npos)

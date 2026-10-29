@@ -59,6 +59,8 @@ bool isLight();
 // enough to need tuning by hand, while light tints of the same strength read
 // consistently across hues.
 NVGcolor accent();      // never varies -- it carries white text in both
+NVGcolor accentText();  // the accent AS text: lifted towards white on the dark
+                        // field (the fill itself is too dark to read there)
 NVGcolor gradTop();     // Stremio tab gradient, start
 NVGcolor gradBottom();  // ... and end (black when dark, white when light)
 NVGcolor bgInner();
@@ -127,7 +129,7 @@ class AccentLabel : public brls::Label
     void draw(NVGcontext* vg, float x, float y, float w, float h,
               brls::Style style, brls::FrameContext* ctx) override
     {
-        this->setTextColor(accent());
+        this->setTextColor(accentText());
         brls::Label::draw(vg, x, y, w, h, style, ctx);
     }
 };

@@ -19,6 +19,7 @@ enum class Problem
     Timeout,         // asked, never answered in time
     Certificate,     // https with a chain that does not verify (often the clock)
     BadKey,          // 401 / 403 / "Invalid API key"
+    Forbidden,       // a web server's own 403 page (a public mirror refusing us)
     NotJackett,      // something answered, but not Jackett's API (a web page, a 404)
     NoIndexers,      // Jackett works, but has no indexers to search
     IndexersFailed,  // every indexer returned an error
@@ -31,6 +32,7 @@ struct Diagnosis
     std::string detail;  // the raw error, or the first indexer's error
     int indexers = 0;    // in the answer's "Indexers" list
     int failed   = 0;    // of those, how many reported an error
+    bool hasIndexerList = false;  // Jackett lists its indexers; Jacred does not
 };
 
 // curl gave up before an answer arrived: `err` is its message.
@@ -43,7 +45,9 @@ Diagnosis diagnoseAnswer(long status, const std::string& body, bool query);
 
 // The address as typed, made usable: spaces trimmed, "http://" added when no
 // scheme was given, a trailing "/" dropped, and Jackett's default port 9117
-// added when neither a scheme nor a port was typed ("192.168.1.5").
+// added when neither a scheme nor a port was typed for a local machine (an IP
+// address, "localhost", a name without dots or ending .local / .lan / .home).
+// A public name ("ru.jac.black", a Jacred mirror) keeps the default port.
 std::string normalizeUrl(const std::string& typed);
 
 } // namespace jackett

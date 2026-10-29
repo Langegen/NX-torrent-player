@@ -39,6 +39,10 @@ struct Info
     std::vector<std::string> voices;
     // The release group: "-NTb" at the end of a scene name, "[HDRezka]". "".
     std::string group;
+    // Audio languages the name mentions: Russian (a voice-over, "Rus",
+    // "русский") and Ukrainian ("Ukr", "4xUkr", "укр").
+    bool russian   = false;
+    bool ukrainian = false;
 };
 
 Info parse(const std::string& title);
@@ -64,6 +68,18 @@ struct Want
 // back negative, and the screen hides it behind "All". `seeders` < 0 = not
 // known; `size` 0 = not known.
 int score(const Info& info, int seeders, int64_t size, const Want& want);
+
+// Whether a release is of the title at all: the search for "Fallout" also
+// finds "Mission.Impossible.Fallout.2018". True when one of `titles` (the
+// localized and the original name) starts the name, or one of its " / " or
+// " | " parts ("Фоллаут / Fallout (Season 1)"), whole words, case and
+// punctuation aside, a leading "[group]" and "The" ignored.
+bool titleMatches(const std::string& name, const std::vector<std::string>& titles);
+
+// The years a name gives (1900..2039, four digits on their own): "1917
+// (2019)" -> {1917, 2019}; a title's own number can be among them, so a
+// caller checks whether ANY is the year it wants.
+std::vector<int> yearsIn(const std::string& name);
 
 // Which of a torrent's files is season `season`, episode `episode`, by name
 // (S01E06, 1x06, "Серия 6", a leading "06." ...). Paths may carry folders

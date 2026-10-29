@@ -255,6 +255,12 @@ void testConnectionAsync(const std::string& url, const std::string& apiKey,
             }
             // Working: say how many indexers it has, and how many of them
             // failed this time (a tracker down, a login expired).
+            // A Jacred mirror lists no indexers: it searches its own index.
+            if (!d.hasIndexerList)
+            {
+                cb(true, tr("The server works."));
+                return;
+            }
             std::string msg = tr("Jackett works. Indexers: ") + std::to_string(d.indexers);
             if (d.failed > 0)
                 msg += tr(", with errors: ") + std::to_string(d.failed) + "\n" + d.detail;
@@ -287,6 +293,9 @@ std::string explain(const Diagnosis& d, const std::string& base)
         case Problem::BadKey:
             return tr("Jackett rejected the API key. Copy it from the top right corner of "
                       "the Jackett web page into Options, Jackett.");
+        case Problem::Forbidden:
+            return tr("The server refused the request (HTTP 403). A public server can block "
+                      "some networks: try another address, or your own Jackett.");
         case Problem::NotJackett:
             return tr("Something answers at this address, but not Jackett's API. Check "
                       "the port (9117 by default) and the API key.");

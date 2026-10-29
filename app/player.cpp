@@ -983,7 +983,7 @@ brls::Box* panelSection(const char* title, float marginTop)
     auto* l = new brls::Label();
     l->setText(title);
     l->setFontSize(17.0f);
-    l->setTextColor(theme::accent());
+    l->setTextColor(theme::accentText());
     l->setMarginBottom(6.0f);
     box->addView(l);
 

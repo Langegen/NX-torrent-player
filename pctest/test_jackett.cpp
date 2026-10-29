@@ -7,6 +7,7 @@
 #include <string>
 
 #include "jackett_diag.hpp"
+#include "json.hpp"
 
 #define CHECK(cond)                                                            \
     do                                                                         \
@@ -83,6 +84,19 @@ static void test_indexers()
     jackett::Diagnosis s = diagnoseAnswer(200, someOk, true);
     CHECK(s.problem == Problem::None);
     CHECK(s.indexers == 2 && s.failed == 1);
+    CHECK(s.hasIndexerList);
+
+    // Jacred (ru.jac.black): results, no "Indexers" -- a working server.
+    const char* jacred = R"({"Results":[{"Tracker":"rutracker","Title":"Дюна / Dune [2021, WEB-DL 1080p] Dub","Size":1,"Seeders":5,"MagnetUri":"magnet:?xt=urn:btih:00&tr=x"}],"jacred":true})";
+    jackett::Diagnosis j = diagnoseAnswer(200, jacred, false);
+    CHECK(j.problem == Problem::None);
+    CHECK(!j.hasIndexerList && j.indexers == 0);
+    CHECK(diagnoseAnswer(200, R"({"Results":[],"jacred":true})", false).problem == Problem::None);
+    // nginx in front of Jacred refusing a request (no User-Agent): not the API.
+    CHECK(diagnoseAnswer(403, "<html><title>403 Forbidden</title></html>", false).problem ==
+          Problem::Forbidden);
+    // A size past 2 GB (Jacred's own answer): no wrap on a 32-bit `long`.
+    CHECK(json::integer(R"({"Size":6184752906})", "Size") == 6184752906LL);
     std::printf("      PASSED\n");
 }
 
@@ -99,6 +113,12 @@ static void test_urls()
     CHECK(normalizeUrl("[::1]") == "http://[::1]:9117");
     CHECK(normalizeUrl("[::1]:9000") == "http://[::1]:9000");
     CHECK(normalizeUrl("   ").empty());
+    // A public Jacred mirror: standard port, nothing added but the scheme.
+    CHECK(normalizeUrl("ru.jac.black") == "http://ru.jac.black");
+    CHECK(normalizeUrl("jac.red/") == "http://jac.red");
+    CHECK(normalizeUrl("jackett") == "http://jackett:9117");
+    CHECK(normalizeUrl("NAS.lan") == "http://NAS.lan:9117");
+    CHECK(normalizeUrl("localhost") == "http://localhost:9117");
     std::printf("      PASSED\n");
 }
 

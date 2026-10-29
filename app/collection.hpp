@@ -24,6 +24,9 @@ class PosterGrid : public brls::Box
     std::function<bool(const content::Item&)> filter;
     // Where the focus goes when the grid is emptied under it.
     brls::View* parkTarget = nullptr;
+    // Set before load(): when the page comes in, move the focus from
+    // `parkTarget` onto the first result (a genre tile was pressed: it is gone).
+    bool focusResultsOnce = false;
 
     void draw(NVGcontext* vg, float x, float y, float w, float h, brls::Style style,
               brls::FrameContext* ctx) override;
@@ -38,9 +41,11 @@ class PosterGrid : public brls::Box
     int shown   = 0;
     int page = 0, totalPages = 1;
     bool loading = false;
+    brls::View* firstCard = nullptr;  // freed with the grid's rows (load() clears it)
 
     void next();
     void add(const content::Item& it);
+    void focusFirstIfLost();
 };
 
 // The full screen of one collection ("Top rated movies" and so on).

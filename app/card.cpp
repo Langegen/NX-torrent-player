@@ -75,6 +75,8 @@ struct CardState
     std::shared_ptr<bool> alive = std::make_shared<bool>(true);
 
     brls::Image* backdrop      = nullptr;
+    brls::Image* poster        = nullptr;
+    brls::Label* title         = nullptr;
     brls::Box* chips           = nullptr;
     brls::Label* overview      = nullptr;
     brls::Label* cast          = nullptr;
@@ -133,15 +135,18 @@ class CardView : public brls::Box
 
         ui::attachArt(st->backdrop, item.key() + "_bd", item.backdropUrl, alive, true);
 
-        // L / R walk the seasons (the mock-up's hint bar).
-        registerAction(tr("Season"), brls::BUTTON_LB, [this](brls::View*) {
-            switchSeason(-1);
-            return true;
-        });
-        registerAction(tr("Season"), brls::BUTTON_RB, [this](brls::View*) {
-            switchSeason(+1);
-            return true;
-        });
+        // L / R walk the seasons (the mock-up's hint bar) -- a film has none.
+        if (item.isSeries())
+        {
+            registerAction(tr("Previous season"), brls::BUTTON_LB, [this](brls::View*) {
+                switchSeason(-1);
+                return true;
+            });
+            registerAction(tr("Next season"), brls::BUTTON_RB, [this](brls::View*) {
+                switchSeason(+1);
+                return true;
+            });
+        }
 
         loadDetails();
     }
@@ -187,6 +192,7 @@ class CardView : public brls::Box
         poster->setShadowType(brls::ShadowType::GENERIC);
         poster->setShadowVisibility(true);
         ui::attachArt(poster, it.key(), it.posterUrlLarge, alive);
+        st->poster = poster;
         top->addView(poster);
 
         auto* info = new brls::Box();
@@ -194,7 +200,8 @@ class CardView : public brls::Box
         info->setGrow(1.0f);
         info->setShrink(1.0f);
 
-        info->addView(whiteLabel(it.title, 36.0f, 255));
+        st->title = whiteLabel(it.title, 36.0f, 255);
+        info->addView(st->title);
 
         st->chips = new brls::Box();
         st->chips->setAxis(brls::Axis::ROW);
@@ -419,7 +426,16 @@ class CardView : public brls::Box
             if (!s || !*s->alive) return;
             if (!r.ok)
             {
+                // No TMDB answer (offline, blocked, a hiccup that outlived the
+                // retry). The list's title and year are enough to search
+                // Jackett, so the buttons work anyway; say why the rest is
+                // missing instead of leaving "Still loading" forever.
                 brls::Logger::warning("[card] details: {}", r.error);
+                s->detailsLoaded = true;
+                s->cast->setText(tr("Could not load the details from TMDB. Searching for "
+                                    "releases works by the title."));
+                s->cast->setTextColor(nvgRGBA(255, 190, 140, 230));
+                s->cast->setVisibility(brls::Visibility::VISIBLE);
                 return;
             }
             // Keep what the list had where the details are thinner (a list
@@ -428,7 +444,18 @@ class CardView : public brls::Box
             s->d = r.details;
             if (s->d.item.backdropUrl.empty()) s->d.item.backdropUrl = before.backdropUrl;
             if (s->d.item.overview.empty()) s->d.item.overview = before.overview;
+            if (s->d.item.title.empty()) s->d.item.title = before.title;
             s->detailsLoaded = true;
+            // The name in the UI language from TMDB itself: whatever opened
+            // the card may have known it only by id, or in another language.
+            s->title->setText(s->d.item.title);
+            // Opened without artwork (a bookmark from an older version, a
+            // link): the details bring it.
+            if (before.posterUrlLarge.empty() && !s->d.item.posterUrlLarge.empty())
+                ui::attachArt(s->poster, s->d.item.key(), s->d.item.posterUrlLarge, s->alive);
+            if (before.backdropUrl.empty() && !s->d.item.backdropUrl.empty())
+                ui::attachArt(s->backdrop, s->d.item.key() + "_bd", s->d.item.backdropUrl,
+                              s->alive, true);
 
             fillChips();
             s->overview->setText(trimmed(s->d.item.overview));
@@ -579,7 +606,9 @@ class CardView : public brls::Box
         }
         if (s.d.seasons.empty())
         {
-            note(tr("No episodes"));
+            // No season list (TMDB has none, or did not answer): every release
+            // of the show, the season packs among them.
+            openSources(s.d.item, 0, 0);
             return;
         }
         openSources(s.d.item, s.d.seasons[0].number, 1, s.d.seasons[0].episodeCount);
@@ -595,6 +624,8 @@ class CardActivity : public brls::Activity
     {
         auto* frame = new brls::AppletFrame(new CardView(item));
         frame->setTitle("");
+        // The backdrop is the card: no empty title bar across its top.
+        frame->setHeaderVisibility(brls::Visibility::GONE);
         return frame;
     }
 

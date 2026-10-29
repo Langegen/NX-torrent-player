@@ -41,6 +41,7 @@ void PosterGrid::load(const tmdb::ListQuery& q, brls::ScrollingFrame* frame)
     clearViews();
     row    = nullptr;
     status = nullptr;
+    firstCard = nullptr;
     shown  = 0;
     page   = 0;
     totalPages = 1;
@@ -79,9 +80,11 @@ void PosterGrid::next()
         // The status line stays the last child: take it out, add the page,
         // put it back.
         removeView(status, false);
+        int before = shown;
         for (const auto& it : r.items)
             if (!filter || filter(it)) add(it);
         addView(status);
+        if (before == 0 && shown > 0) focusFirstIfLost();
         if (shown == 0 && page >= totalPages)
             status->setText(tr("Nothing here"));
         else
@@ -91,6 +94,22 @@ void PosterGrid::next()
         // is not even full.
         if (shown < columns * 2 && page < totalPages) next();
     });
+}
+
+// The screen opened before its posters came in, with nothing to focus: the
+// focus stayed behind on the previous screen (the "See all" tile), and A did
+// nothing. Hand it to the first poster -- unless it already sits somewhere on
+// this screen (the search bar, a filter), where the person put it.
+void PosterGrid::focusFirstIfLost()
+{
+    brls::Activity* mine = getParentActivity();
+    auto stack           = brls::Application::getActivitiesStack();
+    if (!mine || stack.empty() || stack.back() != mine) return;
+    brls::View* f = brls::Application::getCurrentFocus();
+    bool take = focusResultsOnce && f == parkTarget;
+    focusResultsOnce = false;
+    if (f && f->getParentActivity() == mine && !take) return;
+    if (firstCard) brls::Application::giveFocus(firstCard);
 }
 
 void PosterGrid::add(const content::Item& it)
@@ -103,7 +122,9 @@ void PosterGrid::add(const content::Item& it)
         row->setMarginBottom(kGap);
         addView(row);
     }
-    row->addView(catalogPoster(it, alive, kPosterW));
+    brls::Box* card = catalogPoster(it, alive, kPosterW);
+    if (!firstCard) firstCard = card;
+    row->addView(card);
     shown++;
 }
 
@@ -129,7 +150,7 @@ void openCollection(const std::string& title, const tmdb::ListQuery& q)
     auto* head = new brls::Label();
     head->setText(title);
     head->setFontSize(28.0f);
-    head->setMargins(16.0f, 0.0f, 6.0f, kInset);
+    head->setMargins(34.0f, 0.0f, 6.0f, kInset);
     root->addView(head);
 
     auto* scroll = new brls::ScrollingFrame();
@@ -142,5 +163,7 @@ void openCollection(const std::string& title, const tmdb::ListQuery& q)
 
     auto* frame = new brls::AppletFrame(root);
     frame->setTitle("");
+    // The heading is the collection's name: no empty title bar above it.
+    frame->setHeaderVisibility(brls::Visibility::GONE);
     brls::Application::pushActivity(new brls::Activity(frame));
 }

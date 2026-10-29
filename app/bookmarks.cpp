@@ -38,7 +38,7 @@ class BookmarksRoot : public brls::Box
 
         auto* top = new brls::Box();
         top->setAxis(brls::Axis::ROW);
-        top->setPadding(6.0f, kInset, 4.0f, kInset);
+        top->setPadding(18.0f, kInset, 4.0f, kInset);
         exportBtn = ui::actionButton(tr("Export"), false, []() {
             std::string err;
             if (library::exportTo(kExportPath, err))

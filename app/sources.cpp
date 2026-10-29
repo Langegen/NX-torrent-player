@@ -47,6 +47,10 @@ struct Source
     int seeders  = -1;
     release::Info info;
     int score = 0;
+    // Of this title at all: the name starts with it (a search for "Fallout"
+    // also finds "Mission.Impossible.Fallout"), and a film's year fits.
+    // Addon results are looked up by IMDb id, so they always are.
+    bool relevant = true;
 
     jackett::Item jitem;  // Kind::Jackett
     std::string src;      // a magnet or a URL (Stremio)
@@ -260,7 +264,7 @@ class SourcesView : public brls::Box
     {
         setAxis(brls::Axis::COLUMN);
         setGrow(1.0f);
-        setPadding(20.0f, 60.0f, 10.0f, 60.0f);
+        setPadding(34.0f, 60.0f, 10.0f, 60.0f);
 
         want.series        = item.isSeries();
         want.season        = season;
@@ -369,6 +373,16 @@ class SourcesView : public brls::Box
     std::vector<std::pair<brls::View*, std::string>> rowKeys;  // row -> dedupKey
     std::vector<std::string> errors;
 
+    // A release is listed unless it holds something else: another season or
+    // episode, a cam (score), or another title -- the last only once some
+    // release IS of the title, so an unusual spelling on every tracker still
+    // shows everything rather than nothing.
+    bool anyRelevant = false;
+    bool listable(const Source& r) const
+    {
+        return r.score > -500 && (r.relevant || !anyRelevant);
+    }
+
     static std::string dedupKey(const Source& s)
     {
         return s.title + "|" + std::to_string(s.size / (1024 * 1024));
@@ -437,7 +451,7 @@ class SourcesView : public brls::Box
         std::map<std::string, int> count;
         for (const auto& r : found)
         {
-            if (r.score <= -500) continue;
+            if (!listable(r)) continue;
             if (f == Facet::Voice)
                 for (const auto& v : r.info.voices) count[v]++;
             else if (f == Facet::Source && !r.info.source.empty())
@@ -532,7 +546,7 @@ class SourcesView : public brls::Box
         {
             int n = 0;
             for (const auto& r : found)
-                if (r.score > -500) n++;
+                if (listable(r)) n++;
             s += "  \xC2\xB7  " + std::to_string(n) + tr(" releases");
             // Listed already, the addons still answering.
             if (pending > 0) s += std::string("  \xC2\xB7  ") + tr("searching addons...");
@@ -578,6 +592,31 @@ class SourcesView : public brls::Box
         // The same release from two indexers, or from Jackett and an addon.
         if (!seen.insert(dedupKey(s)).second) return false;
         s.score = release::score(s.info, s.seeders, s.size, want);
+        if (s.kind == Source::Kind::Jackett)
+        {
+            // A text search: is it this title (and, for a film, this year)?
+            s.relevant = release::titleMatches(s.title, { item.title, item.originalTitle });
+            int year   = std::atoi(item.year.c_str());
+            if (s.relevant && !item.isSeries() && year > 0)
+            {
+                std::vector<int> ys = release::yearsIn(s.title);
+                bool fits = ys.empty();
+                for (int y : ys) fits = fits || std::abs(y - year) <= 1;
+                s.relevant = fits;
+            }
+            else if (s.relevant && item.isSeries() && year > 0 && s.info.season < 0 &&
+                     s.info.episode < 0)
+            {
+                // No season or episode in the name, and every year it gives is
+                // from before the show began: a film of the same name ("The
+                // Fallout (2021)" for the 2024 show).
+                std::vector<int> ys = release::yearsIn(s.title);
+                bool before = !ys.empty();
+                for (int y : ys) before = before && y < year - 1;
+                if (before) s.relevant = false;
+            }
+        }
+        if (s.relevant && s.score > -500) anyRelevant = true;
         found.push_back(std::move(s));
         return true;
     }
@@ -692,7 +731,7 @@ class SourcesView : public brls::Box
         std::vector<const Source*> v;
         for (const auto& r : found)
         {
-            if (r.score <= -500) continue;  // another season / episode, a cam
+            if (!listable(r)) continue;  // another season / episode / title, a cam
             if (filterHeight && r.info.height != filterHeight) continue;
             if (!facetsPass(r)) continue;
             v.push_back(&r);
@@ -760,7 +799,7 @@ class SourcesView : public brls::Box
         // "Best choice": the top of the recommended order, whatever is shown.
         const Source* best = nullptr;
         for (const auto& r : found)
-            if (r.score > -500 && (!best || r.score > best->score)) best = &r;
+            if (listable(r) && (!best || r.score > best->score)) best = &r;
 
         brls::View* refocus = nullptr;
         for (const Source* r : rows)
@@ -771,8 +810,16 @@ class SourcesView : public brls::Box
             if (focusInList && !refocus && key == focusKey) refocus = row;
             rowKeys.push_back({ row, key });
         }
-        if (focusInList) brls::Application::giveFocus(refocus ? refocus : rowKeys[0].first);
+        if (focusInList)
+            brls::Application::giveFocus(refocus ? refocus : rowKeys[0].first);
+        else if (!autoFocused && isOnTop() &&
+                 brls::Application::getCurrentFocus() == filterBtns[0].first)
+            // The first listing, nobody has moved yet: straight onto the best
+            // choice, so A plays it (the screen opens with "All" focused).
+            brls::Application::giveFocus(rowKeys[0].first);
+        autoFocused = true;
     }
+    bool autoFocused = false;
 
     brls::Box* buildRow(const Source& s, bool best)
     {
@@ -925,6 +972,8 @@ void openSourcesScreen(const content::Item& item, int season, int episode,
 {
     auto* frame = new brls::AppletFrame(new SourcesView(item, season, episode, episodesInSeason));
     frame->setTitle("");
+    // "Torrents" and the title head the view itself: no empty bar above them.
+    frame->setHeaderVisibility(brls::Visibility::GONE);
     brls::Application::pushActivity(new brls::Activity(frame));
 }
 

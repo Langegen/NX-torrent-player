@@ -218,7 +218,7 @@ class HistoryTabRoot : public brls::Box
         auto* srcBadge = new brls::Label();
         srcBadge->setText("[" + srcType + "]");
         srcBadge->setFontSize(15.0f);
-        srcBadge->setTextColor(theme::accent());
+        srcBadge->setTextColor(theme::accentText());
         srcBadge->setMarginRight(14.0f);
         meta->addView(srcBadge);
 
@@ -227,7 +227,7 @@ class HistoryTabRoot : public brls::Box
         if (item.completed)
         {
             statusLbl->setText(tr("Completed"));
-            statusLbl->setTextColor(theme::accent());
+            statusLbl->setTextColor(theme::accentText());
         }
         else
         {

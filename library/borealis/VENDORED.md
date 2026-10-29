@@ -122,6 +122,14 @@ These two files are the same keys as `en-US/hints.json`, translated. The app
 picks the locale itself (`Platform::APP_LOCALE_DEFAULT`, set in `main()` from
 its own language setting).
 
+### 7. `core/application.{hpp,cpp}` — a frame-end hook
+
+`Application::setFrameEndHook(fn)` runs `fn` once per frame after `nvgEndFrame`
+and before the video context swaps the buffers: the one moment a finished frame
+can be read back. Only the PC build's scripted UI check (`app/autotest.cpp`,
+`NX_AUTOTEST=script`) sets it, to take screenshots; nothing is set on the
+console. Marked `LOCAL PATCH` in both files.
+
 ## Updating
 
 Re-cloning upstream **drops the patch** — re-apply it, and check this file's

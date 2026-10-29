@@ -27,7 +27,7 @@ class JackettSetupView : public brls::Box
     {
         setAxis(brls::Axis::COLUMN);
         setGrow(1.0f);
-        setPadding(30.0f, 80.0f, 20.0f, 80.0f);
+        setPadding(44.0f, 80.0f, 20.0f, 80.0f);
 
         auto* title = new brls::Label();
         title->setText(tr("Set up Jackett"));
@@ -38,11 +38,19 @@ class JackettSetupView : public brls::Box
         intro->setText(tr("The app finds releases through Jackett: a server on your computer "
                           "or NAS that searches the torrent trackers. Enter its address and "
                           "API key, then check the connection."));
+        auto* jacred = new brls::Label();
+        jacred->setText(tr("A public server with the same API (Jacred) works too: enter its "
+                           "address and leave the key empty."));
+        jacred->setFontSize(16.0f);
+        jacred->setLineHeight(1.4f);
+        jacred->setTextColor(theme::textMuted());
+        jacred->setMarginBottom(14.0f);
         intro->setFontSize(18.0f);
         intro->setLineHeight(1.4f);
         intro->setTextColor(theme::textMuted());
-        intro->setMargins(12.0f, 0.0f, 20.0f, 0.0f);
+        intro->setMargins(12.0f, 0.0f, 8.0f, 0.0f);
         addView(intro);
+        addView(jacred);
 
         const config::Config& cfg = config::get();
 
@@ -142,6 +150,7 @@ class JackettSetupView : public brls::Box
     {
         working = false;
         checkBtn->setText(tr("Check and save"));
+        skipBtn->setVisibility(brls::Visibility::VISIBLE);
         status->setVisibility(brls::Visibility::GONE);
     }
 
@@ -169,6 +178,8 @@ class JackettSetupView : public brls::Box
             checking = false;
             working  = ok;
             checkBtn->setText(ok ? tr("Done") : tr("Check and save"));
+            // Nothing left to skip once it works.
+            skipBtn->setVisibility(ok ? brls::Visibility::GONE : brls::Visibility::VISIBLE);
             say(msg, ok ? nvgRGB(0x9b, 0xe3, 0x8b) : theme::textWarn());
         });
     }
@@ -181,6 +192,8 @@ class JackettSetupActivity : public brls::Activity
     {
         auto* frame = new brls::AppletFrame(new JackettSetupView());
         frame->setTitle("Jackett");
+        // "Set up Jackett" heads the view: no second title above it.
+        frame->setHeaderVisibility(brls::Visibility::GONE);
         return frame;
     }
 };

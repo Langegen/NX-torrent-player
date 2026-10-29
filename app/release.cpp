@@ -1,7 +1,9 @@
 #include "release.hpp"
 
+#include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 
 namespace release
@@ -361,9 +363,13 @@ Info parse(const std::string& title)
         in.cam    = true;
     }
 
-    if (has(low, "hevc") || has(low, "x265") || has(low, "h265") || has(low, "h.265"))
+    // Also spelled with a space: "DDP5 1 H 264-NTb" (an index that turned
+    // the dots into spaces).
+    if (has(low, "hevc") || has(low, "x265") || has(low, "h265") || has(low, "h.265") ||
+        has(w, " h 265 ") || has(w, " x 265 "))
         in.codec = "HEVC";
-    else if (has(low, "x264") || has(low, "h264") || has(low, "h.264") || hasWord(w, "avc"))
+    else if (has(low, "x264") || has(low, "h264") || has(low, "h.264") || hasWord(w, "avc") ||
+             has(w, " h 264 ") || has(w, " x 264 "))
         in.codec = "H.264";
     else if (hasWord(w, "av1"))
         in.codec = "AV1";
@@ -380,6 +386,12 @@ Info parse(const std::string& title)
     readScope(low, in);
     readVoices(low, w, in);
     in.group = readGroup(title);
+
+    // The audio languages a name owns up to ("Rus | Ukr | Eng", "4xUkr/Eng",
+    // "Русский"): a Ukrainian-only release is not the pick for a Russian UI.
+    in.russian = !in.voices.empty() || hasWord(w, "rus") || has(low, "\xD1\x80\xD1\x83\xD1\x81") ||
+                 has(low, "russian");
+    in.ukrainian = has(low, "ukr") || has(low, "\xD1\x83\xD0\xBA\xD1\x80");  // укр
     return in;
 }
 
@@ -450,6 +462,9 @@ int score(const Info& in, int seeders, int64_t size, const Want& want)
             if (v == want.voice) s += 15;
     if (!want.group.empty() && in.group == want.group) s += 10;
     if (want.preferRussian && !in.voices.empty()) s += 8;
+    // Ukrainian audio only, the UI in Russian: a working release, but rarely
+    // the one wanted.
+    if (want.preferRussian && in.ukrainian && !in.russian) s -= 12;
     return s;
 }
 
@@ -495,6 +510,88 @@ void fileScope(const std::string& path, int& season, int& episode)
     }
 }
 } // namespace
+
+namespace
+{
+
+// A name for comparing: lower case, "ё" as "е", separators as single spaces,
+// " padded ", without a leading "[group]" or "the".
+std::string comparable(std::string s)
+{
+    while (!s.empty() && s[0] == ' ') s.erase(0, 1);
+    if (!s.empty() && s[0] == '[')
+    {
+        size_t close = s.find(']');
+        if (close != std::string::npos) s.erase(0, close + 1);
+    }
+    std::string low = lower(s);
+    std::string e;
+    for (size_t i = 0; i < low.size(); i++)
+    {
+        if ((unsigned char)low[i] == 0xD1 && i + 1 < low.size() &&
+            (unsigned char)low[i + 1] == 0x91)
+        {
+            e += (char)0xD0;
+            e += (char)0xB5;
+            i++;
+        }
+        else
+            e += low[i];
+    }
+    std::string w = words(e);
+    if (w.compare(0, 5, " the ") == 0) w.erase(0, 4);
+    return w;
+}
+
+} // namespace
+
+bool titleMatches(const std::string& name, const std::vector<std::string>& titles)
+{
+    std::vector<std::string> want;
+    for (const auto& t : titles)
+    {
+        std::string c = comparable(t);
+        if (c.size() > 2 && std::find(want.begin(), want.end(), c) == want.end())
+            want.push_back(c);
+    }
+    if (want.empty()) return true;  // nothing to compare with
+
+    // The whole name and each of its " / " and " | " parts.
+    std::vector<std::string> parts = { name };
+    size_t from = 0;
+    for (size_t i = 0; i <= name.size(); i++)
+        if (i == name.size() || name[i] == '/' || name[i] == '|')
+        {
+            if (i > from) parts.push_back(name.substr(from, i - from));
+            from = i + 1;
+        }
+    for (const auto& p : parts)
+    {
+        std::string c = comparable(p);
+        for (const auto& w : want)
+            if (c.compare(0, w.size(), w) == 0) return true;
+    }
+    return false;
+}
+
+std::vector<int> yearsIn(const std::string& name)
+{
+    std::vector<int> out;
+    for (size_t i = 0; i + 4 <= name.size(); i++)
+    {
+        if (!std::isdigit((unsigned char)name[i])) continue;
+        size_t j = i;
+        while (j < name.size() && std::isdigit((unsigned char)name[j])) j++;
+        if (j - i == 4 && (i == 0 || !std::isalnum((unsigned char)name[i - 1])) &&
+            (j == name.size() || !std::isalpha((unsigned char)name[j])))
+        {
+            int y = std::atoi(name.substr(i, 4).c_str());
+            if (y >= 1900 && y <= 2039) out.push_back(y);
+        }
+        i = j;
+    }
+    return out;
+}
 
 int matchEpisode(const std::vector<std::string>& paths, int season, int episode)
 {

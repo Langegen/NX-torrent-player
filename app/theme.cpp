@@ -82,6 +82,14 @@ bool isLight() { return lightLatched; }
 
 NVGcolor accent() { return current().accent; }
 
+NVGcolor accentText()
+{
+    NVGcolor a = current().accent;
+    NVGcolor lifted = nvgRGBf(a.r + (1.0f - a.r) * 0.45f, a.g + (1.0f - a.g) * 0.45f,
+                              a.b + (1.0f - a.b) * 0.45f);
+    return pick(lifted, a);
+}
+
 NVGcolor gradTop()
 {
     return pick(current().gradTop, overWhite(current().accent, 0.18f));
@@ -222,6 +230,13 @@ void applyAccent()
         // default primary text is near-black, made for a light fill).
         t->addColor("brls/button/primary_enabled_background", accent);
         t->addColor("brls/button/primary_enabled_text", white);
+        // Values in Options, the selected item in a list picker and the
+        // Options sidebar's marker were borealis' cyan: on palette now. Text
+        // on the dark field takes the lighter tint (the accent itself is too
+        // dark to read there); on the light field the accent reads fine.
+        NVGcolor onField = t == &brls::Theme::getDarkTheme() ? glow : accent;
+        t->addColor("brls/list/listItem_value_color", onField);
+        t->addColor("brls/sidebar/active_item", onField);
     }
 
     if (repaintHook) repaintHook();

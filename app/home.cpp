@@ -103,6 +103,18 @@ RowSpec genreOf(const char* title, content::Kind kind, int genre)
     return { title, tmdb::genreQuery(kind, genre) };
 }
 
+// Japanese animation of one kind, in an order, optionally of one genre.
+RowSpec animeOf(const char* title, content::Kind kind, tmdb::Discover::Sort sort,
+                int genre = 0)
+{
+    tmdb::Discover d;
+    d.kind  = kind;
+    d.anime = true;
+    d.sort  = sort;
+    d.genre = genre;
+    return { title, tmdb::discoverQuery(d) };
+}
+
 
 class HomeRoot : public brls::Box
 {
@@ -112,6 +124,7 @@ class HomeRoot : public brls::Box
         Home = 0,
         Movies,
         Shows,
+        Anime,
     };
 
     explicit HomeRoot(View v) : view(v)
@@ -213,6 +226,19 @@ class HomeRoot : public brls::Box
                      genreOf("Thriller", Kind::Movie, 53),
                      genreOf("Horror", Kind::Movie, 27),
                      genreOf("Animation", Kind::Movie, 16) };
+        else if (view == View::Anime)
+        {
+            using Sort = tmdb::Discover::Sort;
+            rows = { animeOf("Popular anime series", Kind::Series, Sort::Popular),
+                     animeOf("New anime series", Kind::Series, Sort::Newest),
+                     animeOf("Top rated anime series", Kind::Series, Sort::Rating),
+                     animeOf("Anime films", Kind::Movie, Sort::Popular),
+                     animeOf("Top rated anime films", Kind::Movie, Sort::Rating),
+                     animeOf("Action & adventure", Kind::Series, Sort::Popular, 10759),
+                     animeOf("Comedy", Kind::Series, Sort::Popular, 35),
+                     animeOf("Drama", Kind::Series, Sort::Popular, 18),
+                     animeOf("Sci-Fi & Fantasy", Kind::Series, Sort::Popular, 10765) };
+        }
         else
             rows = { rowOf("Popular shows", tmdb::Row::PopularSeries),
                      pathOf("On the air", "/tv/on_the_air", Kind::Series),
@@ -487,5 +513,5 @@ class HomeRoot : public brls::Box
 
 brls::View* buildHomeTab(int view)
 {
-    return new HomeRoot((HomeRoot::View)(view < 0 || view > 2 ? 0 : view));
+    return new HomeRoot((HomeRoot::View)(view < 0 || view > 3 ? 0 : view));
 }

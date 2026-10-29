@@ -87,6 +87,11 @@ const Pair kRu[] = {
       "Jackett не настроен. Укажите адрес в настройках." },
     { "Invalid response from Jackett server", "Некорректный ответ сервера Jackett" },
     { "Jackett works. Indexers: ", "Jackett работает. Индексаторов: " },
+    { "The server works.", "Сервер работает." },
+    { "The server refused the request (HTTP 403). A public server can block some networks: "
+      "try another address, or your own Jackett.",
+      "Сервер отказал в запросе (HTTP 403). Публичный сервер может блокировать некоторые "
+      "сети: попробуйте другой адрес или свой Jackett." },
     { ", with errors: ", ", с ошибками: " },
     { "The Jackett address is not a valid URL. Enter it like http://192.168.1.100:9117.",
       "Адрес Jackett — не URL. Введите его в виде http://192.168.1.100:9117." },
@@ -128,6 +133,10 @@ const Pair kRu[] = {
       "опрашивает торрент-трекеры. Укажите его адрес и ключ API, затем проверьте "
       "соединение." },
     { "Check and save", "Проверить и сохранить" },
+    { "A public server with the same API (Jacred) works too: enter its address and leave the "
+      "key empty.",
+      "Подойдёт и публичный сервер с тем же API (Jacred): укажите его адрес, а ключ оставьте "
+      "пустым." },
     { "Skip", "Пропустить" },
     { "Done", "Готово" },
     { "Asking Jackett and its indexers...", "Опрашиваем Jackett и его индексаторы..." },
@@ -271,6 +280,13 @@ const Pair kRu[] = {
       "(нет активных сидов)" },
     { "peers connected but refused to share metadata",
       "пиры подключились, но не отдали метаданные" },
+    { "magnet without a usable tracker", "в магнет-ссылке нет рабочего трекера" },
+    { "no peer from the trackers", "трекеры не вернули ни одного пира" },
+    { "no usable tracker", "нет рабочего трекера" },
+    { "invalid bencode metadata", "повреждённые метаданные торрента" },
+    { "invalid bencode", "повреждённый торрент-файл" },
+    { "file not found", "файл не найден" },
+    { "read error", "ошибка чтения" },
 
     // ---- options: general -------------------------------------------------
     { " (default)", " (по умолчанию)" },
@@ -486,6 +502,12 @@ const Pair kRu[] = {
     { "Popular now", "Популярное сейчас" },
     { "Popular movies", "Популярные фильмы" },
     { "Popular shows", "Популярные сериалы" },
+    { "Popular anime series", "Популярные аниме-сериалы" },
+    { "New anime series", "Новые аниме-сериалы" },
+    { "Top rated anime series", "Лучшие аниме-сериалы" },
+    { "Anime films", "Аниме-фильмы" },
+    { "Top rated anime films", "Лучшие аниме-фильмы" },
+    { "Action & adventure", "Боевики и приключения" },
     { "In cinemas", "Сейчас в кино" },
     { "Top rated movies", "Лучшие фильмы" },
     { "Top rated shows", "Лучшие сериалы" },
@@ -502,6 +524,8 @@ const Pair kRu[] = {
     // ---- card ---------------------------------------------------------------
     { "Torrents", "Торренты" },
     { "Season", "Сезон" },
+    { "Previous season", "Пред. сезон" },
+    { "Next season", "След. сезон" },
     { "Watch S", "Смотреть С" },
     { " E", " Э" },
     { " min", " мин" },
@@ -510,6 +534,8 @@ const Pair kRu[] = {
     { "Episodes: ", "Серий: " },
     { "Starring: ", "В ролях: " },
     { "More like this", "Похожие" },
+    { "Could not load the details from TMDB. Searching for releases works by the title.",
+      "Не удалось загрузить подробности с TMDB. Поиск раздач работает по названию." },
     { "Still loading, try again in a moment.",
       "Данные ещё загружаются, попробуйте через секунду." },
     { "Set up Jackett in Options to search torrents.",

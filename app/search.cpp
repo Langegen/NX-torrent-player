@@ -124,6 +124,9 @@ class SearchScreen : public brls::Box
   private:
     std::string query;
     content::Kind kind = content::Kind::Movie;
+    // The third type: Japanese animation, films and series both (kind is
+    // Series then, for the genre list).
+    bool anime = false;
     int genre    = 0;
     int yearIdx  = 0;
     tmdb::Discover::Sort sort = tmdb::Discover::Sort::Popular;
@@ -157,7 +160,8 @@ class SearchScreen : public brls::Box
             barText->setText(query);
             barText->setTextColor(theme::text());
         }
-        kindBtn->setText(kind == content::Kind::Series ? tr("Shows") : tr("Movies"));
+        kindBtn->setText(anime ? tr("Anime")
+                         : kind == content::Kind::Series ? tr("Shows") : tr("Movies"));
         genreBtn->setText(genreName());
         const YearChoice& y = yearChoices()[yearIdx];
         yearBtn->setText(y.word ? std::string(tr(y.label)) : std::string(y.label));
@@ -223,6 +227,7 @@ class SearchScreen : public brls::Box
             row->addView(genreTile(tr(g.second), tileColor(i++), [this, id]() {
                 genre = id;
                 refreshLabels();
+                grid->focusResultsOnce = true;  // the tile pressed is about to go
                 run();
             }));
         }
@@ -264,6 +269,7 @@ class SearchScreen : public brls::Box
     bool passes(const content::Item& it) const
     {
         if (query.empty()) return true;  // discover filtered it already
+        if (anime && !tmdb::isAnime(it)) return false;
         if (genre)
         {
             bool has = false;
@@ -283,7 +289,8 @@ class SearchScreen : public brls::Box
 
     void run()
     {
-        if (query.empty() && genre == 0 && yearIdx == 0)
+        // Anime has its own list straight away; the others start on the tiles.
+        if (query.empty() && genre == 0 && yearIdx == 0 && !anime)
         {
             showTiles();
             return;
@@ -309,12 +316,16 @@ class SearchScreen : public brls::Box
             d.yearFrom = y.from;
             d.yearTo   = y.to;
             d.sort     = sort;
+            d.anime    = anime;
             q = tmdb::discoverQuery(d);
         }
         else
         {
             int single = (y.from && y.from == y.to) ? y.from : 0;
-            q = tmdb::searchQuery(query, kind == content::Kind::Series ? 1 : 0, single);
+            // Anime: films and shows both (the multi search, which takes no
+            // year -- passes() checks it), kept to anime by passes().
+            q = anime ? tmdb::searchQuery(query, -1)
+                      : tmdb::searchQuery(query, kind == content::Kind::Series ? 1 : 0, single);
         }
         grid->load(q, scroll);
     }
@@ -342,12 +353,14 @@ class SearchScreen : public brls::Box
 
     void pickKind()
     {
-        dropdown(tr("Type"), { tr("Movies"), tr("Shows") },
-                 kind == content::Kind::Series ? 1 : 0, [this](int i) {
-                     content::Kind k = i == 1 ? content::Kind::Series : content::Kind::Movie;
-                     if (k == kind) return;
+        dropdown(tr("Type"), { tr("Movies"), tr("Shows"), tr("Anime") },
+                 anime ? 2 : kind == content::Kind::Series ? 1 : 0, [this](int i) {
+                     content::Kind k = i == 0 ? content::Kind::Movie : content::Kind::Series;
+                     bool a          = i == 2;
+                     if (k == kind && a == anime) return;
                      kind  = k;
-                     genre = 0;  // the two kinds have different genre lists
+                     anime = a;
+                     genre = 0;  // the kinds have different genre lists
                      refreshLabels();
                      run();
                  });

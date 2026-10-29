@@ -91,8 +91,16 @@ struct Discover
         Rating,
         Newest,
     } sort = Sort::Popular;
+    // Anime: Japanese animation (TMDB genre 16, original language "ja"),
+    // `genre` narrowing it further.
+    bool anime = false;
 };
 ListQuery discoverQuery(const Discover& d);
+
+// TMDB's animation genre, and whether a list item is anime (animation made in
+// Japanese) -- for filtering a text search, which takes no such parameter.
+constexpr int kAnimationGenre = 16;
+bool isAnime(const content::Item& it);
 
 // A text search. kind -1 = films and shows (TMDB's multi search, which takes
 // no year); 0 / 1 = one kind, optionally of one year.

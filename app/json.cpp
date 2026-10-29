@@ -171,7 +171,7 @@ std::string escape(const std::string& s)
     return out;
 }
 
-long integer(const std::string& body, const char* key, long dflt)
+long long integer(const std::string& body, const char* key, long long dflt)
 {
     std::string pat = std::string("\"") + key + "\"";
     size_t from = 0;
@@ -192,7 +192,7 @@ long integer(const std::string& body, const char* key, long dflt)
             bool neg = body[v] == '-';
             if (neg) v++;
             if (v >= body.size() || body[v] < '0' || body[v] > '9') return dflt;
-            long n = 0;
+            long long n = 0;
             while (v < body.size() && body[v] >= '0' && body[v] <= '9')
                 n = n * 10 + (body[v++] - '0');
             return neg ? -n : n;

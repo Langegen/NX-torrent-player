@@ -173,6 +173,54 @@ static void test_edges()
     std::printf("      PASSED\n");
 }
 
+static void test_title_match()
+{
+    std::printf("[7/7] Is it the title at all: Fallout is not Mission: Impossible...\n");
+    const std::vector<std::string> fallout = { "Фоллаут", "Fallout" };
+    using release::titleMatches;
+    // Real names from a search for "Fallout" (ru.jac.black).
+    CHECK(!titleMatches("Mission.Impossible.Fallout.2018.1080p.WEB-DL.DD5.1.H264-CMRG", fallout));
+    CHECK(!titleMatches("Mission: Impossible - Fallout (2018) 1080p BluRay x264", fallout));
+    CHECK(titleMatches("Фолаут (1 сезон) / Fallout (Season 1) (2024) WEB-DL 1080p H.265", fallout));
+    CHECK(titleMatches("Fallout.S01E01.1080p.WEB.h264-ETHEL", fallout));
+    CHECK(titleMatches("Фоллаут / Fallout / Сезон: 1 / Серии: 1-8 из 8 [2024, WEB-DL 1080p]",
+                       fallout));
+    CHECK(titleMatches("[LostFilm] Fallout - S01E03", fallout));
+    CHECK(!titleMatches("Falloutboy.Live.2010", fallout));  // whole words only
+    // Case, punctuation, "ё", "The".
+    CHECK(titleMatches("ДЮНА: ЧАСТЬ ВТОРАЯ / Dune: Part Two (2024) BDRip",
+                       { "Дюна: Часть вторая", "Dune: Part Two" }));
+    CHECK(titleMatches("Елки 12 (2026) WEB-DL", { "Ёлки 12" }));
+    CHECK(titleMatches("Bear.S03E01.1080p", { "Медведь", "The Bear" }));
+    CHECK(titleMatches("anything", {}));  // nothing to compare: no opinion
+
+    // Dots turned into spaces by the index: the codec still reads.
+    CHECK(release::parse("Fallout S01E01 The End 1080p AMZN WEB-DL DDP5 1 H 264-NTb").codec ==
+          "H.264");
+    CHECK(release::parse("Show S01 2160p x 265").codec == "HEVC");
+    // A Russian UI: the Ukrainian-only season pack no longer beats the
+    // episode itself (both real, from the same search).
+    release::Want ep;
+    ep.series = true;
+    ep.season = 1;
+    ep.episode = 1;
+    ep.preferRussian = true;
+    auto ukr = release::parse("Фолаут (1 сезон) / Fallout (Season 1) (2024) WEB-DL 1080p H.265 "
+                              "4xUkr/Eng | sub Ukr/Eng");
+    auto flux = release::parse("Fallout S01E01 The End 1080p AMZN WEB-DL DDP5 1 Atmos H 264-FLUX");
+    CHECK(ukr.ukrainian && !ukr.russian);
+    CHECK(release::score(flux, 62, 0, ep) > release::score(ukr, 42, 0, ep));
+    auto both = release::parse("Fallout.S01.1080p.WEB-DL.Rus.Ukr.Eng");
+    CHECK(both.russian && both.ukrainian);
+
+    auto y = release::yearsIn("1917 (2019) / Blade Runner 2049 (2017) 1080p");
+    CHECK(y.size() == 3 && y[0] == 1917 && y[1] == 2019 && y[2] == 2017);
+    CHECK(release::yearsIn("Dune.2021.2160p").size() == 1);
+    CHECK(release::yearsIn("[2026, США, WEB-DL 1080p]")[0] == 2026);
+    CHECK(release::yearsIn("x264 1080p 5.1 10bit").empty());
+    std::printf("      PASSED\n");
+}
+
 int main()
 {
     std::printf("=========================================\n");
@@ -184,6 +232,7 @@ int main()
     test_order();
     test_match_episode();
     test_edges();
+    test_title_match();
     std::printf("\nALL TESTS PASSED\n");
     return 0;
 }

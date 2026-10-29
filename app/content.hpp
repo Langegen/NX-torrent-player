@@ -22,6 +22,7 @@ struct Item
     std::string imdbId;         // "tt1234567"; often only known after details
     std::string title;          // in the UI language when TMDB has it
     std::string originalTitle;
+    std::string originalLanguage;  // "ja", "en": TMDB's original_language
     std::string year;           // "2024"; "" when unknown
     std::string date;           // "2024-02-27" (release / first air date)
     std::string overview;

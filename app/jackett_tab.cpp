@@ -548,7 +548,7 @@ class JackettView
             auto* trk = new brls::Label();
             trk->setText("[" + item.tracker + "]");
             trk->setFontSize(16.0f);
-            trk->setTextColor(theme::accent());
+            trk->setTextColor(theme::accentText());
             trk->setMarginRight(14.0f);
             meta->addView(trk);
         }

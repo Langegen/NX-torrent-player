@@ -103,18 +103,14 @@ brls::View* strip(brls::Box* row, float height, bool fade)
     row->setAlignItems(brls::AlignItems::CENTER);
     // CENTERED: card by card, the focused one kept in view (NATURAL hands focus
     // to the frame and slides a card half out of sight -- see StremioTab).
-    if (fade)
-    {
-        auto* s = new FadeStrip();
-        s->setHeight(height);
-        s->setScrollingBehavior(brls::ScrollingBehavior::CENTERED);
-        s->setContentView(row);
-        return s;
-    }
-    auto* s = new brls::HScrollingFrame();
+    brls::HScrollingFrame* s = fade ? new FadeStrip() : new brls::HScrollingFrame();
     s->setHeight(height);
     s->setScrollingBehavior(brls::ScrollingBehavior::CENTERED);
     s->setContentView(row);
+    // Only the cards take the focus. A focusable frame catches it whenever
+    // the row is empty (still loading, nothing found, a hidden section) and
+    // strands it on a view with nothing to show.
+    s->setFocusable(false);
     return s;
 }
 
@@ -278,9 +274,12 @@ brls::Button* actionButton(const std::string& text, bool primary,
 
 void setPillActive(brls::Button* b, bool active, bool onImage)
 {
+    // setStyle() paints the style's own background (the accent for PRIMARY);
+    // only the plain pill needs its fill set on top. Overriding the active one
+    // too (with transparent) made a selected filter or season look unselected.
     b->setStyle(active ? &brls::BUTTONSTYLE_PRIMARY : &brls::BUTTONSTYLE_BORDERLESS);
-    b->setBackgroundColor(active ? nvgRGBA(0, 0, 0, 0)
-                                 : (onImage ? nvgRGBA(255, 255, 255, 34) : theme::scrim(26)));
+    if (!active)
+        b->setBackgroundColor(onImage ? nvgRGBA(255, 255, 255, 34) : theme::scrim(26));
 }
 
 } // namespace ui

@@ -20,7 +20,9 @@ namespace json
 std::string str(const std::string& body, const char* key, size_t from = 0);
 
 // The number at `key`, or `dflt`.
-long integer(const std::string& body, const char* key, long dflt = 0);
+// 64-bit on every platform: a torrent's "Size" passes 2 GB, and `long` is
+// 32 bits on Windows (the PC build), where it used to wrap to a negative.
+long long integer(const std::string& body, const char* key, long long dflt = 0);
 double number(const std::string& body, const char* key, double dflt = 0.0);
 
 // The bool at `key`, or `dflt`. Tolerates whitespace after the colon.

@@ -810,7 +810,17 @@ void Application::frame()
     nvgResetTransform(Application::getNVGContext()); // scale
     nvgEndFrame(Application::getNVGContext());
 
+    // LOCAL PATCH (NX-torrent-player): the frame is complete, not yet swapped.
+    if (Application::frameEndHook)
+        Application::frameEndHook();
+
     Application::platform->getVideoContext()->endFrame();
+}
+
+// LOCAL PATCH (NX-torrent-player)
+void Application::setFrameEndHook(std::function<void()> hook)
+{
+    Application::frameEndHook = std::move(hook);
 }
 
 void Application::exit()

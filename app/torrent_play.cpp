@@ -218,7 +218,9 @@ void resolveMagnet(const std::shared_ptr<Job>& job, const std::string& magnet)
             finish(job, [job, magnet, vids, rc, e]() {
                 if (rc != 0)
                 {
-                    errorDialog(tr("Could not resolve torrent metadata: ") + e);
+                    // The engine's reasons are in the table too (i18n_ru.cpp).
+                    errorDialog(tr("Could not resolve torrent metadata: ") +
+                                std::string(tr(e.c_str())));
                     return;
                 }
                 playWithVideos(job->hint, magnet, vids);
