@@ -676,6 +676,13 @@ void watchContent(const content::Item& item)
         openSources(item, 0, 0);
         return;
     }
+    // Only the Stremio addons need the IMDb id: Jackett searches by title, so
+    // without an account there is nothing to wait for.
+    if (stremio::loadAuthKey().empty())
+    {
+        openSources(item, 0, 0);
+        return;
+    }
     // A list item has no IMDb id yet: the details (usually cached) carry it.
     tmdb::fetchDetailsAsync(item.kind, item.tmdbId, [item](tmdb::DetailsResult r) {
         content::Item it = item;

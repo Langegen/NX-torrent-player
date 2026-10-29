@@ -52,6 +52,16 @@ class AsyncLabel : public brls::Label
     std::shared_ptr<bool> alive = std::make_shared<bool>(true);
 };
 
+// And for a button that a background job relabels: the connection tests run
+// for up to half a minute, and switching the Options sidebar frees the pane
+// (and the button) meanwhile.
+class AsyncButton : public brls::Button
+{
+  public:
+    ~AsyncButton() override { *alive = false; }
+    std::shared_ptr<bool> alive = std::make_shared<bool>(true);
+};
+
 // The same guard for a Box that a background job fills with rows -- the Account
 // screen's addon list, whose fetch can land after B has popped it.
 class AsyncBox : public brls::Box
@@ -500,7 +510,7 @@ brls::View* jackettPane()
     list->addView(caption(
         tr("The API Key shown in the top right corner of the Jackett web interface (leave empty if disabled).")));
 
-    auto* testBtn = new brls::Button();
+    auto* testBtn = new AsyncButton();
     testBtn->setText(tr("Test connection"));
     testBtn->setMargins(14.0f, 20.0f, 18.0f, 20.0f);
     testBtn->registerClickAction([testBtn](brls::View*) {
@@ -513,9 +523,12 @@ brls::View* jackettPane()
         testBtn->setText(tr("Testing..."));
         jackett::testConnectionAsync(
             config::get().jackettUrl, config::get().jackettApiKey,
-            [testBtn](bool ok, const std::string& msg) {
-                testBtn->setState(brls::ButtonState::ENABLED);
-                testBtn->setText(tr("Test connection"));
+            [testBtn, live = testBtn->alive](bool ok, const std::string& msg) {
+                if (*live)
+                {
+                    testBtn->setState(brls::ButtonState::ENABLED);
+                    testBtn->setText(tr("Test connection"));
+                }
                 // Either way the message says what was found or what to fix.
                 note(ok ? msg : tr("Connection failed: ") + msg);
             });
@@ -557,7 +570,7 @@ brls::View* networkPane()
            "a plain video stream, instead of being downloaded by the console. "
            "Leave empty to use the built-in engine.")));
 
-    auto* tsTest = new brls::Button();
+    auto* tsTest = new AsyncButton();
     tsTest->setText(tr("Test connection"));
     tsTest->setMargins(14.0f, 20.0f, 18.0f, 20.0f);
     tsTest->registerClickAction([tsTest](brls::View*) {
@@ -570,9 +583,12 @@ brls::View* networkPane()
         tsTest->setText(tr("Testing..."));
         torrserver::testConnectionAsync(
             config::get().torrServerUrl,
-            [tsTest](bool ok, const std::string& msg) {
-                tsTest->setState(brls::ButtonState::ENABLED);
-                tsTest->setText(tr("Test connection"));
+            [tsTest, live = tsTest->alive](bool ok, const std::string& msg) {
+                if (*live)
+                {
+                    tsTest->setState(brls::ButtonState::ENABLED);
+                    tsTest->setText(tr("Test connection"));
+                }
                 if (ok)
                     note(tr("Connected to TorrServer ") + msg);
                 else
@@ -654,7 +670,7 @@ brls::View* networkPane()
            "themoviedb.org (Settings -> API). Leave the address empty unless you use "
            "a mirror. Changes apply when you reopen the Home tab.")));
 
-    auto* tmdbTest = new brls::Button();
+    auto* tmdbTest = new AsyncButton();
     tmdbTest->setText(tr("Test connection"));
     tmdbTest->setMargins(14.0f, 20.0f, 6.0f, 20.0f);
     tmdbTest->registerClickAction([tmdbTest](brls::View*) {
@@ -667,9 +683,13 @@ brls::View* networkPane()
         tmdbTest->setText(tr("Testing..."));
         // A cleared cache makes it a real request rather than a stored answer.
         tmdb::clearCache();
-        tmdb::fetchRowAsync(tmdb::Row::Trending, [tmdbTest](tmdb::ListResult r) {
-            tmdbTest->setState(brls::ButtonState::ENABLED);
-            tmdbTest->setText(tr("Test connection"));
+        tmdb::fetchRowAsync(tmdb::Row::Trending, [tmdbTest, live = tmdbTest->alive](
+                                                     tmdb::ListResult r) {
+            if (*live)
+            {
+                tmdbTest->setState(brls::ButtonState::ENABLED);
+                tmdbTest->setText(tr("Test connection"));
+            }
             if (r.ok && !r.items.empty())
                 note(tr("Connection successful!"));
             else
@@ -727,15 +747,18 @@ brls::View* aboutPane()
     });
     list->addView(changelog);
 
-    auto* checkNow = new brls::Button();
+    auto* checkNow = new AsyncButton();
     checkNow->setText(tr("Check now"));
     checkNow->setMargins(4.0f, 20.0f, 18.0f, 20.0f);
     checkNow->registerClickAction([checkNow](brls::View*) {
         checkNow->setState(brls::ButtonState::DISABLED);
         checkNow->setText(tr("Checking..."));
-        update::checkAsync([checkNow](update::Release r) {
-            checkNow->setState(brls::ButtonState::ENABLED);
-            checkNow->setText(tr("Check now"));
+        update::checkAsync([checkNow, live = checkNow->alive](update::Release r) {
+            if (*live)
+            {
+                checkNow->setState(brls::ButtonState::ENABLED);
+                checkNow->setText(tr("Check now"));
+            }
             // Asked for explicitly, so unlike the startup check this one says
             // something either way.
             if (!r.ok)
