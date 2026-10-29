@@ -35,6 +35,7 @@ const Pair kRu[] = {
     { "unsupported", "не поддерживается" },
     { "link", "ссылка" },
     { "Pick a source", "Выберите источник" },
+    { "searching addons...", "ищем в аддонах..." },
     { "Unsupported source: only torrents and direct video links can be played.",
       "Источник не поддерживается: воспроизводятся только торренты и прямые "
       "ссылки на видео." },

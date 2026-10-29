@@ -357,8 +357,63 @@ class SourcesView : public brls::Box
 
     std::vector<Source> found;
     std::set<std::string> seen;  // dedup keys
-    int pending = 0;             // requests not answered yet
+    int pending = 0;             // requests not answered yet, all sources
+    // Jackett is the main source: its answers are shown as soon as they are
+    // all in, without waiting for the Stremio addons (one slow addon held the
+    // whole list back). Addon results are folded in as they land.
+    bool jackettAsked  = false;
+    int pendingJackett = 0;
+    bool shown         = false;  // the list has been built at least once
+    bool dirty         = false;  // new results while another screen was on top
+    bool rebuildQueued = false;
+    std::vector<std::pair<brls::View*, std::string>> rowKeys;  // row -> dedupKey
     std::vector<std::string> errors;
+
+    static std::string dedupKey(const Source& s)
+    {
+        return s.title + "|" + std::to_string(s.size / (1024 * 1024));
+    }
+
+    // What can be listed: Jackett's answers once they are all in; without
+    // Jackett, everything (the addons only).
+    bool listReady() const { return jackettAsked ? pendingJackett == 0 : pending == 0; }
+
+    bool isOnTop()
+    {
+        auto stack = brls::Application::getActivitiesStack();
+        return !stack.empty() && stack.back() == getParentActivity();
+    }
+
+    // Late results (an addon answering while the player or a dialog is open)
+    // wait until this screen is on top again: borealis' focus stack keeps a
+    // raw pointer to the row that opened the screen above, and freeing that
+    // row would crash when it closes and hands the focus back.
+    void refresh()
+    {
+        if (isOnTop())
+        {
+            dirty = false;
+            rebuild();
+        }
+        else
+            dirty = true;
+    }
+
+    void draw(NVGcontext* vg, float x, float y, float w, float h, brls::Style style,
+              brls::FrameContext* ctx) override
+    {
+        brls::Box::draw(vg, x, y, w, h, style, ctx);
+        if (dirty && !rebuildQueued && isOnTop())
+        {
+            rebuildQueued = true;
+            auto live     = alive;
+            brls::sync([this, live]() {
+                if (!*live) return;
+                rebuildQueued = false;
+                if (dirty) refresh();  // still not on top: draw() retries
+            });
+        }
+    }
 
     int filterHeight = 0;
 
@@ -400,7 +455,7 @@ class SourcesView : public brls::Box
 
     void pickFacet(Facet f)
     {
-        if (pending > 0) return;  // the values are not all in yet
+        if (!listReady()) return;  // nothing listed yet to pick from
         std::vector<std::string> labels, values;
         if (f == Facet::Hdr)
         {
@@ -473,12 +528,14 @@ class SourcesView : public brls::Box
         }
         else if (!item.year.empty())
             s += " (" + item.year + ")";
-        if (pending == 0)
+        if (listReady())
         {
             int n = 0;
             for (const auto& r : found)
                 if (r.score > -500) n++;
             s += "  \xC2\xB7  " + std::to_string(n) + tr(" releases");
+            // Listed already, the addons still answering.
+            if (pending > 0) s += std::string("  \xC2\xB7  ") + tr("searching addons...");
         }
         subtitle->setText(s);
     }
@@ -519,24 +576,29 @@ class SourcesView : public brls::Box
     bool addSource(Source s)
     {
         // The same release from two indexers, or from Jackett and an addon.
-        std::string key = s.title + "|" + std::to_string(s.size / (1024 * 1024));
-        if (!seen.insert(key).second) return false;
+        if (!seen.insert(dedupKey(s)).second) return false;
         s.score = release::score(s.info, s.seeders, s.size, want);
         found.push_back(std::move(s));
         return true;
     }
 
-    void done(const std::string& err = "")
+    // One request answered. `jackett`: it was one of Jackett's; `added`: it
+    // brought releases not seen yet.
+    void done(const std::string& err, bool jackett, bool added)
     {
         if (!err.empty()) errors.push_back(err);
-        if (--pending > 0)
+        pending--;
+        if (jackett) pendingJackett--;
+        updateSubtitle();
+        if (!listReady())
         {
             status->setText(tr("Searching...") + std::string("  ") +
                             std::to_string(found.size()) + tr(" found so far"));
             return;
         }
-        updateSubtitle();
-        rebuild();
+        // The first listing, new releases, or the last answer (which turns
+        // "searching" into "no results" when nothing came).
+        if (!shown || added || pending == 0) refresh();
     }
 
     void search()
@@ -568,7 +630,9 @@ class SourcesView : public brls::Box
             q(item.title);
             q(item.originalTitle);
         }
-        pending = (int)queries.size() + (stremioOn ? 1 : 0);
+        pending        = (int)queries.size() + (stremioOn ? 1 : 0);
+        pendingJackett = (int)queries.size();
+        jackettAsked   = !queries.empty();
 
         jackett::Category cat =
             item.isSeries() ? jackett::Category::SERIES : jackett::Category::MOVIES;
@@ -577,9 +641,10 @@ class SourcesView : public brls::Box
             brls::Logger::info("[sources] jackett: {}", q);
             jackett::searchAsync(q, cat, [this, a = alive](jackett::SearchResult r) {
                 if (!*a) return;
+                bool added = false;
                 if (r.ok)
-                    for (const auto& it : r.items) addSource(fromJackett(it));
-                done(r.ok ? "" : "Jackett: " + r.error);
+                    for (const auto& it : r.items) added |= addSource(fromJackett(it));
+                done(r.ok ? "" : "Jackett: " + r.error, true, added);
             });
         }
 
@@ -605,16 +670,17 @@ class SourcesView : public brls::Box
                     stremio::fetchStreamsAsync(ad.base, type, id,
                                                [this, a, name](stremio::StreamsResult s) {
                         if (!*a) return;
+                        bool added = false;
                         if (s.ok)
                             for (const auto& st : s.streams)
                             {
                                 Source src = fromStream(st, name);
-                                if (!src.src.empty()) addSource(std::move(src));
+                                if (!src.src.empty()) added |= addSource(std::move(src));
                             }
-                        done(s.ok ? "" : name + ": " + s.error);
+                        done(s.ok ? "" : name + ": " + s.error, false, added);
                     });
                 }
-                done(r.ok ? "" : "Stremio: " + r.error);
+                done(r.ok ? "" : "Stremio: " + r.error, false, false);
             });
         }
     }
@@ -644,18 +710,42 @@ class SourcesView : public brls::Box
 
     void rebuild()
     {
-        // The focus may sit on a row about to be freed (X pressed on it):
-        // hand it to the filter row first.
+        // The focus may sit on a row about to be freed (X pressed on it, or
+        // an addon's results folded in under it): park it on the filter row,
+        // then hand it to the same release in the new list.
+        bool focusInList = false;
+        std::string focusKey;
+        brls::View* child = nullptr;
         for (brls::View* v = brls::Application::getCurrentFocus(); v; v = v->getParent())
+        {
             if (v == list)
             {
-                brls::Application::giveFocus(filterBtns[0].first);
+                focusInList = true;
                 break;
             }
+            child = v;
+        }
+        if (focusInList)
+        {
+            for (const auto& rk : rowKeys)
+                if (rk.first == child) focusKey = rk.second;
+            brls::Application::giveFocus(filterBtns[0].first);
+        }
         list->clearViews();
-        if (pending > 0) return;
+        rowKeys.clear();
+        if (!listReady()) return;
+        shown = true;
+        updateSubtitle();
 
         auto rows = visible();
+        if (rows.empty() && pending > 0)
+        {
+            // Jackett found nothing (yet) that fits; the addons may.
+            status->setText(tr("Searching...") + std::string("  ") +
+                            std::to_string(found.size()) + tr(" found so far"));
+            status->setVisibility(brls::Visibility::VISIBLE);
+            return;
+        }
         if (rows.empty())
         {
             std::string msg = found.empty() ? tr("No results found")
@@ -672,7 +762,16 @@ class SourcesView : public brls::Box
         for (const auto& r : found)
             if (r.score > -500 && (!best || r.score > best->score)) best = &r;
 
-        for (const Source* r : rows) list->addView(buildRow(*r, r == best));
+        brls::View* refocus = nullptr;
+        for (const Source* r : rows)
+        {
+            brls::Box* row = buildRow(*r, r == best);
+            list->addView(row);
+            std::string key = dedupKey(*r);
+            if (focusInList && !refocus && key == focusKey) refocus = row;
+            rowKeys.push_back({ row, key });
+        }
+        if (focusInList) brls::Application::giveFocus(refocus ? refocus : rowKeys[0].first);
     }
 
     brls::Box* buildRow(const Source& s, bool best)
