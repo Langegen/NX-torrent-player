@@ -12,6 +12,7 @@
 #include "browse.hpp"   // ListActivity, Row, naturalCompare, pickerNames
 #include "i18n.hpp"
 #include "release.hpp"  // matchEpisode
+#include "workers.hpp"
 
 extern "C" {
 #include "torrent.h"
@@ -197,7 +198,7 @@ void playWithVideos(const PlayHint& h, const std::string& source,
 
 void resolveMagnet(const std::shared_ptr<Job>& job, const std::string& magnet)
 {
-    brls::async([job, magnet]() {
+    workers::run([job, magnet]() {
         torrent_meta* m = (torrent_meta*)std::calloc(1, sizeof(torrent_meta));
         char err[128] = { 0 };
         int rc = -1;

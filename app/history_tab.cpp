@@ -214,9 +214,15 @@ class HistoryTabRoot : public brls::Box
         meta->setMarginTop(8.0f);
 
         // Source badge
+        // Stored in English ("Link", "Torrent"...): shown in the UI language;
+        // names (Jackett, Stremio) as they are.
         std::string srcType = item.sourceType.empty() ? "Local" : item.sourceType;
+        std::string shown   = srcType == "Link"      ? tr("Link")
+                              : srcType == "Torrent" ? tr("Torrent")
+                              : srcType == "Local"   ? tr("Local file")
+                                                     : srcType;
         auto* srcBadge = new brls::Label();
-        srcBadge->setText("[" + srcType + "]");
+        srcBadge->setText("[" + shown + "]");
         srcBadge->setFontSize(15.0f);
         srcBadge->setTextColor(theme::accentText());
         srcBadge->setMarginRight(14.0f);

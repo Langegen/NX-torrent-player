@@ -15,6 +15,7 @@
 #include "http.hpp"
 #include "i18n.hpp"
 #include "json.hpp"
+#include "workers.hpp"
 
 namespace jackett
 {
@@ -87,7 +88,8 @@ bool appendMagnetToFile(const std::string& path, const std::string& magnet)
 std::string formatSize(int64_t bytes)
 {
     if (bytes <= 0) return "";
-    const char* unit[] = { "B", "KB", "MB", "GB", "TB" };
+    // In the UI language ("ГБ"): the size sits next to Russian text.
+    const char* unit[] = { tr("B"), tr("KB"), tr("MB"), tr("GB"), tr("TB") };
     double v = (double)bytes;
     int i    = 0;
     while (v >= 1024.0 && i < 4)
@@ -95,9 +97,11 @@ std::string formatSize(int64_t bytes)
         v /= 1024.0;
         i++;
     }
+    // A decimal up to 100 of a unit: 14.8 GB and 15.4 GB are different
+    // choices, "15 GB" both. MB and KB need none.
     char buf[32];
-    std::snprintf(buf, sizeof(buf), (v < 10.0 && i > 0) ? "%.1f %s" : "%.0f %s",
-                  v, unit[i]);
+    std::snprintf(buf, sizeof(buf), (v < 100.0 && i >= 3) ? "%.1f %s" : "%.0f %s", v,
+                  unit[i]);
     return buf;
 }
 
@@ -192,7 +196,7 @@ void searchAsync(const std::string& query, Category category,
     // on the SD card that people attach to bug reports.
     brls::Logger::info("[jackett] querying {} for \"{}\"", base, query);
 
-    brls::async([url, cb, base]() {
+    workers::run([url, cb, base]() {
         std::string resp, err;
         long status = 0;
         Diagnosis d;
@@ -241,7 +245,7 @@ void testConnectionAsync(const std::string& url, const std::string& apiKey,
 
     brls::Logger::info("[jackett] testing connection to {}", base);
 
-    brls::async([testUrl, cb, base]() {
+    workers::run([testUrl, cb, base]() {
         std::string resp, err;
         long status = 0;
         Diagnosis d = http::get(testUrl, resp, err, nullptr, 25, &status)
@@ -319,7 +323,7 @@ void downloadTorrentAsync(const std::string& link, const std::string& destPath,
     std::string targetUrl = normalizeDownloadLink(link);
     brls::Logger::info("[jackett] downloading torrent to {}", destPath);
 
-    brls::async([targetUrl, destPath, cb]() {
+    workers::run([targetUrl, destPath, cb]() {
         std::string err, magnet;
         bool ok = http::downloadTorrent(targetUrl, destPath, magnet, err);
         if (ok && !magnet.empty())

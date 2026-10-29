@@ -39,6 +39,7 @@
 #include "json.hpp"
 #include "theme.hpp"
 #include "widgets.hpp"
+#include "workers.hpp"
 #include "i18n.hpp"
 
 namespace
@@ -1147,11 +1148,32 @@ std::string cachedPosterPath(const std::string& id)
 // Downloads one image into `path` and calls back on the UI thread with it ("" on
 // failure). Shared by the list thumbnails and the full-size background: both
 // have to survive a host that answers WebP, or an HTML error page.
+// Downloads in flight, by file: the same poster is often on screen twice (a
+// title both trending and popular) and asked for in the same frame. One
+// download, every caller told. UI thread only.
+static std::map<std::string, std::vector<std::function<void(std::string)>>> imagesInFlight;
+
 static void downloadImageAsync(const std::string& id, const std::string& url,
                         const std::string& path,
-                        std::function<void(std::string)> done)
+                        std::function<void(std::string)> doneOne)
 {
-    brls::async([id, url, path, done]() {
+    auto waiting = imagesInFlight.find(path);
+    if (waiting != imagesInFlight.end())
+    {
+        waiting->second.push_back(std::move(doneOne));
+        return;
+    }
+    imagesInFlight[path].push_back(std::move(doneOne));
+    auto done = [path](std::string result) {
+        auto it = imagesInFlight.find(path);
+        if (it == imagesInFlight.end()) return;
+        auto callbacks = std::move(it->second);
+        imagesInFlight.erase(it);
+        for (auto& cb : callbacks) cb(result);
+    };
+
+    // Low priority: what someone is waiting on (details, a search) goes first.
+    workers::run([id, url, path, done]() {
         std::string body, err;
         // Ask for a format stb_image can actually decode.
         static const char* kAcceptImg = "Accept: image/jpeg,image/png;q=0.9";
@@ -1200,10 +1222,16 @@ static void downloadImageAsync(const std::string& id, const std::string& url,
 
         if (ok && isImage)
         {
-            if (FILE* f = std::fopen(path.c_str(), "wb"))
+            // Written whole, then put in place: a reader never sees half a
+            // file (the cache is shared with other downloads running now).
+            std::string tmp = path + ".part";
+            if (FILE* f = std::fopen(tmp.c_str(), "wb"))
             {
-                std::fwrite(body.data(), 1, body.size(), f);
-                std::fclose(f);
+                bool wrote = std::fwrite(body.data(), 1, body.size(), f) == body.size();
+                wrote      = std::fclose(f) == 0 && wrote;
+                std::remove(path.c_str());
+                ok = wrote && std::rename(tmp.c_str(), path.c_str()) == 0;
+                if (!ok) std::remove(tmp.c_str());
             }
             else
                 ok = false;
@@ -1215,7 +1243,7 @@ static void downloadImageAsync(const std::string& id, const std::string& url,
 
         std::string result = ok ? path : std::string();
         brls::sync([done, result]() { done(result); });
-    });
+    }, workers::Priority::Low);
 }
 
 // The artwork URL for `id`, or "" if there is none to be had. Not every library
@@ -1349,7 +1377,7 @@ void fetchAddonsAsync(const std::string& authKey,
         return;
     }
 
-    brls::async([authKey, done]() {
+    workers::run([authKey, done]() {
         AddonsResult r;
         std::string body =
             "{\"authKey\":\"" + json::escape(authKey) + "\",\"update\":true}";
@@ -1454,7 +1482,7 @@ void fetchMetaAsync(const std::string& addonBase, const std::string& type,
         return;
     }
 
-    brls::async([addonBase, type, id, key, done]() {
+    workers::run([addonBase, type, id, key, done]() {
         MetaResult r;
         std::string url =
             addonBase + "/meta/" + http::urlEncode(type) + "/" + http::urlEncode(id) + ".json";
@@ -1521,7 +1549,7 @@ void fetchStreamsAsync(const std::string& addonBase, const std::string& type,
                        const std::string& id,
                        std::function<void(StreamsResult)> done)
 {
-    brls::async([addonBase, type, id, done]() {
+    workers::run([addonBase, type, id, done]() {
         StreamsResult r;
         std::string url = addonBase + "/stream/" + http::urlEncode(type) + "/" +
                           http::urlEncode(id) + ".json";
@@ -1614,7 +1642,7 @@ void fetchSubtitlesAsync(const std::string& authKey, const std::string& type,
             return;
         }
 
-        brls::async([list, type, videoId, done]() {
+        workers::run([list, type, videoId, done]() {
             SubtitlesResult r;
             // One addon at a time rather than in parallel. These run while the
             // engine is streaming, and the console's socket pool is what the
@@ -1686,7 +1714,7 @@ void downloadSubtitleAsync(const Subtitle& sub,
     }
 
     std::string url = sub.url;
-    brls::async([url, path, done]() {
+    workers::run([url, path, done]() {
         std::string err;
         bool ok = http::download(url, path, err);
         if (!ok)
@@ -1737,7 +1765,7 @@ void fetchCatalogGenresAsync(const std::string& addonBase,
         return;
     }
 
-    brls::async([addonBase, type, catalogId, key, done]() {
+    workers::run([addonBase, type, catalogId, key, done]() {
         std::vector<std::string> genres;
         std::string resp, err;
         if (!http::get(addonBase + "/manifest.json", resp, err))
@@ -1782,7 +1810,7 @@ void fetchCatalogAsync(const std::string& addonBase, const std::string& type,
                        const std::string& catalogId, const CatalogQuery& query,
                        std::function<void(LibraryResult)> done)
 {
-    brls::async([addonBase, type, catalogId, query, done]() {
+    workers::run([addonBase, type, catalogId, query, done]() {
         LibraryResult r;
         std::string url = catalogUrl(addonBase, type, catalogId, query);
         std::string resp, err;
@@ -1818,7 +1846,7 @@ void fetchCatalogAsync(const std::string& addonBase, const std::string& type,
 void fetchSearchAsync(const std::string& query,
                       std::function<void(LibraryResult)> done)
 {
-    brls::async([query, done]() {
+    workers::run([query, done]() {
         LibraryResult r;
         r.ok         = true;
         const char* types[] = { "movie", "series" };

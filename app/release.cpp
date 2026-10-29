@@ -445,7 +445,8 @@ int score(const Info& in, int seeders, int64_t size, const Want& want)
     else if (in.source == "Remux") s -= 15;  // 40-80 GB over Wi-Fi
 
     if (seeders == 0) s -= 30;
-    else if (seeders > 0) s += (int)std::fmin(30.0, 8.0 * std::log2(1.0 + seeders));
+    // Seeders keep counting up to ~30: for streaming, 286 beats 19.
+    else if (seeders > 0) s += (int)std::fmin(40.0, 8.0 * std::log2(1.0 + seeders));
 
     const double gb = size / (1024.0 * 1024.0 * 1024.0);
     if (gb > 80) s -= 20;

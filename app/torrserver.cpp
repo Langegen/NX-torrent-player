@@ -9,6 +9,7 @@
 #ifndef TORRSERVER_NO_UI  // the PC tests build the pure functions alone
 #include <borealis.hpp>
 #include "config.hpp"
+#include "workers.hpp"
 #endif
 
 namespace torrserver
@@ -107,7 +108,7 @@ void testConnectionAsync(const std::string& base,
                          std::function<void(bool ok, const std::string& msg)> cb)
 {
     std::string url = normalizeBase(base) + "/echo";
-    brls::async([url, cb]() {
+    workers::run([url, cb]() {
         std::string resp, err;
         bool ok = http::get(url, resp, err, nullptr, 10);
         while (!resp.empty() && std::isspace((unsigned char)resp.back())) resp.pop_back();

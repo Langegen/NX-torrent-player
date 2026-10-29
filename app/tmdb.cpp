@@ -21,6 +21,7 @@
 #include "appdata.hpp"
 #include "config.hpp"
 #include "i18n.hpp"
+#include "workers.hpp"
 #endif
 
 #ifndef TMDB_API_KEY
@@ -439,7 +440,11 @@ bool fetchCached(const Settings& s, const std::string& url, long ttlSec,
     if (ok)
     {
         mkdir(APPDATA_TMDB, 0777);
-        std::string tmp = path + ".tmp";
+        // One per thread: two workers can fetch the same URL at once.
+        std::string tmp = path + "." +
+                          std::to_string(std::hash<std::thread::id>()(std::this_thread::get_id()) %
+                                         100000) +
+                          ".tmp";
         if (FILE* f = std::fopen(tmp.c_str(), "wb"))
         {
             std::fwrite(resp.data(), 1, resp.size(), f);
@@ -475,7 +480,7 @@ void fetchList(const std::string& path,
         return;
     }
     std::string url = requestUrl(s, path, params);
-    brls::async([s, url, kind, ttl, done]() {
+    workers::run([s, url, kind, ttl, done]() {
         ListResult r;
         std::string body;
         if (fetchCached(s, url, ttl, body, r.error))
@@ -563,7 +568,7 @@ void fetchDetailsAsync(content::Kind kind, int id,
     std::string path = std::string(kind == content::Kind::Series ? "/tv/" : "/movie/") +
                        std::to_string(id);
     std::string url = requestUrl(s, path, { { "append_to_response", "external_ids,credits,recommendations" } });
-    brls::async([s, url, kind, done]() {
+    workers::run([s, url, kind, done]() {
         DetailsResult r;
         std::string body;
         if (s.apiKey.empty())
@@ -582,7 +587,7 @@ void fetchSeasonAsync(int tvId, int season, std::function<void(SeasonResult)> do
     Settings s = settings();
     std::string url = requestUrl(s, "/tv/" + std::to_string(tvId) + "/season/" +
                                         std::to_string(season));
-    brls::async([s, url, done]() {
+    workers::run([s, url, done]() {
         SeasonResult r;
         std::string body;
         if (s.apiKey.empty())
