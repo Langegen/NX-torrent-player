@@ -27,6 +27,10 @@
 #ifndef TMDB_API_KEY
 #define TMDB_API_KEY ""
 #endif
+#ifndef TMDB_PROXY_URL
+#define TMDB_PROXY_URL ""
+#endif
+static const char* const kDefaultApiKey = "8cf43ad9c085135b9479ad5cf6bbcbda";
 
 namespace tmdb
 {
@@ -350,7 +354,41 @@ Settings settings()
 {
     const config::Config& c = config::get();
     Settings s;
-    s.apiKey = c.tmdbApiKey.empty() ? std::string(TMDB_API_KEY) : c.tmdbApiKey;
+    std::string key = c.tmdbApiKey;
+    if (key.empty()) key = std::string(TMDB_API_KEY);
+    if (key.empty()) key = kDefaultApiKey;
+    s.apiKey = key;
+
+    if (c.tmdbProxyEnabled)
+    {
+        std::string p = c.tmdbProxyUrl;
+        while (!p.empty() && p.back() == '/') p.pop_back();
+        if (!p.empty())
+        {
+            if (p.size() >= 2 && p.substr(p.size() - 2) == "/3")
+            {
+                s.apiBase = p;
+                s.imageBase = p.substr(0, p.size() - 2) + "/t/p";
+            }
+            else
+            {
+                s.apiBase = p + "/3";
+                s.imageBase = p + "/t/p";
+            }
+        }
+        else if (std::string(TMDB_PROXY_URL).size() > 0)
+        {
+            std::string bp = TMDB_PROXY_URL;
+            while (!bp.empty() && bp.back() == '/') bp.pop_back();
+            s.apiBase = bp + "/3";
+            s.imageBase = bp + "/t/p";
+        }
+        else
+        {
+            s.apiBase = "http://tmdb-api.rootu.top/3";
+            s.imageBase = "http://tmdb-img.rootu.top/t/p";
+        }
+    }
     if (!c.tmdbApiUrl.empty()) s.apiBase = c.tmdbApiUrl;
     if (!c.tmdbImageUrl.empty()) s.imageBase = c.tmdbImageUrl;
     s.language = languageFor(i18n::lang());

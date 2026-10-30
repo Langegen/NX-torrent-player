@@ -51,6 +51,11 @@ static std::string g_proxy;
 void applyProxy()
 {
     std::string p = config::get().proxyUrl;
+    if (p.find("rootu.top") != std::string::npos || p.find("themoviedb.org") != std::string::npos)
+    {
+        p.clear();
+        config::get().proxyUrl.clear();
+    }
     {
         std::lock_guard<std::mutex> g(g_proxyLock);
         g_proxy = p;
@@ -63,7 +68,9 @@ void applyProxy()
 std::string proxyFor(const std::string& url)
 {
     if (netutil::isLocalHost(netutil::hostOf(url))) return "";
+    if (url.find("rootu.top") != std::string::npos) return "";
     std::lock_guard<std::mutex> g(g_proxyLock);
+    if (g_proxy.find("rootu.top") != std::string::npos || g_proxy.find("themoviedb.org") != std::string::npos) return "";
     return g_proxy;
 }
 

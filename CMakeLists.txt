@@ -41,9 +41,10 @@ set(UPDATE_API_URL "https://api.github.com/repos/${UPDATE_REPO}/releases/latest"
 set(UPDATE_TAG_URL "https://api.github.com/repos/${UPDATE_REPO}/releases/tags/"
     CACHE STRING "Release-by-tag endpoint, the tag is appended")
 # The TMDB key a build ships with (a v3 key or a v4 read token), used when the
-# user has not entered one in Options. Empty by default: the home screen then
-# asks for one. CI can pass it from a secret: -DTMDB_API_KEY=...
-set(TMDB_API_KEY "" CACHE STRING "Default TMDB API key / read token")
+# user has not entered one in Options. Defaults to a working built-in key.
+set(TMDB_API_KEY "8cf43ad9c085135b9479ad5cf6bbcbda" CACHE STRING "Default TMDB API key / read token")
+# Default TMDB proxy base URL (empty = built-in fallback)
+set(TMDB_PROXY_URL "" CACHE STRING "Default TMDB proxy URL")
 set(PROJECT_ICON ${CMAKE_CURRENT_SOURCE_DIR}/assets/icon.jpg)
 set(PROJECT_RESOURCES ${CMAKE_CURRENT_SOURCE_DIR}/library/borealis/resources)
 
@@ -99,7 +100,8 @@ target_compile_definitions(${PROJECT_NAME} PRIVATE
     APP_VERSION="${VERSION_MAJOR}.${VERSION_MINOR}.${VERSION_ALTER}"
     UPDATE_API_URL="${UPDATE_API_URL}"
     UPDATE_TAG_URL="${UPDATE_TAG_URL}"
-    TMDB_API_KEY="${TMDB_API_KEY}")
+    TMDB_API_KEY="${TMDB_API_KEY}"
+    TMDB_PROXY_URL="${TMDB_PROXY_URL}")
 
 if (PLATFORM_SWITCH)
     # Bundle borealis' resources into the nro's romfs (borealis reads them from
