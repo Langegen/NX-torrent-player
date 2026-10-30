@@ -5,7 +5,7 @@
 #include <string>
 
 // The app's HTTP calls. Blocking: every caller here already runs them off the
-// UI thread (brls::async) and syncs the result back.
+// UI thread (workers::run, brls::async) and syncs the result back.
 //
 // TLS certificates ARE verified, against a CA store the app ships itself at
 // romfs:/cacert.pem -- the console mounts none of its own. A rejected chain on
@@ -14,6 +14,9 @@
 // unverified; the comment there says why.
 namespace http
 {
+
+// Stops every transfer in flight, and any started after, as the app quits.
+void abortAll();
 
 // GET `url` into `resp`. False on failure, with a readable reason in `err`.
 // `accept` is an optional full header line ("Accept: image/jpeg").

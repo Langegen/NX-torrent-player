@@ -3,6 +3,7 @@
 #include <curl/curl.h>
 
 #include <cstdio>
+#include <atomic>
 #include <mutex>
 #include <strings.h>  // strncasecmp
 
@@ -21,6 +22,25 @@ static size_t writeCb(char* ptr, size_t size, size_t nmemb, void* userdata)
 {
     ((std::string*)userdata)->append(ptr, size * nmemb);
     return size * nmemb;
+}
+
+// Set by abortAll() as the app quits: every transfer in flight stops at its
+// next progress tick (about once a second, connecting included) instead of
+// running to its timeout. A network call still running when main() returns
+// is a crash on the Switch (socketExit tears the sockets down under it).
+static std::atomic<bool> g_stopping{ false };
+
+void abortAll() { g_stopping = true; }
+
+static int stopCb(void*, curl_off_t, curl_off_t, curl_off_t, curl_off_t)
+{
+    return g_stopping ? 1 : 0;  // non-zero aborts the transfer
+}
+
+static void stoppable(CURL* curl)
+{
+    curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
+    curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, stopCb);
 }
 
 // Copied from config by applyProxy(): requests run on worker threads, which
@@ -118,6 +138,7 @@ bool postJson(const char* url, const std::string& body, std::string& resp,
     curl_easy_setopt(curl, CURLOPT_TIMEOUT, 25L);
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
     verifyTls(curl, url);  // the Stremio password goes through here
+    stoppable(curl);
 
     CURLcode rc = curl_easy_perform(curl);
     curl_slist_free_all(hdrs);
@@ -161,6 +182,7 @@ bool get(const std::string& url, std::string& resp, std::string& err,
     curl_easy_setopt(curl, CURLOPT_TIMEOUT, timeoutSec);
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
     verifyTls(curl, url);
+    stoppable(curl);
     CURLcode rc = curl_easy_perform(curl);
     if (status) curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, status);
     if (hdrs) curl_slist_free_all(hdrs);
@@ -194,6 +216,7 @@ static int progressCb(void* userdata, curl_off_t total, curl_off_t now,
                       curl_off_t, curl_off_t)
 {
     auto* c = (DlCtx*)userdata;
+    if (g_stopping) return 1;
     if (!c->progress) return 0;
     if (!c->progress((int64_t)now, (int64_t)total))
     {
@@ -237,6 +260,7 @@ bool download(const std::string& url, const std::string& path, std::string& err,
     curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, 30L);
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);  // GitHub redirects to a CDN
     verifyTls(curl, url);  // this one lands an executable nro on the SD card
+    stoppable(curl);
     curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
     curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, progressCb);
     curl_easy_setopt(curl, CURLOPT_XFERINFODATA, &ctx);
@@ -320,6 +344,7 @@ bool downloadTorrent(const std::string& url, const std::string& path,
     // and is picked up from the header below.
     curl_easy_setopt(curl, CURLOPT_REDIR_PROTOCOLS, (long)(CURLPROTO_HTTP | CURLPROTO_HTTPS));
     verifyTls(curl, url);
+    stoppable(curl);
 
     CURLcode rc = curl_easy_perform(curl);
     long code   = 0;
