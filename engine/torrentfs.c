@@ -2291,6 +2291,10 @@ const char *torrentfs_name(const torrentfs *tfs) {
     return tfs->meta.name[0] ? tfs->meta.name : "torrent";
 }
 
+const void *torrentfs_meta(const torrentfs *tfs) {
+    return &tfs->meta;
+}
+
 int torrentfs_piece_done(const torrentfs *tfs, int64_t idx) {
     if (idx < 0 || idx >= tfs->meta.piece_count) return 0;
     return tfs->status[idx] == PIECE_DONE;

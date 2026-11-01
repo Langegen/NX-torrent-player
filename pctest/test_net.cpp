@@ -86,6 +86,21 @@ static void test_pick()
     std::printf("      PASSED\n");
 }
 
+// The file list the player's episode list is built from: engine order, so the
+// 1-based ids come back as 0-based indices.
+static void test_files()
+{
+    std::printf("[files] stat -> the torrent's files...\n");
+    auto f = torrserver::files(kStat);
+    CHECK(f.size() == 5);
+    CHECK(f[0].index == 0);
+    CHECK(f[1].index == 1 && f[1].path == "Show/Show.S01E01.mkv");
+    CHECK(f[2].length == 1600000000LL);
+    CHECK(torrserver::files(R"({"file_stats":[]})").empty());
+    CHECK(torrserver::files("not json").empty());
+    std::printf("      PASSED\n");
+}
+
 static void test_resolve()
 {
     std::printf("[3/5] Resolve: index known -> no request; unknown -> stat first...\n");
@@ -156,6 +171,7 @@ int main()
     std::printf("=========================================\n\n");
     test_normalize();
     test_pick();
+    test_files();
     test_resolve();
     test_resolve_errors();
     test_local_hosts();

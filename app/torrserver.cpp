@@ -76,6 +76,30 @@ int pickFile(const std::string& statJson, int fileIndex)
     return bestVideo > 0 ? bestVideo : bestAny;
 }
 
+std::vector<File> files(const std::string& statJson)
+{
+    std::vector<File> out;
+    for (const auto& f : json::objects(statJson, "file_stats"))
+    {
+        int id = (int)json::integer(f, "id", -1);
+        if (id <= 0) continue;
+        File x;
+        x.index  = id - 1;
+        x.path   = json::str(f, "path");
+        x.length = (int64_t)json::number(f, "length", 0);
+        out.push_back(x);
+    }
+    return out;
+}
+
+std::vector<File> listFiles(const std::string& base, const std::string& link)
+{
+    std::string resp, err;
+    // Asked once the stream already plays, so the server has the metadata.
+    if (!http::get(statUrl(base, link), resp, err, nullptr, 20)) return {};
+    return files(resp);
+}
+
 bool resolve(const std::string& base, const std::string& link, int fileIndex,
              std::string& url, std::string& err)
 {

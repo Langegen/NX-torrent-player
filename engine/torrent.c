@@ -357,6 +357,27 @@ static uint8_t *fetch_metadata_round(peer_addr *peers, int n,
     return fetch.metadata;
 }
 
+// Where fetched magnet metadata is kept ("" = nowhere). Set once at startup.
+static char g_meta_cache_dir[256];
+
+void torrent_set_meta_cache(const char *dir) {
+    snprintf(g_meta_cache_dir, sizeof(g_meta_cache_dir), "%s", dir ? dir : "");
+}
+
+// "<dir>/<info hash in hex>.torrent"; false when no cache is set.
+static bool meta_cache_path(const uint8_t hash[20], char *out, size_t len) {
+    if (!g_meta_cache_dir[0]) return false;
+    static const char *hex = "0123456789abcdef";
+    char h[41];
+    for (int i = 0; i < 20; i++) {
+        h[i * 2]     = hex[hash[i] >> 4];
+        h[i * 2 + 1] = hex[hash[i] & 0xF];
+    }
+    h[40] = 0;
+    snprintf(out, len, "%s/%s.torrent", g_meta_cache_dir, h);
+    return true;
+}
+
 int torrent_load_magnet(torrent_meta *t, const char *magnet_uri,
                         char *err, size_t errlen) {
     return torrent_load_magnet_peers(t, magnet_uri, NULL, 0, NULL, err, errlen);
@@ -385,6 +406,23 @@ int torrent_load_magnet_peers(torrent_meta *t, const char *magnet_uri,
         magnet_add_tracker(&m, DEFAULT_TRACKERS[i]);
     }
     torrent_meta_trackers = m.tracker_count;
+
+    // Fetched before: open the saved copy. No peers to hand on -- the caller's
+    // own discovery finds them, as it does for any .torrent file. A copy that
+    // does not load, or is not this torrent, is ignored (and replaced below).
+    char cached[400];
+    if (meta_cache_path(m.info_hash, cached, sizeof(cached))) {
+        char cerr[64];
+        if (torrent_load(t, cached, cerr, sizeof(cerr)) == 0) {
+            if (memcmp(t->info_hash, m.info_hash, 20) == 0) {
+                magnet_free(&m);
+                torrent_meta_state = META_DONE;
+                return 0;
+            }
+            torrent_unload(t);
+        }
+        memset(t, 0, sizeof(*t));
+    }
 
     // Announce with a temporary stub (info_hash + borrowed trackers) to find
     // peers, before we know piece counts or size.
@@ -495,6 +533,10 @@ int torrent_load_magnet_peers(torrent_meta *t, const char *magnet_uri,
 
     int rc = torrent_load_from_metadata(t, metadata, meta_len, m.info_hash,
                                         m.trackers, m.tracker_count, err, errlen);
+    // Keep it: the next open of this magnet (another episode of the pack, a
+    // resume from the history) skips everything above.
+    if (rc == 0 && meta_cache_path(m.info_hash, cached, sizeof(cached)))
+        torrent_save(t, cached);
     magnet_free(&m);
     torrent_meta_state = rc == 0 ? META_DONE : META_FAIL;
     return rc;
@@ -569,6 +611,34 @@ int torrent_load(torrent_meta *t, const char *path, char *err, size_t errlen) {
         return -1;
     }
     return 0;
+}
+
+int torrent_save(const torrent_meta *t, const char *path) {
+    if (!t->root) return -1;
+    // A loaded .torrent keeps the whole file as its root; a magnet's root IS
+    // the info dict (torrent_load_from_metadata).
+    const be_node *info = be_dict_get(t->root, "info");
+    if (!info) info = t->root;
+    if (info->type != BE_DICT || !info->raw || info->rawlen == 0) return -1;
+
+    FILE *f = fopen(path, "wb");
+    if (!f) return -1;
+    // Keys in sorted order, as bencode wants: announce, announce-list, info.
+    fputc('d', f);
+    if (t->tracker_count > 0) {
+        fprintf(f, "8:announce%zu:%s", strlen(t->trackers[0]), t->trackers[0]);
+        fputs("13:announce-listl", f);
+        for (int i = 0; i < t->tracker_count; i++)
+            fprintf(f, "l%zu:%se", strlen(t->trackers[i]), t->trackers[i]);
+        fputc('e', f);
+    }
+    fputs("4:info", f);
+    size_t w = fwrite(info->raw, 1, info->rawlen, f);
+    fputc('e', f);
+    int bad = ferror(f) || w != info->rawlen;
+    if (fclose(f) != 0) bad = 1;
+    if (bad) remove(path);
+    return bad ? -1 : 0;
 }
 
 int torrent_largest_file(const torrent_meta *t) {

@@ -2110,6 +2110,7 @@ class SeriesDetailActivity : public brls::Activity
             for (size_t i = 1; i < ord.size(); i++)
                 if (ord[i]->id == v.id) { prevId = ord[i - 1]->id; break; }
         }
+        w.prevVideoId = prevId;
         brls::Application::pushActivity(new EpisodeDetailActivity(
             authKey, v, seriesRating, epArt, w, prevId, w.nextVideoId));
     }
@@ -2439,6 +2440,7 @@ void openEpisodeById(const std::string& authKey, const std::string& seriesId,
             for (size_t i = 1; i < ord.size(); i++)
                 if (ord[i]->id == v->id) { prevId = ord[i - 1]->id; break; }
 
+            w.prevVideoId = prevId;
             auto* next = new EpisodeDetailActivity(
                 authKey, *v, r.imdbRating, epArt, w, prevId, w.nextVideoId);
             // Either way one activity comes off and one goes on -- the loading

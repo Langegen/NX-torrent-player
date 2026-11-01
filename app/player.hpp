@@ -16,6 +16,12 @@ struct mpv_handle;
 struct mpv_render_context;
 struct torrentfs;
 
+namespace player_ui
+{
+class Button;
+class Timeline;
+}
+
 // Fired once a magnet's on-device metadata resolves, with the magnet URI played
 // and the real torrent name. Lets the Local tab fill in a name it did not have
 // yet (a magnet added without a dn=). Set to nullptr to disable.
@@ -62,6 +68,9 @@ struct WatchInfo
     // Watching on the next episode instead of vanishing. Empty for films and the
     // last episode.
     std::string nextVideoId;
+    // The episode before this one, same order: the panel's "previous" button
+    // opens it (Stremio). Empty for films and the first episode.
+    std::string prevVideoId;
     double resumeSec = 0.0;  // start playback here (0 = from the beginning)
     std::string displayTitle;  // shown top-left on pause; "" falls back to the
                                // name derived from the source
@@ -128,7 +137,6 @@ class MpvView : public brls::Box
     void updateLoadingOverlay();
     void updateBufferIndicator();
     void updateInfoOverlay();
-    void updateSeekBar();
 
     // X during playback: a modal popup to switch the current video's audio and
     // subtitle track. Pauses playback behind it (it stays paused on close, A
@@ -177,6 +185,7 @@ class MpvView : public brls::Box
     void updateNextCard();     // per frame: show/hide against the time left
     void goToNextEpisode();    // pop out of the player and open the next one
     brls::Box* nextCard      = nullptr;
+    float nextCardBottom     = -1.0f;    // its offset, last pushed to layout
     brls::Label* nextCardSub = nullptr;  // "Season 1 . Episode 4"
     bool nextCardShown       = false;
 
@@ -195,11 +204,121 @@ class MpvView : public brls::Box
     bool pillFlashActive     = false;
     std::chrono::steady_clock::time_point pillFlashUntil;
 
-    // Touch controls: tap the video to play/pause (and reveal the bar), tap the
-    // seek bar to jump to that point, tap the Options hint to open the track menu.
-    void onPlayPause();                 // the A-button behaviour, reused by a tap
-    void setControlsVisible(bool show); // pause overlay + title + hint + seek bar
+    // Touch controls: tap the video to show/hide the panel, tap the timeline to
+    // jump to that point, tap a button to run it.
+    void onPlayPause();                 // toggle pause (or commit a pending seek)
+    void setControlsVisible(bool show); // the panel: title bar + timeline + buttons
     void seekToFraction(double frac);   // seek to frac (0..1) of the duration
+
+    // ---- The control panel (modelled on Lampa's player) -------------------
+    // A title bar on top (title, episode, clock, when it ends) and at the
+    // bottom a timeline over a row of round buttons. The player keeps the
+    // borealis focus the whole time and moves its own cursor: through the
+    // buttons with left/right, up to the timeline (where left/right seek) and
+    // back down. A runs the button, B hides the panel, B again leaves.
+    enum Btn
+    {
+        BTN_PREV,
+        BTN_REWIND,
+        BTN_PLAY,
+        BTN_FORWARD,
+        BTN_NEXT,
+        BTN_EPISODES,
+        BTN_AUDIO,
+        BTN_SUBS,
+        BTN_SETTINGS,
+        BTN_LOCK,
+        BTN_COUNT,
+    };
+    enum class Zone
+    {
+        Buttons,
+        Timeline,
+    };
+    void buildControls();
+    void updateControls();          // per frame while shown: times, clock, knob
+    void refreshButtons();          // which are there, which has the cursor
+    bool buttonAvailable(int b);
+    void moveFocus(int dir);        // left/right through the buttons
+    void setZone(Zone z);
+    void activateButton(int b);
+    void pokeControls();            // input: push the auto-hide back
+    Zone zone    = Zone::Buttons;
+    int focusBtn = BTN_PLAY;
+    player_ui::Button* buttons[BTN_COUNT] = {};
+    player_ui::Timeline* timeline = nullptr;
+    brls::Box* topBar        = nullptr;
+    brls::Box* bottomBar     = nullptr;
+    brls::Label* barTitle    = nullptr;
+    brls::Label* barSubtitle = nullptr;
+    brls::Label* barClock    = nullptr;
+    brls::Label* barEnds     = nullptr;  // "Ends at 23:10"
+    brls::Label* timeCur     = nullptr;
+    brls::Label* timeTotal   = nullptr;
+    std::chrono::steady_clock::time_point clockLast;
+    bool clockValid = false;
+
+    // Small side panels for one choice each (Lampa opens one per button):
+    // the audio track, the subtitles, the episode. The X panel still has
+    // everything at once.
+    void openChoicePanel(const std::string& title,
+                         const std::vector<std::string>& labels,
+                         const std::vector<std::string>& details, int current,
+                         std::function<void(int)> onPick);
+    void openAudioPanel();
+    void openSubtitlesPanel();
+    void openEpisodesPanel();
+    // Whether the panel was up when a side panel opened, to bring it back.
+    bool controlsBeforePanel = false;
+
+    // Tracks as mpv lists them, for the pickers. sIds[0] is -1: "Off".
+    struct TrackList
+    {
+        std::vector<std::string> aLabels, sLabels;
+        std::vector<int64_t> aIds, sIds;
+        int aCur = 0, sCur = 0;
+    };
+    TrackList readTracks();
+    // One entry of the subtitle list: an mpv track (sid; -1 off, -2 a status
+    // line that is not a choice) or an addon subtitle still to fetch (sub).
+    struct SubPick
+    {
+        int64_t sid = -1;
+        int sub     = -1;
+    };
+    void subtitleChoices(const TrackList& t, std::vector<SubPick>& picks,
+                         std::vector<std::string>& labels, int& cur);
+    void applySubPick(const SubPick& p);
+
+    // Video size (Lampa's "Размер видео"): fit, fill (crop), stretch, zoom.
+    int videoSize = 0;
+    void applyVideoSize(int mode);
+
+    // ---- Episodes -------------------------------------------------------
+    // A torrent with several videos (a season pack) is its own playlist, as
+    // in Lampa: the episodes are its files, and moving between them reopens
+    // the same torrent on another file -- no list to pick from, no new
+    // search. Without one, previous/next go through the catalog (TMDB card)
+    // or the Stremio series, the way the end-of-episode card always has.
+    struct PlaylistItem
+    {
+        int fileIndex = -1;
+        std::string label;
+        std::string path;
+        int64_t length = 0;
+    };
+    std::vector<PlaylistItem> playlist;
+    int playlistCur       = -1;
+    bool playlistEpisodic = false;  // its files name episodes (S01E04...)
+    // (index, path, length) of every file in the torrent.
+    void setPlaylistFiles(const std::vector<PlaylistItem>& files);
+    void fetchTorrServerPlaylist(const std::string& link);
+    bool hasPrevEpisode();
+    bool hasNextEpisode();
+    bool isEpisodic();          // a show: next/prev and the end card make sense
+    std::string nextEpisodeLabel();
+    void goToEpisode(int dir);  // -1 previous, +1 next
+    void playPlaylistItem(int i);
 
     // Control lock (Y). Blocks every player input -- buttons, the stick and touch
     // -- for the session, so a running video is not disturbed by an accidental
@@ -249,17 +368,12 @@ class MpvView : public brls::Box
     brls::Box* bufferOverlay = nullptr;
     bool buffering           = false;
 
-    // Pause icon + seek bar (elapsed / total time) shown while paused with A.
+    // Big play button in the middle, shown with the panel while paused (and a
+    // touch target for play/pause).
     brls::Box* pauseOverlay  = nullptr;
-    brls::Box* pauseTitleBox = nullptr;  // title, top-left, shown while paused
-    std::string pauseTitle;              // what it says
-    brls::Box* optionsHint   = nullptr;  // "X Options" hint, top-right while paused
-    brls::Box* lockHint      = nullptr;  // Y-lock hint / indicator, far top-right
+    std::string pauseTitle;              // the title bar's title
+    brls::Box* lockHint      = nullptr;  // padlock pill, flashed far top-right
     brls::Label* lockLabel   = nullptr;  // padlock glyph: open (unlocked) / closed (locked)
-    brls::Box* seekOverlay   = nullptr;
-    brls::Box* seekFill      = nullptr;
-    brls::Label* seekCur     = nullptr;
-    brls::Label* seekTotal   = nullptr;
     bool userPaused          = false;
     // Whether the controls overlay is on screen. Decoupled from userPaused: a
     // touch on the video toggles this without changing playback, and the centre
@@ -270,20 +384,28 @@ class MpvView : public brls::Box
     void updateControlsAutoHide();
     std::chrono::steady_clock::time_point controlsHideAt;
 
-    // Scrubbing with the stick: left/right pause playback and move a target
-    // along the seek bar; A commits the seek and resumes. The engine follows --
-    // seeking moves the torrent playhead (source/stream.c seek_cb), so the
-    // download window re-centres on wherever you land.
+    // Seeking is aimed first and done once: a cursor moves along the timeline
+    // (the D-pad in steps, the stick in a sweep, a finger in a drag) and the
+    // seek itself is issued when the input stops -- one seek, not one per
+    // step, which matters on a torrent where every seek re-centres the
+    // download window (stream.c seek_cb). A does it at once, B drops it.
     bool seeking      = false;
     double seekTarget = 0.0;  // seconds, where the cursor currently points
     double seekDur    = 0.0;  // duration cached when scrubbing started
-    brls::Box* seekCursor = nullptr;
-    brls::Box* seekTrack  = nullptr;  // measured, to place fill+cursor in pixels
+    // The stick and a drag pause the picture while aiming (and resume after);
+    // the D-pad steps leave it playing, as Lampa does.
+    bool seekPaused   = false;
+    int seekSteps     = 0;    // D-pad steps in this seek: they grow when held
+    bool seekHold     = false;  // a finger is still on the timeline
+    std::chrono::steady_clock::time_point seekLastInput;
+    void stepSeek(int dir, bool toTimeline);
+    void commitSeek();
+    void updateSeekCommit();  // per frame: the seek, once the input has stopped
 
     // Analog scrub: driven per-frame from the stick axis, so it needs its own
     // clock and a hold timer to ramp the rate.
     void updateStickSeek();
-    void beginSeek();
+    void beginSeek(bool pause = true);
     // Abandon an in-progress scrub without committing: the video never left the
     // frame it paused on, so this just drops the seek bar and restores the
     // play/pause the user had. B calls it instead of leaving the stream.
@@ -325,6 +447,10 @@ class MpvView : public brls::Box
     bool fileLoaded    = false;  // mpv opened the stream (header downloaded)
     bool overlayHidden = false;  // loading screen has been taken down
     bool ended         = false;  // reached EOF; the auto-close is scheduled
+    // Leaving for another episode (previous / next / the list): the player is
+    // on its way out. Not `ended` -- that would record this one as watched to
+    // the end, which going back an episode is not.
+    bool switching     = false;
     bool openFailed    = false;  // mpv could not open the source; the reason
                                  // stays on the loading screen
     int shownPct       = -1;     // last buffering % pushed to the bar

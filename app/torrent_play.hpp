@@ -1,6 +1,8 @@
 #pragma once
 
+#include <cstdint>
 #include <string>
+#include <vector>
 
 #include "jackett.hpp"
 #include "player.hpp"  // PlayerArt, WatchInfo
@@ -25,3 +27,16 @@ struct PlayHint
 
 void playJackettItem(const jackett::Item& item, const PlayHint& hint);
 void playMagnet(const std::string& magnet, const PlayHint& hint);
+
+// One file of a torrent.
+struct VideoFile
+{
+    int index = -1;    // in the torrent's own file order (the engine's index)
+    std::string name;  // label: the file name, with its folder when names repeat
+    std::string path;  // the path inside the torrent
+    int64_t length = 0;
+};
+
+// The video files among `files` (only index/path/length need be set), labelled
+// and in natural order -- the file picker's list, and the player's episodes.
+std::vector<VideoFile> videoFilesOf(const std::vector<VideoFile>& files);

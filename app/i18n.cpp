@@ -124,6 +124,23 @@ const Entry kFr[] = {
     { "Subtitle delay", "Décalage des sous-titres" },
     { "Subtitles earlier", "Sous-titres plus tôt" },
     { "Subtitles later", "Sous-titres plus tard" },
+    // the control panel
+    { "Play", "Lecture" },
+    { "Pause", "Pause" },
+    { "Rewind", "Reculer" },
+    { "Forward", "Avancer" },
+    { "Episodes", "Épisodes" },
+    { "Audio track", "Piste audio" },
+    { "Settings", "Réglages" },
+    { "Ends at ", "Fin à " },
+    { "Now playing", "En cours" },
+    { "VIDEO", "VIDÉO" },
+    { "Video size", "Taille de la vidéo" },
+    { "Default", "Par défaut" },
+    { "Fill the screen", "Remplir l'écran" },
+    { "Stretch", "Étirer" },
+    { "Zoom 115%", "Zoom 115 %" },
+    { "Zoom 130%", "Zoom 130 %" },
     { "L / R shift the subtitles by 0.1 s. Later is positive. The video keeps "
       "playing behind this.",
       "L / R décalent les sous-titres de 0,1 s. Plus tard = positif. La vidéo "

@@ -465,6 +465,16 @@ static void test_magnet_metadata(void) {
     char magnet[256];
     magnet_for(magnet, sizeof(magnet), "udp%3a%2f%2fmock.test%3a1%2fannounce");
 
+    // With the metadata cache on (the app keeps one), and empty to begin with.
+    char cached[64];
+    snprintf(cached, sizeof(cached), "./");
+    for (int i = 0; i < 20; i++)
+        snprintf(cached + strlen(cached), sizeof(cached) - strlen(cached), "%02x",
+                 g_info_hash[i]);
+    strcat(cached, ".torrent");
+    remove(cached);
+    torrent_set_meta_cache(".");
+
     torrent_meta t;
     peer_addr out[16];
     int out_n = 0;
@@ -479,6 +489,37 @@ static void test_magnet_metadata(void) {
     check_loaded(&t);
     // The magnet's tracker plus the defaults, so the download has them too.
     CHECK(t.tracker_count > 1);
+
+    // Opened again: from the cache, without a word to the peer.
+    torrent_meta again;
+    out_n = -1;
+    CHECK(torrent_load_magnet_peers(&again, magnet, out, 16, &out_n, err, sizeof(err)) == 0);
+    CHECK(mp.served == 1);
+    CHECK(out_n == 0);
+    check_loaded(&again);
+    CHECK(again.tracker_count > 1);
+    torrent_unload(&again);
+    torrent_set_meta_cache(NULL);
+    remove(cached);
+
+    // Saved as a .torrent (the player does this to move to another episode of
+    // the pack): it must load back as the same torrent -- the info dict
+    // verbatim, so the same info hash -- with the trackers on board.
+    const char *saved = "pctest_saved_meta.torrent";
+    CHECK(torrent_save(&t, saved) == 0);
+    torrent_meta back;
+    CHECK(torrent_load(&back, saved, err, sizeof(err)) == 0);
+    check_loaded(&back);
+    CHECK(back.tracker_count >= t.tracker_count);
+    // And once more from the reloaded one (a loaded file keeps the whole
+    // .torrent as its root, not just the info dict).
+    CHECK(torrent_save(&back, saved) == 0);
+    torrent_unload(&back);
+    CHECK(torrent_load(&back, saved, err, sizeof(err)) == 0);
+    check_loaded(&back);
+    torrent_unload(&back);
+    remove(saved);
+
     torrent_unload(&t);
     peer_stop(&mp);
     printf("      PASSED\n");
