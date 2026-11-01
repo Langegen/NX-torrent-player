@@ -72,9 +72,14 @@
 // Tuning
 //-----------------------------------------------------------------------------
 
-#define MAX_SESS         24     // live peers; bounded by the socket buffer pool
-#define MAX_CONNECTING   12     // slots allowed to sit in a pending connect
-#define DIAL_STOP_LIVE   16     // enough live sessions: stop dialing new peers
+// Sessions draw on the process-wide socket buffer pool, which also serves
+// curl, the trackers and DHT. With borealis's smaller initial TCP buffers (see
+// library/borealis/VENDORED.md) the pool fits far more than this; 24 was set
+// before that patch. If `socket()` starts failing with ENOBUFS ("fail: N
+// sock/local" climbing in the debug panel), lower MAX_SESS first.
+#define MAX_SESS         40     // sessions: live + connecting
+#define MAX_CONNECTING   20     // slots allowed to sit in a pending connect
+#define DIAL_STOP_LIVE   28     // enough live sessions: stop dialing new peers
 #define CONNECT_SECS     2      // outbound SYN patience
 #define PREHS_SECS       10     // connected but no handshake yet
 #define IDLE_SECS        130    // handshaked, nothing received (see header)
