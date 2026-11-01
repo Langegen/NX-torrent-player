@@ -20,7 +20,6 @@
 #include "utpbridge.h"
 
 #define HANDSHAKE_LEN 68
-#define MSG_EXTENDED 20
 #define META_PIECE_LEN 16384
 #define MAX_META_SIZE (8 * 1024 * 1024)
 
@@ -782,10 +781,32 @@ int peer_nb_send_handshake(peer_nb *p, const uint8_t info_hash[20],
     uint8_t hs[HANDSHAKE_LEN];
     hs[0] = 19;
     memcpy(hs + 1, "BitTorrent protocol", 19);
-    memset(hs + 20, 0, 8);  // no extensions advertised
+    memset(hs + 20, 0, 8);
+    hs[25] = 0x10;          // extension protocol (BEP 10): we take ut_pex
     memcpy(hs + 28, info_hash, 20);
     memcpy(hs + 48, peer_id, 20);
     return nb_tx_append(p, hs, HANDSHAKE_LEN);
+}
+
+int peer_nb_queue_ext(peer_nb *p, uint8_t ext_id, const void *payload,
+                      uint32_t plen) {
+    uint8_t hdr[6];
+    uint32_t len = htonl(2 + plen);
+    memcpy(hdr, &len, 4);
+    hdr[4] = MSG_EXTENDED;
+    hdr[5] = ext_id;
+    if (nb_tx_append(p, hdr, 6) != 0) return -1;
+    if (plen && nb_tx_append(p, payload, plen) != 0) return -1;
+    return 0;
+}
+
+int peer_nb_queue_ext_handshake(peer_nb *p) {
+    // "m": {"ut_pex": UT_PEX_ID}. We only receive PEX, never send it: a
+    // leecher that advertises addresses right after connecting gets dropped
+    // by libtorrent seeds (measured in TorrentShopNX).
+    static const char ehs[] = "d1:md6:ut_pexi1eee";
+    _Static_assert(UT_PEX_ID == 1, "ehs hardcodes the ut_pex id");
+    return peer_nb_queue_ext(p, 0, ehs, sizeof(ehs) - 1);
 }
 
 int peer_nb_recv_handshake(peer_nb *p, const uint8_t info_hash[20]) {
@@ -796,6 +817,7 @@ int peer_nb_recv_handshake(peer_nb *p, const uint8_t info_hash[20]) {
     const uint8_t *hs = p->rx + p->rx_off;
     if (hs[0] != 19 || memcmp(hs + 1, "BitTorrent protocol", 19) != 0) return -1;
     if (memcmp(hs + 28, info_hash, 20) != 0) return -1;  // different torrent
+    p->ext_ok = (hs[25] & 0x10) != 0;
     p->rx_off += HANDSHAKE_LEN;
     p->handshaked = true;
     nb_compact(p);

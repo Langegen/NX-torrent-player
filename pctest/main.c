@@ -217,8 +217,10 @@ int main(int argc, char **argv) {
         torrentfs_debug_counts(tfs, c);
         int live = 0, peak = 0, connecting = 0;
         torrentfs_live_peers(tfs, &live, &peak, &connecting);
-        int known = 0, ready = 0, dropped = 0;
-        torrentfs_pool_stats(tfs, &known, &ready, &dropped);
+        int known = 0, ready = 0, dropped = 0, pex = 0;
+        torrentfs_pool_stats(tfs, &known, &ready, &dropped, &pex);
+        int rs = 0, rc = 0;
+        torrentfs_rotation_stats(tfs, &rs, &rc);
         char last[128];
         torrentfs_last_err(tfs, last, sizeof(last));
 
@@ -227,11 +229,11 @@ int main(int argc, char **argv) {
         prev_bytes = bytes;
 
         printf("[%3ds] %6.2f MB/s %7.1f MB  pieces %lld/%lld ph=%lld | "
-               "live %d (peak %d) conn %d | pool %d ready %d drop %d | "
+               "live %d (peak %d) conn %d | pool %d ready %d drop %d pex %d rot %d/%d | "
                "ok %d fail %d choked %d",
                sec + 1, mbps, bytes / (1024.0 * 1024.0), (long long)done,
                (long long)total, (long long)ph, live, peak, connecting,
-               known, ready, dropped, c[0], c[1], c[3]);
+               known, ready, dropped, pex, rs, rc, c[0], c[1], c[3]);
         if (play_mode)
             printf(" | %s buf %.1fs stalls %d (%.1fs)",
                    pl.started ? "play" : "start", pl.backlog_s, pl.stalls,
@@ -245,8 +247,13 @@ int main(int argc, char **argv) {
     torrentfs_debug_counts(tfs, c);
     int live = 0, peak = 0, connecting = 0;
     torrentfs_live_peers(tfs, &live, &peak, &connecting);
-    int known = 0, ready = 0, dropped = 0;
-    torrentfs_pool_stats(tfs, &known, &ready, &dropped);
+    int known = 0, ready = 0, dropped = 0, pex = 0;
+    torrentfs_pool_stats(tfs, &known, &ready, &dropped, &pex);
+    int rs = 0, rc = 0;
+    torrentfs_rotation_stats(tfs, &rs, &rc);
+    int hedged = 0;
+    int64_t dup = 0;
+    torrentfs_hedge_stats(tfs, &hedged, &dup);
     double avg = (torrentfs_bytes_recv(tfs) - start_bytes) / (1024.0 * 1024.0) /
                  (elapsed > 0 ? elapsed : 1);
 
@@ -260,9 +267,10 @@ int main(int argc, char **argv) {
         printf(" startup=%s%.1fs stalls=%d stall=%.1fs played=%.0fs",
                pl.started ? "" : ">", pl.started ? pl.startup_s : elapsed,
                pl.stalls, pl.stall_s, pl.played_s);
-    printf(" avg=%.2fMB/s peak_live=%d pool=%d dropped=%d conn_ok=%d "
-           "conn_fail=%d\n",
-           avg, peak, known, dropped, c[0], c[1]);
+    printf(" avg=%.2fMB/s peak_live=%d pool=%d dropped=%d pex=%d rot=%d/%d "
+           "hedged=%d dupMB=%.1f conn_ok=%d conn_fail=%d\n",
+           avg, peak, known, dropped, pex, rs, rc, hedged, dup / 1048576.0,
+           c[0], c[1]);
     fflush(stdout);
 
     torrentfs_close(tfs);

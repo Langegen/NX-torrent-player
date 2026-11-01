@@ -31,6 +31,17 @@
 //   - adaptive pipeline depth (fixed 48 blocks ~= 768 KB in flight per peer)
 //   - separate announce and DHT threads (one discovery thread runs both)
 //
+//   ADDED since (swarm handling, adapted from TorrentShopNX's engine):
+//   - a scored 1024-address pool (see peer_score) and peer exchange, receive
+//     only (see PEX_RX_SECS)
+//   - peer turnover: trial dials, slow and choking peers rotated out (see
+//     TURNOVER_SECS)
+//   - hedging the hot piece's tail on a second peer (see HEDGE_MAX_BLOCKS)
+//   NOT ported, on purpose: MSE encryption (nothing yet shows an ISP cutting
+//   plaintext handshakes) and uTP in the netloop (Switch's select() does not
+//   report UDP readability -- see dhtclient.c -- so it would need its own
+//   thread).
+//
 // Session framing/handshake lives in peer.c's peer_nb layer instead of being
 // duplicated here.
 
@@ -55,6 +66,7 @@
 #include "torrent.h"
 #include "peer.h"      // MSG_* ids, BLOCK_LEN, bf_has_piece, peer_nb
 #include "dhtclient.h"
+#include "bencode.h"   // extended handshake / ut_pex payloads
 
 //-----------------------------------------------------------------------------
 // Tuning
@@ -76,6 +88,31 @@
 // only fires on a clear rate win, so a uniformly slow swarm is never thrashed.
 #define SLOW_MEASURE_SECS 5          // download time before a session's rate counts
 #define SLOW_FACTOR_CRIT  4          // take over only if this much faster than the owner
+
+// Peer turnover. With DIAL_STOP_LIVE sessions up, dialing stops, so whoever
+// connected first stayed: a 20 KB/s peer, or one that keeps us choked while
+// sending keep-alives, held its slot forever. Every TURNOVER_SECS, if the pool
+// has someone to try, TURNOVER_HEADROOM extra sessions may be dialed; after
+// TRIAL_SECS the slowest measured sessions are closed again -- only on a clear
+// loss (under half the best rate), so a uniform swarm is not churned. Only
+// while the player is hungry: with a deep backlog (calm mode) it is pointless.
+#define TURNOVER_SECS     30
+#define TRIAL_SECS        40
+#define TURNOVER_HEADROOM 4
+#define SLOW_DROP_SECS    600   // a rotated-out slow address waits this long
+#define CHOKED_ROTATE_SECS 45   // choked this long with someone to replace it
+#define CHOKED_RETRY_SECS 120   // ...then it may be dialed again
+#define SCARCE_LIVE       4     // at or below: never rotate out a seed
+
+// Hedging the hot piece (the one the player needs next). A session owns one
+// piece at a time, so when its owner has every remaining block on order and
+// stops delivering, the player waits on that one peer. Then an idle session
+// that has the piece re-requests the missing tail; whichever copy lands first
+// counts (blocks are stored by piece, not by owner). Only for the last few
+// blocks, only while the player is short of buffer: each hedge can download
+// up to HEDGE_MAX_BLOCKS twice.
+#define HEDGE_MAX_BLOCKS  16    // missing blocks at most (256 KB), and <= 1/4
+#define HEDGE_SILENT_MS   1000  // owner silent this long, or 2x slower
 
 #define DEPTH            48     // fixed request pipeline, in blocks (~768 KB)
 
@@ -135,6 +172,14 @@
 
 enum { SRC_TRACKER = 0, SRC_PEX = 1, SRC_DHT = 2 };   // lower = more trusted
 
+// Peer exchange (BEP 11), receive only. Addresses come from a peer that is
+// talking to us right now, so they are fresher than what trackers and DHT
+// keep. Per session at most one message per PEX_RX_SECS (2 s while starved):
+// a hostile peer could otherwise flood the pool faster than we can dial.
+#define PEX_RX_SECS     5
+#define PEX_RX_STARVED  2
+#define PEX_MAX_ADDED   100   // addresses taken from one message
+
 #define BACKOFF_CONN_SECS 15
 #define BACKOFF_MAX_SECS  300
 #define BACKOFF_DROP_SECS 30
@@ -183,6 +228,8 @@ typedef struct {
     int64_t claim;      // piece being fetched, -1 = none
     int out_n;          // block requests outstanding
     u64 started, last_rx, last_block, last_ka;
+    u64 last_pex_rx;    // last ut_pex we accepted (rate limit)
+    u64 choked_since;   // when the peer (last) choked us; 0 = unchoked
     // Per-session receive-rate meter, for the relative slow-peer cull.
     int64_t rx_total;   // cumulative bytes received (never reset)
     int64_t rate_prev;  // rx_total at the last rate sample
@@ -280,6 +327,15 @@ struct torrentfs {
     int st_claim_ok, st_claim_fail;
     int st_cache_wr_fail, st_cache_rd_short;
     int st_pool_drop;          // discovered addresses discarded: pool full
+    int st_pex_addrs;          // addresses received over ut_pex (netloop)
+    int st_rot_slow, st_rot_choked;   // sessions rotated out (netloop)
+    int st_hedged;             // blocks re-requested by hedging (netloop)
+    int64_t st_dup_bytes;      // block bytes that arrived but were not needed
+
+    // Turnover state (netloop only).
+    u64 turnover_last;         // last trial window opened
+    u64 turnover_until;        // end of the open window, 0 = none
+    int trim_left;             // sessions the closing window may still cut
     int64_t st_cache_written;
     int64_t st_bytes_recv;
     int64_t st_blocks_have;    // blocks resident in RAM partials
@@ -653,7 +709,9 @@ static int take_peer(torrentfs *t, peer_addr *out) {
 
     // IPs of current sessions: count, and whether any is handshaked. A small
     // open-addressing table.
-    enum { IPTAB = 64 };   // power of two, > 2 * MAX_SESS
+    enum { IPTAB = 128, IPTAB_SHIFT = 25 };   // power of two, > 2 * MAX_SESS
+    _Static_assert(IPTAB > 2 * MAX_SESS && (1u << (32 - IPTAB_SHIFT)) == IPTAB,
+                   "IP table too small for MAX_SESS");
     uint32_t tab_ip[IPTAB];
     uint8_t tab_n[IPTAB], tab_live[IPTAB];
     memset(tab_n, 0, sizeof(tab_n));
@@ -664,7 +722,7 @@ static int take_peer(torrentfs *t, peer_addr *out) {
         const sess *ss = &t->S[k];
         if (!ss->active || ss->pidx < 0) continue;
         uint32_t ip = t->peers[ss->pidx].ip;   // busy slots are never evicted
-        uint32_t h = (ip * 2654435761u) >> 26;
+        uint32_t h = (ip * 2654435761u) >> IPTAB_SHIFT;
         while (tab_n[h] && tab_ip[h] != ip) h = (h + 1) & (IPTAB - 1);
         tab_ip[h] = ip;
         tab_n[h]++;
@@ -678,7 +736,7 @@ static int take_peer(torrentfs *t, peer_addr *out) {
             int i = (t->next_peer + tries) % t->peer_count;
             if (t->peer_busy[i] || t->peer_next_try[i] > now) continue;
             uint32_t ip = t->peers[i].ip;
-            uint32_t h = (ip * 2654435761u) >> 26;
+            uint32_t h = (ip * 2654435761u) >> IPTAB_SHIFT;
             while (tab_n[h] && tab_ip[h] != ip) h = (h + 1) & (IPTAB - 1);
             if (tab_n[h] >= MAX_SESS_PER_IP && !tab_live[h]) continue;
 
@@ -1092,22 +1150,63 @@ static void piece_full(torrentfs *t, aq_entry *a) {
 // Message handling
 //-----------------------------------------------------------------------------
 
+// Their extended handshake: learn the peer's id for ut_pex (kept for a future
+// sender; receiving uses our own UT_PEX_ID).
+static void handle_ext_handshake(sess *s, const uint8_t *pl, uint32_t plen) {
+    be_node *d = be_parse((const char *)pl, plen);
+    if (!d) return;
+    be_node *m = be_dict_get(d, "m");
+    be_node *u = m ? be_dict_get(m, "ut_pex") : NULL;
+    if (u && u->type == BE_INT && u->i > 0 && u->i < 256)
+        s->nb.pex_id = (uint8_t)u->i;
+    be_free(d);
+}
+
+// Their ut_pex: the "added" compact IPv4 list goes into the pool.
+static void handle_pex(torrentfs *t, sess *s, const uint8_t *pl, uint32_t plen,
+                       u64 now) {
+    u64 min_gap = (u64)(t->st_live < STARVED_LIVE ? PEX_RX_STARVED : PEX_RX_SECS) *
+                  t->freq;
+    if (s->last_pex_rx && now - s->last_pex_rx < min_gap) return;
+    be_node *d = be_parse((const char *)pl, plen);
+    if (!d) return;
+    be_node *added = be_dict_get(d, "added");
+    if (added && added->type == BE_STR) {
+        peer_addr buf[PEX_MAX_ADDED];
+        int n = 0;
+        for (size_t i = 0; i + 6 <= added->str.len && n < PEX_MAX_ADDED; i += 6) {
+            const uint8_t *e = (const uint8_t *)added->str.ptr + i;
+            memcpy(&buf[n].ip, e, 4);   // network byte order, as peer_addr
+            buf[n].port = (uint16_t)((e[4] << 8) | e[5]);
+            n++;
+        }
+        if (n > 0) {
+            add_peers_src(t, buf, n, SRC_PEX);
+            t->st_pex_addrs += n;
+            s->last_pex_rx = now;
+        }
+    }
+    be_free(d);
+}
+
 static void sess_msg(torrentfs *t, sess *s, int sid, uint8_t id, uint8_t *pl,
                      uint32_t plen, u64 now) {
     (void)sid;
     switch (id) {
         case MSG_CHOKE:
+            if (!s->nb.choked) s->choked_since = now;
             s->nb.choked = true;
             t->st_choked++;
             if (s->claim >= 0) {   // outstanding requests are void now
                 aq_entry *a = aq_find(t, s->claim);
                 if (a) aq_park(t, a);
                 s->claim = -1;
-                s->out_n = 0;
             }
+            s->out_n = 0;          // a hedging session's requests too
             break;
         case MSG_UNCHOKE:
             s->nb.choked = false;
+            s->choked_since = 0;
             t->st_unchoke_ok++;
             break;
         case MSG_INTERESTED:
@@ -1155,7 +1254,10 @@ static void sess_msg(torrentfs *t, sess *s, int sid, uint8_t id, uint8_t *pl,
             // Stored by piece, not by owner: a parked piece's stragglers (or
             // an adopted piece's duplicates) still count.
             aq_entry *a = aq_find(t, idx);
-            if (!a || b >= a->nblocks || a->have[b]) break;
+            if (!a || b >= a->nblocks || a->have[b]) {
+                t->st_dup_bytes += dlen;   // a hedge's loser, or a straggler
+                break;
+            }
             memcpy(a->buf + begin, pl + 8, dlen);
             a->have[b] = 1;
             a->req[b]  = 1;
@@ -1166,6 +1268,13 @@ static void sess_msg(torrentfs *t, sess *s, int sid, uint8_t id, uint8_t *pl,
             if (a->have_cnt == a->nblocks) piece_full(t, a);
             break;
         }
+        case MSG_EXTENDED:
+            if (plen < 1 || !s->nb.ext_ok) break;
+            if (pl[0] == 0)
+                handle_ext_handshake(s, pl + 1, plen - 1);
+            else if (pl[0] == UT_PEX_ID)
+                handle_pex(t, s, pl + 1, plen - 1, now);
+            break;
         default:
             break;   // MSG_CANCEL / MSG_NOT_INTERESTED: nothing useful to do
     }
@@ -1182,7 +1291,9 @@ static void sess_service(torrentfs *t, sess *s, int sid, u64 now) {
         if (hs == 0) return;
         t->st_live++;
         if (t->st_live > t->st_peak_live) t->st_peak_live = t->st_live;
+        s->choked_since = now;   // every peer starts out choking us
         peer_nb_queue(&s->nb, MSG_INTERESTED, NULL, 0);
+        if (s->nb.ext_ok) peer_nb_queue_ext_handshake(&s->nb);
     }
 
     for (;;) {
@@ -1291,6 +1402,166 @@ static int64_t piece_urgency(torrentfs *t, int64_t p) {
     }
     if (p >= ph) return 1000 + (p - ph);            // ahead of the playhead
     return 2000000 + (ph - p);                      // behind it: least urgent
+}
+
+//-----------------------------------------------------------------------------
+// Turnover (see TURNOVER_SECS)
+//-----------------------------------------------------------------------------
+
+static bool sess_is_seed(const torrentfs *t, const sess *s) {
+    if (!s->nb.bitfield) return false;
+    int64_t n = t->meta.piece_count;
+    for (int64_t i = 0; i < n / 8; i++)
+        if (s->nb.bitfield[i] != 0xFF) return false;
+    for (int64_t i = n - n % 8; i < n; i++)
+        if (!bf_has_piece(s->nb.bitfield, s->nb.bitfield_len, i)) return false;
+    return true;
+}
+
+// Is there an address that could be dialed right now?
+static bool pool_has_ready(torrentfs *t, u64 now) {
+    bool ready = false;
+    mutexLock(&t->lock);
+    for (int i = 0; i < t->peer_count && !ready; i++)
+        if (!t->peer_busy[i] && t->peer_next_try[i] <= now) ready = true;
+    mutexUnlock(&t->lock);
+    return ready;
+}
+
+// Close a session to free its slot (not a failure). The address waits
+// `wait_secs` before it can be dialed again.
+static void rotate_out(torrentfs *t, sess *s, u64 now, int wait_secs) {
+    int pidx = s->pidx;
+    sess_close(t, s, false);
+    if (pidx < 0) return;
+    mutexLock(&t->lock);
+    t->peer_next_try[pidx] = now + (u64)wait_secs * t->freq;
+    mutexUnlock(&t->lock);
+}
+
+static bool rate_measured(const torrentfs *t, const sess *s, u64 now) {
+    return s->rate_start && now - s->rate_start >= (u64)SLOW_MEASURE_SECS * t->freq;
+}
+
+// The slowest established, measured session if it clearly loses (under half
+// the best measured rate), else NULL. A session that never got to download
+// (no claim: the window was full) is not measured and never picked -- it is
+// idle, not slow.
+static sess *worst_session(torrentfs *t, u64 now) {
+    bool scarce = t->st_live <= SCARCE_LIVE;
+    sess *worst = NULL;
+    double best = 0;
+    for (int i = 0; i < MAX_SESS; i++) {
+        sess *s = &t->S[i];
+        if (!s->active || s->connecting || !s->nb.handshaked) continue;
+        if (!rate_measured(t, s, now)) continue;
+        if (s->rate > best) best = s->rate;
+        if (now - s->started < (u64)TRIAL_SECS * t->freq) continue;
+        if (scarce && sess_is_seed(t, s)) continue;
+        if (!worst || s->rate < worst->rate) worst = s;
+    }
+    if (worst && worst->rate < best * 0.5) return worst;
+    return NULL;
+}
+
+// Once per upkeep tick, after update_rates.
+static void turnover_tick(torrentfs *t, u64 now) {
+    if (t->calm_now < MAX_SESS) {          // the player has a buffer: hold
+        t->turnover_until = 0;
+        t->trim_left = 0;
+        return;
+    }
+    u64 f = t->freq;
+    bool ready = pool_has_ready(t, now);
+
+    // A peer that keeps us choked holds a slot (and counts toward
+    // DIAL_STOP_LIVE) for nothing. One per tick, only with a replacement.
+    if (ready) {
+        for (int i = 0; i < MAX_SESS; i++) {
+            sess *s = &t->S[i];
+            if (!s->active || s->connecting || !s->nb.handshaked) continue;
+            if (!s->nb.choked || !s->choked_since) continue;
+            if (now - s->choked_since < (u64)CHOKED_ROTATE_SECS * f) continue;
+            if (t->st_live <= SCARCE_LIVE && sess_is_seed(t, s)) continue;
+            rotate_out(t, s, now, CHOKED_RETRY_SECS);
+            t->st_rot_choked++;
+            break;
+        }
+    }
+
+    if (t->turnover_until && now >= t->turnover_until) {
+        t->turnover_until = 0;
+        t->trim_left = TURNOVER_HEADROOM;   // trials over: cut the losers
+    }
+    if (!t->turnover_until && t->trim_left == 0 &&
+        now - t->turnover_last > (u64)TURNOVER_SECS * f &&
+        t->st_live >= DIAL_STOP_LIVE - 1 && ready) {
+        t->turnover_last  = now;
+        t->turnover_until = now + (u64)TRIAL_SECS * f;
+    }
+    if (t->trim_left > 0) {
+        sess *v = t->st_live > DIAL_STOP_LIVE ? worst_session(t, now) : NULL;
+        if (v) {
+            rotate_out(t, v, now, SLOW_DROP_SECS);
+            t->st_rot_slow++;
+            t->trim_left--;
+        } else {
+            t->trim_left = 0;
+        }
+    }
+}
+
+// See HEDGE_MAX_BLOCKS. Once per upkeep tick, after steer_peers.
+static void hedge_hot(torrentfs *t, u64 now) {
+    if (t->calm_now < MAX_SESS) return;           // the player has a buffer
+    int64_t hot = hot_piece(t);
+    if (hot < 0) return;
+    aq_entry *a = aq_find(t, hot);
+    if (!a || a->owner < 0 || a->owner >= MAX_SESS) return;   // parked: claimable
+    if (a->next_req < a->nblocks) return;         // owner still requesting
+    // The tail only: a quarter of the piece at most. With 256 KB pieces (16
+    // blocks) a flat HEDGE_MAX_BLOCKS meant duplicating the whole hot piece
+    // (measured: ~13% of all traffic wasted).
+    int tail = a->nblocks / 4;
+    if (tail > HEDGE_MAX_BLOCKS) tail = HEDGE_MAX_BLOCKS;
+    if (tail < 1) tail = 1;
+    int missing = a->nblocks - a->have_cnt;
+    if (missing <= 0 || missing > tail) return;
+
+    sess *o = &t->S[a->owner];
+    sess *best = NULL;
+    for (int i = 0; i < MAX_SESS; i++) {
+        sess *s = &t->S[i];
+        if (s == o || !s->active || s->connecting || !s->nb.handshaked) continue;
+        if (s->nb.choked || s->claim >= 0 || s->out_n > 0) continue;   // busy
+        if (!bf_has_piece(s->nb.bitfield, s->nb.bitfield_len, hot)) continue;
+        if (!best || s->rate > best->rate) best = s;
+    }
+    if (!best) return;
+
+    bool silent = now - o->last_block >= (u64)HEDGE_SILENT_MS * t->freq / 1000;
+    bool slower = rate_measured(t, o, now) && rate_measured(t, best, now) &&
+                  o->rate * 2 < best->rate;
+    if (!silent && !slower) return;
+
+    int64_t plen = torrent_piece_len(&t->meta, hot);
+    int n = 0;
+    for (int b = 0; b < a->nblocks; b++) {
+        if (a->have[b] || a->req[b] != 1) continue;   // 2 = already hedged
+        uint8_t pl[12];
+        uint32_t v;
+        v = htonl((uint32_t)hot);                memcpy(pl, &v, 4);
+        v = htonl((uint32_t)b * BLOCK_LEN);      memcpy(pl + 4, &v, 4);
+        v = htonl(block_len_of(plen, b));        memcpy(pl + 8, &v, 4);
+        if (peer_nb_queue(&best->nb, MSG_REQUEST, pl, 12) != 0) break;
+        a->req[b] = 2;
+        n++;
+    }
+    if (n == 0) return;
+    best->out_n += n;
+    best->last_block = now;   // its stall timer starts now, not at its last piece
+    t->st_hedged += n;
+    peer_nb_flush(&best->nb);
 }
 
 // Put the fastest available peer on the most urgent piece, instead of banning
@@ -1420,7 +1691,9 @@ static void netloop_main(void *arg) {
             }
 
             update_rates(t, now);   // per-session rate meter
+            turnover_tick(t, now);  // trial dials, slow/choked rotation
             steer_peers(t, now);    // fastest peer -> most urgent piece
+            hedge_hot(t, now);      // a second peer on the hot piece's tail
 
             int connecting = 0, bf_empty = 0;
             for (int i = 0; i < MAX_SESS; i++) {
@@ -1435,7 +1708,8 @@ static void netloop_main(void *arg) {
                 }
             }
             t->st_bf_empty = bf_empty;
-            while (t->st_live < DIAL_STOP_LIVE && connecting < MAX_CONNECTING) {
+            int live_cap = DIAL_STOP_LIVE + (t->turnover_until ? TURNOVER_HEADROOM : 0);
+            while (t->st_live < live_cap && connecting < MAX_CONNECTING) {
                 if (!sess_dial(t, now)) break;
                 connecting++;
             }
@@ -1481,6 +1755,7 @@ static void netloop_main(void *arg) {
                 sess *s = &t->S[i];
                 if (!s->active || s->connecting || !s->nb.handshaked) continue;
                 if (s->nb.choked || s->claim >= 0) continue;
+                if (s->out_n > 0) continue;   // hedging: its requests are in flight
                 claim_piece(t, s, i);
                 if (s->claim >= 0) {
                     claiming++;
@@ -1816,8 +2091,19 @@ int torrentfs_peer_count(const torrentfs *tfs) {
     return tfs->peer_count;
 }
 
+void torrentfs_hedge_stats(const torrentfs *tfs, int *hedged, int64_t *dup_bytes) {
+    if (hedged) *hedged = tfs->st_hedged;
+    if (dup_bytes) *dup_bytes = tfs->st_dup_bytes;
+}
+
+void torrentfs_rotation_stats(const torrentfs *tfs, int *slow, int *choked) {
+    if (slow) *slow = tfs->st_rot_slow;
+    if (choked) *choked = tfs->st_rot_choked;
+}
+
 void torrentfs_pool_stats(const torrentfs *tfs, int *known, int *ready,
-                          int *dropped) {
+                          int *dropped, int *pex) {
+    if (pex) *pex = tfs->st_pex_addrs;
     torrentfs *t = (torrentfs *)tfs;
     u64 now = armGetSystemTick();
     int r = 0;

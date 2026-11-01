@@ -102,7 +102,21 @@ the engine dumps a `[stats]` line every 2s. Turn it on, restart, reproduce.
 
 ZR in the player opens a live panel of every engine counter. `fail: N sock/local`
 climbing with `last err: socket(): No buffer space available` means the socket
-buffer pool is exhausted — see `library/borealis/VENDORED.md`.
+buffer pool is exhausted — see `library/borealis/VENDORED.md` (and lower
+`MAX_SESS` in `engine/torrentfs.c`). `pool` shows addresses ready to dial,
+dropped because the pool was full, and received over PEX; `rotated out` the
+sessions closed by peer turnover; `hedged` / `wasted` what re-requesting the
+hot piece's tail from a second peer cost.
+
+## Measuring the engine on a PC
+
+`pctest/main.c` runs `engine/` without the Switch or the UI; `sh
+pctest/build.sh` builds it on Linux or in the devkitPro MSYS2 shell (mingw64).
+`enginetest <file.torrent|magnet> 120 play` models the player (mpv's head/tail
+probe, then a 10 Mbit/s read with 60 s of read-ahead, the backlog fed to the
+engine) and ends with a `SUMMARY` line: startup time, stalls, live peers, pool.
+Network noise between runs is large — compare two builds by alternating them on
+the same torrents, never against an older run.
 
 For a crash, Atmosphère writes a report to `sdmc:/atmosphere/crash_reports/`.
 The ELF is linked at vaddr 0, so the offsets map directly:
