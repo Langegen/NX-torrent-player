@@ -16,6 +16,11 @@
 //   order (the history and library writes, a Stremio progress push) stays on
 //   brls::async.
 // - As with brls::async, hand results back to the UI with brls::sync.
+//
+// The threads are never detached: libnx has no pthread_detach (it returns
+// ENOSYS, so std::thread::detach() throws -- that closed the app on the first
+// request). They are kept and joined by stop(). A thread that cannot be made
+// leaves the work to brls::async; a task that throws is logged, not fatal.
 namespace workers
 {
 
@@ -28,5 +33,10 @@ enum class Priority
 constexpr int kThreads = 4;
 
 void run(std::function<void()> task, Priority p = Priority::High);
+
+// As the app quits, before main() returns: aborts the requests in flight,
+// drops what has not started, and joins the threads. A network call still
+// running past main() is a crash on the Switch (socketExit runs under it).
+void stop();
 
 } // namespace workers

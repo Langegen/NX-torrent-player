@@ -1,0 +1,7 @@
+name = "nx-tmdb-proxy"
+main = "worker.js"
+compatibility_date = "2026-01-01"
+
+# Optional: define custom TMDB API key if you want to override the default
+# [vars]
+# TMDB_API_KEY = "your_tmdb_api_key_here"

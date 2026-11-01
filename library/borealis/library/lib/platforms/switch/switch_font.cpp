@@ -67,19 +67,40 @@ void SwitchFontLoader::loadFonts()
     }
     else
     {
-        // Space Grotesk missing: stock behaviour -- system Simplified Chinese is
-        // the primary, Standard its Latin fallback.
         if (useBundledFont)
             Logger::error("switch: Space Grotesk not found, falling back to system fonts");
         else
             Logger::info("switch: system fonts only (bundled font turned off)");
-        rc = plGetSharedFontByType(&font, PlSharedFontType_ChineseSimplified);
-        if (R_SUCCEEDED(rc) &&
-            Application::loadFontFromMemory(FONT_CHINESE_SIMPLIFIED, font.address, font.size, false))
-            nvgAddFallbackFontId(vg, Application::getFont(FONT_CHINESE_SIMPLIFIED),
-                                 Application::getFont(FONT_REGULAR));
+
+        // LOCAL PATCH (see VENDORED.md): the system Standard font is the
+        // primary, Simplified Chinese its fallback for CJK. Stock borealis has
+        // it the other way round, and the Chinese font carries Latin and
+        // Cyrillic of its own -- drawn in near-square cells, so Russian text
+        // came out with wide gaps between the letters. Standard is the font
+        // the console's own menus use for Russian.
+        rc = plGetSharedFontByType(&font, PlSharedFontType_Standard);
+        bool stdPrimary = haveStd && R_SUCCEEDED(rc) &&
+                          Application::loadFontFromMemory(FONT_CHINESE_SIMPLIFIED, font.address,
+                                                          font.size, false);
+        PlFontData zh;
+        Result zrc = plGetSharedFontByType(&zh, PlSharedFontType_ChineseSimplified);
+        if (stdPrimary)
+        {
+            if (R_SUCCEEDED(zrc) &&
+                Application::loadFontFromMemory("sys_chinese", zh.address, zh.size, false))
+                nvgAddFallbackFontId(vg, Application::getFont(FONT_CHINESE_SIMPLIFIED),
+                                     Application::getFont("sys_chinese"));
+        }
+        else if (R_SUCCEEDED(zrc) && Application::loadFontFromMemory(
+                                         FONT_CHINESE_SIMPLIFIED, zh.address, zh.size, false))
+        {
+            // No Standard font: the stock setup.
+            if (haveStd)
+                nvgAddFallbackFontId(vg, Application::getFont(FONT_CHINESE_SIMPLIFIED),
+                                     Application::getFont(FONT_REGULAR));
+        }
         else
-            Logger::error("switch: could not load Chinese Simplified shared font: {:#x}", rc);
+            Logger::error("switch: could not load Chinese Simplified shared font: {:#x}", zrc);
     }
 
     // Simplified Chinese ext

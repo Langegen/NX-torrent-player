@@ -55,6 +55,7 @@
 #include "setup.hpp"
 #include "autotest.hpp"
 #include "widgets.hpp"  // ui::paintField
+#include "workers.hpp"  // workers::stop
 #include "history.hpp"
 #include "history_tab.hpp"
 #include "bookmarks.hpp"
@@ -2015,6 +2016,10 @@ int main(int argc, char* argv[])
     // out of it, so the file cannot be replaced until the app is done with it.
     // The new version is picked up on the next launch.
     update::applyPending();
+
+    // The network pool's threads, joined before main() returns (see
+    // workers.hpp): a request still running past it would crash on the Switch.
+    workers::stop();
 
     // Nothing to wait for here: ~MpvView closes the engine synchronously, and
     // Application::exit() destroys the activity stack before this returns. That

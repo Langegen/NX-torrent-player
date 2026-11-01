@@ -259,9 +259,29 @@ void load()
     cfg.jackettSetupAsked = readBool(body, "jackettSetupAsked", cfg.jackettSetupAsked);
     cfg.torrServerUrl = readStr(body, "torrServerUrl", cfg.torrServerUrl);
     cfg.proxyUrl      = readStr(body, "proxyUrl", cfg.proxyUrl);
+    if (!cfg.proxyUrl.empty() && (cfg.proxyUrl.find("tmdb") != std::string::npos || cfg.proxyUrl.find("/3") != std::string::npos || cfg.proxyUrl.find("rootu.top") != std::string::npos))
+    {
+        cfg.proxyUrl.clear();
+    }
     cfg.tmdbApiKey    = readStr(body, "tmdbApiKey", cfg.tmdbApiKey);
     cfg.tmdbApiUrl    = readStr(body, "tmdbApiUrl", cfg.tmdbApiUrl);
     cfg.tmdbImageUrl  = readStr(body, "tmdbImageUrl", cfg.tmdbImageUrl);
+    cfg.tmdbProxyUrl  = readStr(body, "tmdbProxyUrl", cfg.tmdbProxyUrl);
+    if (!cfg.tmdbProxyUrl.empty() && cfg.tmdbProxyUrl.find("rootu.top") != std::string::npos)
+    {
+        cfg.tmdbProxyUrl.clear();
+    }
+    if (body.find("\"tmdbProxyEnabled\"") != std::string::npos)
+    {
+        cfg.tmdbProxyEnabled = readBool(body, "tmdbProxyEnabled", cfg.tmdbProxyEnabled);
+        cfg.tmdbProxyUserSet = true;
+    }
+    else
+    {
+        std::string effectiveLang = cfg.language == "auto" ? consoleLang() : cfg.language;
+        cfg.tmdbProxyEnabled = (effectiveLang == "ru");
+        cfg.tmdbProxyUserSet = false;
+    }
     cfg.logging = readBool(body, "logging", cfg.logging);
     cfg.hide4k  = readBool(body, "hide4k", cfg.hide4k);
     cfg.rateGovernor = readBool(body, "rateGovernor", cfg.rateGovernor);
@@ -315,6 +335,8 @@ bool save()
                  "  \"tmdbApiKey\": \"%s\",\n"
                  "  \"tmdbApiUrl\": \"%s\",\n"
                  "  \"tmdbImageUrl\": \"%s\",\n"
+                 "  \"tmdbProxyUrl\": \"%s\",\n"
+                 "  \"tmdbProxyEnabled\": %s,\n"
                  "  \"logging\": %s,\n"
                  "  \"hide4k\": %s,\n"
                  "  \"rateGovernor\": %s,\n"
@@ -341,6 +363,8 @@ bool save()
                  cfg.tmdbApiKey.c_str(),
                  cfg.tmdbApiUrl.c_str(),
                  cfg.tmdbImageUrl.c_str(),
+                 cfg.tmdbProxyUrl.c_str(),
+                 cfg.tmdbProxyEnabled ? "true" : "false",
                  cfg.logging ? "true" : "false", cfg.hide4k ? "true" : "false",
                  cfg.rateGovernor ? "true" : "false",
                  cfg.ramStream ? "true" : "false",

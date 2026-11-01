@@ -628,7 +628,7 @@ brls::View* networkPane()
     list->addView(thdr);
 
     auto maskKey = [](const std::string& k) -> std::string {
-        if (k.empty()) return tr("Not set");
+        if (k.empty()) return tr("Built-in (default)");
         if (k.size() <= 8) return "********";
         return k.substr(0, 4) + "..." + k.substr(k.size() - 4);
     };
@@ -651,14 +651,61 @@ brls::View* networkPane()
 
     auto* tmdbUrl = new brls::DetailCell();
     tmdbUrl->setText(tr("API address"));
-    tmdbUrl->setDetailText(cfg.tmdbApiUrl.empty() ? "api.themoviedb.org" : cfg.tmdbApiUrl);
-    tmdbUrl->registerClickAction([tmdbUrl](brls::View*) {
+
+    auto updateApiDetail = [tmdbUrl]() {
+        const auto& c = config::get();
+        if (!c.tmdbApiUrl.empty())
+        {
+            tmdbUrl->setDetailText(c.tmdbApiUrl);
+        }
+        else if (c.tmdbProxyEnabled)
+        {
+            if (c.tmdbProxyUrl.empty()) tmdbUrl->setDetailText("tmdb-api.rootu.top");
+            else tmdbUrl->setDetailText(c.tmdbProxyUrl);
+        }
+        else
+        {
+            tmdbUrl->setDetailText("api.themoviedb.org");
+        }
+    };
+
+    auto* tmdbProxy = new brls::BooleanCell();
+    tmdbProxy->init(tr("TMDB proxy"), cfg.tmdbProxyEnabled, [updateApiDetail](bool on) {
+        config::get().tmdbProxyEnabled = on;
+        config::get().tmdbProxyUserSet = true;
+        config::save();
+        tmdb::clearCache();
+        updateApiDetail();
+    });
+    list->addView(tmdbProxy);
+
+    auto* tmdbProxyUrl = new brls::DetailCell();
+    tmdbProxyUrl->setText(tr("Proxy address"));
+    tmdbProxyUrl->setDetailText(cfg.tmdbProxyUrl.empty() ? tr("Built-in proxy") : cfg.tmdbProxyUrl);
+    tmdbProxyUrl->registerClickAction([tmdbProxyUrl, updateApiDetail](brls::View*) {
         brls::Application::getImeManager()->openForText(
-            [tmdbUrl](std::string out) {
+            [tmdbProxyUrl, updateApiDetail](std::string out) {
+                while (!out.empty() && (out.back() == ' ' || out.back() == '/')) out.pop_back();
+                config::get().tmdbProxyUrl = out;
+                config::save();
+                tmdb::clearCache();
+                tmdbProxyUrl->setDetailText(out.empty() ? tr("Built-in proxy") : out);
+                updateApiDetail();
+            },
+            tr("Proxy address"), "https://my-worker.workers.dev", 256,
+            config::get().tmdbProxyUrl);
+        return true;
+    });
+    list->addView(tmdbProxyUrl);
+
+    updateApiDetail();
+    tmdbUrl->registerClickAction([tmdbUrl, updateApiDetail](brls::View*) {
+        brls::Application::getImeManager()->openForText(
+            [tmdbUrl, updateApiDetail](std::string out) {
                 while (!out.empty() && (out.back() == ' ' || out.back() == '/')) out.pop_back();
                 config::get().tmdbApiUrl = out;
                 config::save();
-                tmdbUrl->setDetailText(out.empty() ? "api.themoviedb.org" : out);
+                updateApiDetail();
             },
             tr("TMDB API address"), "https://api.themoviedb.org/3", 256,
             config::get().tmdbApiUrl);
@@ -666,9 +713,9 @@ brls::View* networkPane()
     });
     list->addView(tmdbUrl);
     list->addView(caption(
-        tr("The catalog on the Home tab comes from TMDB. A free key is issued at "
-           "themoviedb.org (Settings -> API). Leave the address empty unless you use "
-           "a mirror. Changes apply when you reopen the Home tab.")));
+        tr("The catalog on the Home tab comes from TMDB. The proxy routes API requests "
+           "and posters through Cloudflare Worker or mirror, which allows access in Russia. "
+           "Leave empty to use the built-in proxy. Changes apply when you reopen the Home tab.")));
 
     auto* tmdbTest = new AsyncButton();
     tmdbTest->setText(tr("Test connection"));

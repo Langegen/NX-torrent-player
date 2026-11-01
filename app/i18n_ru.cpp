@@ -652,6 +652,16 @@ const Pair kRu[] = {
     // ---- options: TMDB -------------------------------------------------------
     { "API key", "Ключ API" },
     { "TMDB API key", "Ключ API TMDB" },
+    { "Built-in (default)", "Встроенный (по умолчанию)" },
+    { "TMDB proxy", "Прокси TMDB" },
+    { "Proxy address", "Адрес прокси" },
+    { "Built-in proxy", "Встроенный прокси" },
+    { "The catalog on the Home tab comes from TMDB. The proxy routes API requests "
+      "and posters through Cloudflare Worker or mirror, which allows access in Russia. "
+      "Leave empty to use the built-in proxy. Changes apply when you reopen the Home tab.",
+      "Каталог на вкладке «Главная» берётся из TMDB. Прокси перенаправляет запросы API "
+      "и постеры через Cloudflare Worker или зеркало для работы в РФ. Оставьте "
+      "пустым для встроенного прокси. Изменения применятся, когда вы снова откроете «Главную»." },
     { "API key (v3) or read access token (v4)",
       "Ключ API (v3) или токен доступа (v4)" },
     { "API address", "Адрес API" },

@@ -70,6 +70,12 @@ bundled font off: the app clears it before `Application::init()` when the UI is
 in Russian, since Space Grotesk has no Cyrillic and a label would otherwise mix
 two typefaces.
 
+Without Space Grotesk (turned off, or missing) the system **Standard** font is
+the primary and Simplified Chinese its fallback -- the reverse of stock
+borealis. The Chinese font has Latin and Cyrillic glyphs of its own, set in
+near-square cells, so with it as the primary Russian text had wide gaps between
+the letters. Standard is what the console's own menus use for Russian.
+
 The patch is marked with a `LOCAL PATCH` comment in the source.
 
 ### 5. `library/lib/views/label.cpp` — three-dot ellipsis

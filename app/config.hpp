@@ -145,6 +145,9 @@ struct Config
     std::string tmdbApiKey = "";
     std::string tmdbApiUrl = "";
     std::string tmdbImageUrl = "";
+    std::string tmdbProxyUrl = "";
+    bool tmdbProxyEnabled = false;
+    bool tmdbProxyUserSet = false;
 };
 
 // The live settings. Mutate, then call save().
