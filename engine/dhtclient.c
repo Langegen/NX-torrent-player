@@ -76,13 +76,16 @@ int dht_random_bytes(void *buf, size_t size) {
 // Lookup
 //-----------------------------------------------------------------------------
 
-static const char *BOOTSTRAP[] = {
-    "router.bittorrent.com",
-    "router.utorrent.com",
-    "dht.transmission.com",
-    "dht.libtorrent.org",
+// Each router listens on its own port: dht.libtorrent.org is on 25401, not
+// 6881. With a wrong port or host a router never answers, and on networks
+// where the bittorrent/utorrent routers are unreachable the routing table
+// stayed empty -- DHT found nothing at all.
+static const struct { const char *host, *port; } BOOTSTRAP[] = {
+    { "router.bittorrent.com",  "6881"  },
+    { "router.utorrent.com",    "6881"  },
+    { "dht.transmissionbt.com", "6881"  },
+    { "dht.libtorrent.org",     "25401" },
 };
-#define BOOTSTRAP_PORT "6881"
 
 typedef struct {
     dht_peer_cb cb;
@@ -153,7 +156,8 @@ int dht_find_peers(const uint8_t info_hash[20], int target_peers, int budget_ms,
         struct addrinfo hints = {0}, *res = NULL;
         hints.ai_family = AF_INET;
         hints.ai_socktype = SOCK_DGRAM;
-        if (getaddrinfo(BOOTSTRAP[i], BOOTSTRAP_PORT, &hints, &res) != 0 || !res)
+        if (getaddrinfo(BOOTSTRAP[i].host, BOOTSTRAP[i].port, &hints, &res) != 0 ||
+            !res)
             continue;
         dht_ping_node(res->ai_addr, res->ai_addrlen);
         booted++;

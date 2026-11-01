@@ -46,6 +46,21 @@ void torrentfs_stats(const torrentfs *tfs, int64_t *pieces_done,
 // Number of peers found by the tracker announce.
 int torrentfs_peer_count(const torrentfs *tfs);
 
+// The peer address pool: addresses known, how many could be dialed right now
+// (not in a session, not backing off), how many discovered addresses were
+// discarded because the pool was full, and how many came over peer exchange.
+void torrentfs_pool_stats(const torrentfs *tfs, int *known, int *ready,
+                          int *dropped, int *pex);
+
+// Sessions closed by peer turnover: slow ones that lost a trial window, and
+// ones that kept us choked while another address was waiting.
+void torrentfs_rotation_stats(const torrentfs *tfs, int *slow, int *choked);
+
+// Blocks of the hot piece re-requested from a second peer, and the block bytes
+// that arrived but were no longer needed (the cost of hedging, plus stragglers
+// of abandoned pieces).
+void torrentfs_hedge_stats(const torrentfs *tfs, int *hedged, int64_t *dup_bytes);
+
 // Rough worker diagnostics: conn_ok, conn_fail, unchoke_ok, choked, piece_ok,
 // fetch_fail, sha_fail, blocks_served, interested_recv, request_recv.
 // `out` must have room for 10 ints.

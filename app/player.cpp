@@ -2507,6 +2507,13 @@ void MpvView::updateInfoOverlay()
 
     int peers    = torrentfs_peer_count(tfs);
     int incoming = torrentfs_incoming_count(tfs);
+    int poolReady = 0, poolDropped = 0, poolPex = 0;
+    torrentfs_pool_stats(tfs, nullptr, &poolReady, &poolDropped, &poolPex);
+    int rotSlow = 0, rotChoked = 0;
+    torrentfs_rotation_stats(tfs, &rotSlow, &rotChoked);
+    int hedged = 0;
+    int64_t dupBytes = 0;
+    torrentfs_hedge_stats(tfs, &hedged, &dupBytes);
     int64_t done = 0, total = 0, ph = 0;
     torrentfs_stats(tfs, &done, &total, &ph);
     int pct = total > 0 ? (int)(done * 100 / total) : 0;
@@ -2616,6 +2623,9 @@ void MpvView::updateInfoOverlay()
     std::snprintf(text, sizeof(text),
                   "NETWORK\n"
                   "Peers: %d (+%d incoming)\n"
+                  "pool: %d ready   %d dropped (full)   %d via PEX\n"
+                  "rotated out: %d slow   %d choked\n"
+                  "hedged: %d blocks   wasted: %.1f MB\n"
                   "Speed: %.2f MB/s\n"
                   "Downloaded: %.1f MB\n"
                   "Pieces: %lld / %lld (%d%%)  piece=%lld KB\n"
@@ -2639,7 +2649,10 @@ void MpvView::updateInfoOverlay()
                   "piece ok: %d   fetch fail: %d   sha fail: %d\n"
                   "up: %d blocks (%d interested, %d req)\n"
                   "last err: %s",
-                  peers, incoming, infoSpeed / (1024.0 * 1024.0),
+                  peers, incoming, poolReady, poolDropped, poolPex,
+                  rotSlow, rotChoked,
+                  hedged, (double)dupBytes / (1024.0 * 1024.0),
+                  infoSpeed / (1024.0 * 1024.0),
                   (double)bytes / (1024.0 * 1024.0), (long long)done,
                   (long long)total, pct, (long long)(plen / 1024), buf,
                   live, peak, connecting,

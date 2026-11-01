@@ -19,7 +19,12 @@ enum {
     MSG_REQUEST = 6,
     MSG_PIECE = 7,
     MSG_CANCEL = 8,
+    MSG_EXTENDED = 20,   // BEP 10 extension protocol
 };
+
+// Our local id for ut_pex (BEP 11), advertised in our extended handshake. A
+// peer sends its ut_pex messages to us under THIS id.
+#define UT_PEX_ID 1
 
 // Blocks are the unit of transfer within a piece (16 KiB is the de-facto standard).
 #define BLOCK_LEN (16 * 1024)
@@ -70,6 +75,8 @@ typedef struct {
     bool handshaked;    // peer's 68-byte handshake received and validated
     bool choked;        // peer is choking us -> we cannot request
     bool we_unchoked;   // we have unchoked the peer
+    bool ext_ok;        // peer speaks the extension protocol (BEP 10)
+    uint8_t pex_id;     // the peer's id for ut_pex, 0 = it has none
 
     uint8_t *bitfield;  // which pieces the peer has
     size_t bitfield_len;
@@ -106,7 +113,16 @@ int peer_nb_send_handshake(peer_nb *p, const uint8_t info_hash[20],
 
 // Consume the peer's handshake from rx once it has fully arrived.
 // 1 = handshaked ok, 0 = still waiting, -1 = wrong protocol/info_hash.
+// Sets ext_ok from the peer's reserved bits.
 int peer_nb_recv_handshake(peer_nb *p, const uint8_t info_hash[20]);
+
+// Queue an extension-protocol message (BEP 10): ext_id 0 is the extended
+// handshake, anything else is the RECEIVER's id for that extension.
+int peer_nb_queue_ext(peer_nb *p, uint8_t ext_id, const void *payload,
+                      uint32_t plen);
+
+// Queue our extended handshake, advertising ut_pex under UT_PEX_ID.
+int peer_nb_queue_ext_handshake(peer_nb *p);
 
 // Connect over TCP + handshake + read bitfield. Returns 0 on success.
 int peer_connect(peer_conn *p, peer_addr addr, const uint8_t info_hash[20],
