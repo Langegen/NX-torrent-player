@@ -46,6 +46,12 @@ void torrentfs_stats(const torrentfs *tfs, int64_t *pieces_done,
 // Number of peers found by the tracker announce.
 int torrentfs_peer_count(const torrentfs *tfs);
 
+// The peer address pool: addresses known, how many could be dialed right now
+// (not in a session, not backing off), and how many discovered addresses were
+// discarded because the pool was full.
+void torrentfs_pool_stats(const torrentfs *tfs, int *known, int *ready,
+                          int *dropped);
+
 // Rough worker diagnostics: conn_ok, conn_fail, unchoke_ok, choked, piece_ok,
 // fetch_fail, sha_fail, blocks_served, interested_recv, request_recv.
 // `out` must have room for 10 ints.
