@@ -25,7 +25,9 @@
 #include <borealis/views/header.hpp>
 #include <borealis/views/cells/cell_selector.hpp>
 
+#include <algorithm>
 #include <cctype>
+#include <ctime>
 
 #include "appdata.hpp"
 #include "browse.hpp"  // openEpisodeById, for the next-episode card
@@ -37,6 +39,9 @@
 #include "torrserver.hpp"
 #include "stremio.hpp"  // cached artwork -> blurred background
 #include "theme.hpp"    // muted text for the in-menu hints
+#include "player_widgets.hpp"
+#include "release.hpp"  // episodeOfFile: which episode a file of a pack is
+#include "torrent_play.hpp"  // videoFilesOf, for the episode list
 
 extern "C" {
 #include "torrentfs.h"
@@ -114,9 +119,6 @@ bool audioBoostWanted()
     return config::get().audioBoost
            && appletGetOperationMode() == AppletOperationMode_Handheld;
 }
-
-// Seconds the cursor moves per D-pad press while scrubbing.
-constexpr double kSeekStepSecs = 5.0;
 
 // Analog scrubbing. Rate is (tilt^2) * base, so a light push creeps and a full
 // push flies, then ramps by up to kSeekAccelMax the longer it's held -- an hour
@@ -375,7 +377,7 @@ void MpvView::startEngine(const std::string& source, int fileIndex)
             std::string link = torrServerLink(source, err);
             bool ok = !link.empty() &&
                       torrserver::resolve(base, link, fileIndex, url, err);
-            brls::sync([this, liveFlag, ok, url, err]() {
+            brls::sync([this, liveFlag, ok, url, err, link]() {
                 if (!*liveFlag) return;
                 if (!ok)
                 {
@@ -391,6 +393,8 @@ void MpvView::startEngine(const std::string& source, int fileIndex)
                 if (statusLabel) statusLabel->setText(tr("Connecting..."));
                 if (!startMpv() && statusLabel)
                     statusLabel->setText(tr("Player initialisation failed"));
+                // The torrent's other files, for the episode list.
+                fetchTorrServerPlaylist(link);
             });
         });
         return;
@@ -429,6 +433,20 @@ void MpvView::startEngine(const std::string& source, int fileIndex)
             // metadata resolved, hand the real name back so it can be saved.
             if (g_magnetResolvedHook && source.compare(0, 7, "magnet:") == 0)
                 g_magnetResolvedHook(source, torrentfs_name(t));
+            // The torrent's files: a season pack is its own episode list.
+            {
+                const auto* m = (const torrent_meta*)torrentfs_meta(t);
+                std::vector<PlaylistItem> files;
+                for (int i = 0; i < m->file_count; i++)
+                {
+                    PlaylistItem p;
+                    p.fileIndex = i;
+                    p.path      = m->files[i].path;
+                    p.length    = m->files[i].length;
+                    files.push_back(p);
+                }
+                setPlaylistFiles(files);
+            }
             if (!startMpv() && statusLabel)
                 statusLabel->setText(tr("Player initialisation failed"));
         });
@@ -630,6 +648,11 @@ bool MpvView::startMpv()
 // Controls. Registered from the constructor, not from startMpv: the engine may
 // still be resolving a magnet (or may have failed outright), and B has to work
 // the whole time -- that is the only way out of a stuck load.
+//
+// The player keeps the borealis focus itself and runs its own cursor over the
+// panel (see Btn / Zone), so every direction is an action here: D-pad
+// left/right move through the buttons (or seek, on the timeline or with the
+// panel down), up/down move between the buttons and the timeline.
 void MpvView::registerPlayerActions()
 {
     // Y locks / unlocks every other control for the session (see toggleLock).
@@ -642,14 +665,17 @@ void MpvView::registerPlayerActions()
         },
         false, false, brls::SOUND_CLICK);
 
-    // B returns to the browser.
+    // B steps back out: a seek being aimed, then the panel, then the player.
     this->registerAction(
         tr("Back"), brls::BUTTON_B,
         [this](brls::View*) {
             if (controlsLocked) { flashLock(); return true; }
-            // Scrubbing: B cancels the seek and returns to where playback was,
-            // instead of leaving the stream.
             if (seeking) { cancelSeek(); return true; }
+            if (controlsShown && ready)
+            {
+                setControlsVisible(false);
+                return true;
+            }
             brls::Logger::info("[teardown] B pressed -> popActivity()");
             bool ok = brls::Application::popActivity();
             brls::Logger::info("[teardown] popActivity() returned {}", ok);
@@ -657,49 +683,110 @@ void MpvView::registerPlayerActions()
         },
         false, false, brls::SOUND_BACK);
 
-    // A toggles pause during playback (ignored while still buffering). Tapping the
-    // video does the same (see the gesture in buildLoadingOverlay).
+    // A: does a pending seek, else runs the button under the cursor; with the
+    // panel down it pauses (and brings the panel up) or resumes.
     this->registerAction(
         tr("Pause"), brls::BUTTON_A,
         [this](brls::View*) {
             if (controlsLocked) { flashLock(); return true; }
+            if (!ready || !mpv) return true;
+            // The buttons first: rewind pressed again while its jump is still
+            // pending adds to it rather than doing it.
+            if (controlsShown && zone == Zone::Buttons)
+            {
+                pokeControls();
+                activateButton(focusBtn);
+                return true;
+            }
+            if (seeking)
+            {
+                commitSeek();
+                return true;
+            }
+            if (controlsShown)  // on the timeline
+            {
+                pokeControls();
+                onPlayPause();
+                return true;
+            }
             // While the next-episode card is up and the video is running, A
             // takes it -- that is what the card is asking for and what every
             // other player does. Paused, A still resumes: the card stays put
             // and the tap on it is the way through.
-            if (nextCardShown && !userPaused && !seeking)
+            if (nextCardShown && !userPaused)
             {
-                goToNextEpisode();
+                goToEpisode(+1);
                 return true;
             }
+            focusBtn = BTN_PLAY;
+            zone     = Zone::Buttons;
             onPlayPause();
             return true;
         },
         false, false, brls::SOUND_CLICK);
 
-    // Left/right scrub. The first nudge pauses and pins the cursor to the
-    // current position; further nudges move it. allowRepeating so holding the
-    // stick scrubs continuously. A commits (see the Pause action), B leaves.
-    auto scrub = [this](double delta) {
+    // Left/right. On the buttons they move the cursor; on the timeline, or
+    // with the panel down, they seek in steps (Lampa's rewind): the cursor
+    // jumps 10 s a press, more when held, and the seek happens once they stop.
+    auto horizontal = [this](int dir) {
         if (controlsLocked) { flashLock(); return true; }
-        if (!ready || !mpv)
+        if (!ready || !mpv) return true;
+        if (controlsShown && zone == Zone::Buttons)
+        {
+            moveFocus(dir);
             return true;
-        if (!seeking)
-            beginSeek();
-        seekTarget += delta;
-        if (seekTarget < 0.0) seekTarget = 0.0;
-        if (seekDur > 0.0 && seekTarget > seekDur) seekTarget = seekDur;
+        }
+        stepSeek(dir, true);
         return true;
     };
-
     this->registerAction(
         tr("Seek -"), brls::BUTTON_LEFT,
-        [scrub](brls::View*) { return scrub(-kSeekStepSecs); },
-        false, true, brls::SOUND_NONE);
+        [horizontal](brls::View*) { return horizontal(-1); }, false, true,
+        brls::SOUND_NONE);
     this->registerAction(
         tr("Seek +"), brls::BUTTON_RIGHT,
-        [scrub](brls::View*) { return scrub(kSeekStepSecs); },
-        false, true, brls::SOUND_NONE);
+        [horizontal](brls::View*) { return horizontal(1); }, false, true,
+        brls::SOUND_NONE);
+
+    // Up/down bring the panel up; with it up they move between the timeline
+    // (up) and the buttons (down).
+    auto vertical = [this](int dir) {
+        if (controlsLocked) { flashLock(); return true; }
+        if (!ready || !mpv) return true;
+        if (!controlsShown)
+        {
+            zone = Zone::Buttons;
+            setControlsVisible(true);
+            return true;
+        }
+        pokeControls();
+        if (dir < 0 && zone == Zone::Buttons)
+            setZone(Zone::Timeline);
+        else if (dir > 0 && zone == Zone::Timeline)
+        {
+            if (seeking) commitSeek();
+            setZone(Zone::Buttons);
+        }
+        return true;
+    };
+    this->registerAction(
+        "Up", brls::BUTTON_UP,
+        [vertical](brls::View*) { return vertical(-1); }, false, false,
+        brls::SOUND_NONE);
+    this->registerAction(
+        "Down", brls::BUTTON_DOWN,
+        [vertical](brls::View*) { return vertical(1); }, false, false,
+        brls::SOUND_NONE);
+
+    // The same presses also arrive as borealis' navigation buttons (D-pad and
+    // sticks alike). There is nothing for borealis to navigate to from here,
+    // so swallow them -- otherwise every press shook the hidden highlight and
+    // played the "cannot go there" sound. The stick scrubs on its own, polled
+    // per frame (updateStickSeek).
+    for (auto b : { brls::BUTTON_NAV_UP, brls::BUTTON_NAV_DOWN, brls::BUTTON_NAV_LEFT,
+                    brls::BUTTON_NAV_RIGHT })
+        this->registerAction(
+            "", b, [](brls::View*) { return true; }, true, true, brls::SOUND_NONE);
 
     // L / R step the playback speed. These actions only fire while the player
     // itself has the cursor -- with the settings panel up, focus is inside it
@@ -719,6 +806,16 @@ void MpvView::registerPlayerActions()
         [speedStep](brls::View*) { return speedStep(1); },
         false, false, brls::SOUND_NONE);
 
+    // ZL: the episode list, when the torrent has one.
+    this->registerAction(
+        tr("Episodes"), brls::BUTTON_LT,
+        [this](brls::View*) {
+            if (controlsLocked) { flashLock(); return true; }
+            if (ready && playlist.size() > 1) openEpisodesPanel();
+            return true;
+        },
+        false, false, brls::SOUND_CLICK);
+
     // ZR toggles the network/torrent info panel.
     this->registerAction(
         tr("Info"), brls::BUTTON_RT,
@@ -734,7 +831,7 @@ void MpvView::registerPlayerActions()
         },
         false, false, brls::SOUND_NONE);
 
-    // X opens the audio/subtitle picker for the current video.
+    // X opens the full settings panel for the current video.
     this->registerAction(
         tr("Options"), brls::BUTTON_X,
         [this](brls::View*) {
@@ -749,23 +846,25 @@ void MpvView::setControlsVisible(bool show)
 {
     controlsShown = show;
     brls::Visibility v = show ? brls::Visibility::VISIBLE : brls::Visibility::GONE;
-    if (pauseOverlay) pauseOverlay->setVisibility(v);
-    if (pauseTitleBox) pauseTitleBox->setVisibility(v);
-    if (optionsHint) optionsHint->setVisibility(v);
-    if (seekOverlay) seekOverlay->setVisibility(v);
-    // The centre button draws play vs pause from the live flag itself, so nothing
-    // to update here.
-    // Arm the play-only auto-hide each time the overlay is (re)shown.
+    if (topBar) topBar->setVisibility(v);
+    if (bottomBar) bottomBar->setVisibility(v);
+    // The big centre button is for a paused picture; over a playing one the
+    // row below has the same button.
+    if (pauseOverlay)
+        pauseOverlay->setVisibility(show && userPaused ? brls::Visibility::VISIBLE
+                                                       : brls::Visibility::GONE);
     if (show)
-        controlsHideAt =
-            std::chrono::steady_clock::now() + std::chrono::seconds(4);
-    // The Y-lock pill rides with the pause overlay as a "Y to lock" hint (open
-    // padlock). flashLock is what flips it to the closed padlock while locked.
-    if (lockHint)
     {
-        lockHint->setVisibility(v);
-        if (lockLabel) lockLabel->setText(kGlyphLockOpen);
+        refreshButtons();
+        clockValid = false;  // the clock and "ends at" redo themselves now
+        updateControls();
+        pokeControls();
     }
+}
+
+void MpvView::pokeControls()
+{
+    controlsHideAt = std::chrono::steady_clock::now() + std::chrono::seconds(5);
 }
 
 void MpvView::toggleLock()
@@ -775,9 +874,9 @@ void MpvView::toggleLock()
                        controlsLocked ? "LOCKED" : "unlocked");
     if (controlsLocked)
     {
-        // Locking: leave any scrub/pause state and hide the overlay so the video
+        // Locking: leave any scrub/pause state and hide the panel so the video
         // runs undisturbed. A blocked input then only flashes the lock pill.
-        seeking = false;
+        if (seeking) cancelSeek();
         if (userPaused && mpv)
         {
             mpv_set_property_string(mpv, "pause", "no");
@@ -803,8 +902,8 @@ void MpvView::flashLock()
 
 void MpvView::updateControlsAutoHide()
 {
-    // Only while actually playing (paused keeps the controls up), and not mid-
-    // scrub. A tap that re-shows the overlay pushes controlsHideAt out again.
+    // Only while actually playing (paused keeps the panel up), and not while a
+    // seek is being aimed. Every input on the panel pushes controlsHideAt out.
     if (!controlsShown || userPaused || seeking)
         return;
     if (std::chrono::steady_clock::now() >= controlsHideAt)
@@ -816,61 +915,92 @@ void MpvView::updateLockHint()
     if (!lockFlashActive) return;
     if (std::chrono::steady_clock::now() < lockFlashUntil) return;
     lockFlashActive = false;
-    // Flash over. Hide the pill unless the controls overlay is still up and using
-    // it as the "Y to lock" hint, in which case just restore that label.
-    //
-    // The test is controlsShown, NOT userPaused: the overlay also shows during
-    // playback (it auto-hides after 4s), and testing userPaused made the pill
-    // vanish out from under a visible overlay. That was the touch bug -- unlock by
-    // tapping the pill (which arms a flash), tap the video straight after to bring
-    // the whole overlay up, and ~1.4s later this hid the pill while the rest of
-    // the overlay stayed.
-    if (controlsShown && !controlsLocked)
-    {
-        if (lockLabel) lockLabel->setText(kGlyphLockOpen);
-    }
-    else if (lockHint)
-    {
-        lockHint->setVisibility(brls::Visibility::GONE);
-    }
+    if (lockHint) lockHint->setVisibility(brls::Visibility::GONE);
 }
 
 void MpvView::onPlayPause()
 {
     if (!ready || !mpv)
         return;
-
-    // Commit a scrub: jump there and resume. mpv's seek reaches our stream's
-    // seek_cb, which moves the torrent playhead, so the download window follows.
     if (seeking)
     {
-        seeking = false;
-        char t[32];
-        std::snprintf(t, sizeof(t), "%.3f", seekTarget);
-        const char* cmd[] = { "seek", t, "absolute", nullptr };
-        mpv_command_async(mpv, 0, cmd);
-        userPaused = false;
-        mpv_set_property_string(mpv, "pause", "no");
-        setControlsVisible(false);
+        commitSeek();
         return;
     }
-
     userPaused = !userPaused;
     mpv_set_property_string(mpv, "pause", userPaused ? "yes" : "no");
-    setControlsVisible(userPaused);
+    if (userPaused)
+        setControlsVisible(true);  // paused: the panel stays up
+    else if (controlsShown)
+    {
+        // Resumed from the panel: it stays a moment, then hides itself.
+        if (pauseOverlay) pauseOverlay->setVisibility(brls::Visibility::GONE);
+        pokeControls();
+    }
+}
+
+void MpvView::commitSeek()
+{
+    if (!seeking || !mpv)
+        return;
+    seeking  = false;
+    seekHold = false;
+    char t[32];
+    std::snprintf(t, sizeof(t), "%.3f", seekTarget);
+    const char* cmd[] = { "seek", t, "absolute", nullptr };
+    mpv_command_async(mpv, 0, cmd);
+    obsPos = seekTarget;  // the bar shows the landing at once (obsPos is async)
+    brls::Logger::info("[player] seek -> {}s", (int)seekTarget);
+    // A scrub that paused the picture to aim resumes it; the D-pad steps never
+    // touched the play state, so it stays whatever the user had.
+    if (seekPaused)
+    {
+        userPaused = false;
+        mpv_set_property_string(mpv, "pause", "no");
+    }
+    seekPaused = false;
+    if (controlsShown)
+    {
+        if (pauseOverlay && !userPaused)
+            pauseOverlay->setVisibility(brls::Visibility::GONE);
+        pokeControls();
+    }
 }
 
 void MpvView::cancelSeek()
 {
     if (!seeking)
         return;
-    seeking = false;
-    // No seek was committed while scrubbing, so mpv is still paused on the frame
-    // it started from. Restore what the user had -- playing, or paused with the
-    // overlay -- and take the seek bar down.
-    if (mpv)
+    seeking  = false;
+    seekHold = false;
+    // Nothing was sent to mpv while aiming: put the play state back.
+    if (mpv && seekPaused)
         mpv_set_property_string(mpv, "pause", userPaused ? "yes" : "no");
-    setControlsVisible(userPaused);
+    seekPaused = false;
+    if (controlsShown) pokeControls();
+}
+
+void MpvView::stepSeek(int dir, bool toTimeline)
+{
+    if (!seeking)
+    {
+        beginSeek(false);
+        seekSteps = 0;
+    }
+    seekSteps++;
+    double step = seekSteps <= 6 ? 10.0 : (seekSteps <= 16 ? 30.0 : 60.0);
+    seekTarget += dir * step;
+    if (seekTarget < 0.0) seekTarget = 0.0;
+    if (seekDur > 0.0 && seekTarget > seekDur) seekTarget = seekDur;
+    seekLastInput = std::chrono::steady_clock::now();
+    if (!controlsShown)
+    {
+        if (toTimeline) zone = Zone::Timeline;
+        setControlsVisible(true);
+    }
+    else if (toTimeline && zone != Zone::Timeline)
+        setZone(Zone::Timeline);
+    pokeControls();
 }
 
 void MpvView::seekToFraction(double frac)
@@ -879,18 +1009,85 @@ void MpvView::seekToFraction(double frac)
         return;
     if (frac < 0.0) frac = 0.0;
     if (frac > 1.0) frac = 1.0;
-    double target = frac * obsDur;
-    char t[32];
-    std::snprintf(t, sizeof(t), "%.3f", target);
-    const char* cmd[] = { "seek", t, "absolute", nullptr };
-    mpv_command_async(mpv, 0, cmd);
-    obsPos     = target;   // reflect on the bar now (obsPos is async otherwise)
-    seekTarget = target;
-    // Lifting the finger off a tap/drag resumes playback and takes the bar down.
-    seeking    = false;
-    userPaused = false;
-    mpv_set_property_string(mpv, "pause", "no");
-    setControlsVisible(false);
+    if (!seeking) beginSeek(false);
+    seekTarget = frac * obsDur;
+    commitSeek();
+}
+
+// ---- the panel --------------------------------------------------------------
+
+bool MpvView::buttonAvailable(int b)
+{
+    switch (b)
+    {
+        case BTN_PREV:     return hasPrevEpisode();
+        case BTN_NEXT:     return hasNextEpisode();
+        case BTN_EPISODES: return playlist.size() > 1;
+        default:           return true;
+    }
+}
+
+void MpvView::refreshButtons()
+{
+    if (!buttons[BTN_PLAY]) return;
+    // Previous / next / episodes only show up when there is somewhere to go:
+    // a film's row is just the five it can use.
+    for (int b = 0; b < BTN_COUNT; b++)
+    {
+        auto vis = buttonAvailable(b) ? brls::Visibility::VISIBLE : brls::Visibility::GONE;
+        if (buttons[b]->getVisibility() != vis) buttons[b]->setVisibility(vis);
+    }
+    if (!buttonAvailable(focusBtn)) focusBtn = BTN_PLAY;
+    buttons[BTN_PLAY]->icon = userPaused ? player_ui::Icon::Play : player_ui::Icon::Pause;
+    buttons[BTN_PLAY]->caption = userPaused ? tr("Play") : tr("Pause");
+    buttons[BTN_LOCK]->icon =
+        controlsLocked ? player_ui::Icon::LockClosed : player_ui::Icon::LockOpen;
+    for (int b = 0; b < BTN_COUNT; b++)
+    {
+        buttons[b]->focused     = zone == Zone::Buttons && b == focusBtn;
+        buttons[b]->showCaption = buttons[b]->focused;
+    }
+    if (timeline) timeline->focused = zone == Zone::Timeline;
+}
+
+void MpvView::moveFocus(int dir)
+{
+    pokeControls();
+    for (int b = focusBtn + dir; b >= 0 && b < BTN_COUNT; b += dir)
+        if (buttonAvailable(b))
+        {
+            focusBtn = b;
+            brls::Application::getAudioPlayer()->play(brls::SOUND_FOCUS_CHANGE);
+            refreshButtons();
+            return;
+        }
+}
+
+void MpvView::setZone(Zone z)
+{
+    if (zone != z)
+        brls::Application::getAudioPlayer()->play(brls::SOUND_FOCUS_CHANGE);
+    zone = z;
+    refreshButtons();
+}
+
+void MpvView::activateButton(int b)
+{
+    switch (b)
+    {
+        case BTN_PREV:     goToEpisode(-1); break;
+        case BTN_NEXT:     goToEpisode(+1); break;
+        case BTN_REWIND:   stepSeek(-1, false); break;
+        case BTN_FORWARD:  stepSeek(+1, false); break;
+        case BTN_PLAY:     onPlayPause(); break;
+        case BTN_EPISODES: openEpisodesPanel(); break;
+        case BTN_AUDIO:    openAudioPanel(); break;
+        case BTN_SUBS:     openSubtitlesPanel(); break;
+        case BTN_SETTINGS: openTrackMenu(); break;
+        case BTN_LOCK:     toggleLock(); break;
+        default: break;
+    }
+    refreshButtons();
 }
 
 namespace
@@ -1134,28 +1331,123 @@ void MpvView::updateNextCard()
     if (!nextCard) return;
 
     double left = obsDur - obsPos;
-    bool want   = ready && !ended && !settingsOpen && !watch.nextVideoId.empty()
+    bool want   = ready && !ended && !switching && !settingsOpen && isEpisodic() && hasNextEpisode()
                 && obsDur > 0.0 && left > 0.0 && left <= kNextCardSecs;
+    // Ride above the panel while it is up, so the two never overlap.
+    if (want)
+    {
+        float b = controlsShown ? 250.0f : 70.0f;
+        if (nextCardBottom != b)
+        {
+            nextCardBottom = b;
+            nextCard->setPositionBottom(b);
+        }
+    }
     if (want == nextCardShown) return;
 
     nextCardShown = want;
-    if (want && nextCardSub)
-    {
-        std::string sub = episodeLabelOf(watch.nextVideoId);
-        nextCardSub->setText(sub.empty() ? tr("Up next") : sub);
-    }
+    if (want && nextCardSub) nextCardSub->setText(nextEpisodeLabel());
     nextCard->setVisibility(want ? brls::Visibility::VISIBLE
                                  : brls::Visibility::GONE);
+}
+
+// "Season 1 · Episode 5" (or the file's name) for what "next" would open.
+std::string MpvView::nextEpisodeLabel()
+{
+    if (playlistCur >= 0 && playlistCur + 1 < (int)playlist.size())
+    {
+        const PlaylistItem& p = playlist[(size_t)playlistCur + 1];
+        int s = 0, e = 0;
+        if (release::episodeOfFile(p.path, watch.season, s, e))
+            return tr("Season ") + std::to_string(s) + " \xC2\xB7 " + tr("Episode ") +
+                   std::to_string(e);
+        return p.label;
+    }
+    std::string sub = episodeLabelOf(watch.nextVideoId);
+    if (sub.empty() && watch.content.tmdbId > 0 && watch.season > 0)
+        sub = tr("Season ") + std::to_string(watch.season) + " \xC2\xB7 " + tr("Episode ") +
+              std::to_string(watch.episode + 1);
+    return sub.empty() ? tr("Up next") : sub;
+}
+
+bool MpvView::isEpisodic()
+{
+    return playlistEpisodic || watch.episode > 0 || !watch.nextVideoId.empty() ||
+           !watch.prevVideoId.empty();
+}
+
+bool MpvView::hasNextEpisode()
+{
+    if (playlistCur >= 0 && playlistCur + 1 < (int)playlist.size()) return true;
+    return !watch.nextVideoId.empty();
+}
+
+bool MpvView::hasPrevEpisode()
+{
+    if (playlistCur > 0) return true;
+    if (watch.content.tmdbId > 0) return watch.season > 0 && watch.episode > 1;
+    return !watch.prevVideoId.empty();
+}
+
+// Previous / next: the neighbouring file of the torrent when it has them,
+// otherwise the episode through the catalog or the Stremio series.
+void MpvView::goToEpisode(int dir)
+{
+    if (ended || switching) return;
+    if (playlistCur >= 0)
+    {
+        int j = playlistCur + dir;
+        if (j >= 0 && j < (int)playlist.size())
+        {
+            playPlaylistItem(j);
+            return;
+        }
+    }
+    if (dir > 0)
+    {
+        goToNextEpisode();
+        return;
+    }
+    if (!hasPrevEpisode()) return;
+
+    switching     = true;  // the EOF handler must not pop under the pops below
+    nextCardShown = false;
+    if (nextCard) nextCard->setVisibility(brls::Visibility::GONE);
+
+    if (watch.content.tmdbId > 0)
+    {
+        content::Item item = watch.content;
+        int season = watch.season, episode = watch.episode - 1;
+        int pops   = watch.nextPop;
+        brls::Logger::info("[player] previous episode -> S{}E{} (pop {})", season, episode,
+                           pops);
+        brls::sync([pops, item, season, episode]() {
+            popActivitiesThen(pops, [item, season, episode]() {
+                openNextEpisode(item, season, episode);
+            });
+        });
+        return;
+    }
+
+    std::string authKey = watch.authKey, series = watch.itemId, prev = watch.prevVideoId;
+    PlayerArt showArt   = art;
+    int pops            = watch.endPop;
+    brls::Logger::info("[player] previous episode -> {} (pop {})", prev, pops);
+    brls::sync([pops, authKey, series, prev, showArt]() {
+        popActivitiesThen(pops, [authKey, series, prev, showArt]() {
+            openEpisodeById(authKey, series, prev, showArt);
+        });
+    });
 }
 
 // Leaves the player and opens the next episode's sources. Everything it needs
 // is copied out first: popping frees this view long before the push happens.
 void MpvView::goToNextEpisode()
 {
-    if (ended || watch.nextVideoId.empty()) return;
+    if (ended || switching || watch.nextVideoId.empty()) return;
     // Also stops the EOF handler from popping underneath us if the file runs
     // out while the pops are in flight.
-    ended = true;
+    switching = true;
     nextCardShown = false;
     if (nextCard) nextCard->setVisibility(brls::Visibility::GONE);
 
@@ -1191,6 +1483,157 @@ void MpvView::goToNextEpisode()
     });
 }
 
+// Every file of the torrent -> the episode list: its videos in natural order
+// (samples dropped), and which one is playing. Fewer than two leaves none.
+void MpvView::setPlaylistFiles(const std::vector<PlaylistItem>& files)
+{
+    // What plays when no file was named: the engine's pick, the largest file.
+    int playing = currentFileIndex;
+    if (playing < 0)
+    {
+        int64_t best = -1;
+        for (const auto& f : files)
+            if (f.length > best) { best = f.length; playing = f.fileIndex; }
+    }
+
+    std::vector<VideoFile> in;
+    for (const auto& f : files)
+    {
+        std::string low = f.path;
+        for (auto& c : low) c = (char)std::tolower((unsigned char)c);
+        if (low.find("sample") != std::string::npos && f.fileIndex != playing) continue;
+        VideoFile v;
+        v.index  = f.fileIndex;
+        v.path   = f.path;
+        v.length = f.length;
+        in.push_back(v);
+    }
+    std::vector<VideoFile> vids = videoFilesOf(in);
+
+    playlist.clear();
+    playlistCur      = -1;
+    playlistEpisodic = false;
+    if (vids.size() >= 2)
+    {
+        int eps = 0;
+        for (const auto& v : vids)
+        {
+            PlaylistItem p;
+            p.fileIndex = v.index;
+            p.label     = v.name;
+            p.path      = v.path;
+            p.length    = v.length;
+            if (v.index == playing) playlistCur = (int)playlist.size();
+            int s = 0, e = 0;
+            if (release::episodeOfFile(v.path, watch.season, s, e)) eps++;
+            playlist.push_back(p);
+        }
+        playlistEpisodic = eps >= 2;
+        brls::Logger::info("[player] {} videos in the torrent, playing #{}{}",
+                           playlist.size(), playlistCur,
+                           playlistEpisodic ? " (episodes)" : "");
+    }
+
+    if (barSubtitle && playlistCur >= 0)
+    {
+        barSubtitle->setText(playlist[(size_t)playlistCur].label);
+        barSubtitle->setVisibility(brls::Visibility::VISIBLE);
+    }
+    refreshButtons();
+}
+
+void MpvView::fetchTorrServerPlaylist(const std::string& link)
+{
+    auto live        = this->alive;
+    std::string base = torrserver::base();
+    brls::async([this, live, base, link]() {
+        std::vector<PlaylistItem> items;
+        for (const auto& f : torrserver::listFiles(base, link))
+        {
+            PlaylistItem p;
+            p.fileIndex = f.index;
+            p.path      = f.path;
+            p.length    = f.length;
+            items.push_back(p);
+        }
+        brls::sync([this, live, items]() {
+            if (!*live) return;
+            setPlaylistFiles(items);
+        });
+    });
+}
+
+// Plays another file of the same torrent: the player is replaced by a fresh
+// one on that file, at the same depth in the stack (so B and the end of the
+// episode still return where they did). The watch context follows the file:
+// which episode it is, by its name.
+void MpvView::playPlaylistItem(int i)
+{
+    if (i < 0 || i >= (int)playlist.size() || i == playlistCur || ended || switching) return;
+    const PlaylistItem f = playlist[(size_t)i];
+
+    // The same source: a magnet reopens from the metadata the engine kept when
+    // it first resolved it (torrent_set_meta_cache), so this costs no fetch,
+    // and the history stays keyed on the one source for every episode.
+    std::string src = currentSource;
+
+    WatchInfo w = watch;
+    w.resumeSec = 0.0;
+    w.prevVideoId.clear();
+    w.nextVideoId.clear();
+    std::string title = f.label;
+    w.displayTitle    = f.label;
+
+    int s = 0, e = 0;
+    bool ep = release::episodeOfFile(f.path, watch.season, s, e);
+    // Whether the torrent also has (s, e + d): the Stremio ids of the
+    // neighbours are only made up when there is a file to back them.
+    auto packHas = [this](int season, int episode) {
+        for (const auto& p : playlist)
+        {
+            int ps = 0, pe = 0;
+            if (release::episodeOfFile(p.path, watch.season, ps, pe) && ps == season &&
+                pe == episode)
+                return true;
+        }
+        return false;
+    };
+
+    if (ep && watch.content.tmdbId > 0 && watch.content.isSeries())
+    {
+        PlayHint h = episodeHint(watch.content, s, e, watch.nextPop);
+        w          = h.watch;
+        w.endPop   = watch.endPop;
+        title      = h.title;
+    }
+    else if (ep && !watch.itemId.empty() && watch.type == "series")
+    {
+        auto vid  = [&](int ep2) {
+            return watch.itemId + ":" + std::to_string(s) + ":" + std::to_string(ep2);
+        };
+        w.videoId = vid(e);
+        if (packHas(s, e + 1)) w.nextVideoId = vid(e + 1);
+        if (e > 1 && packHas(s, e - 1)) w.prevVideoId = vid(e - 1);
+        title          = tr("Season ") + std::to_string(s) + " \xC2\xB7 " + tr("Episode ") +
+                         std::to_string(e);
+        w.displayTitle = title;
+    }
+
+    switching     = true;  // the EOF handler must not pop under the swap
+    nextCardShown = false;
+    if (nextCard) nextCard->setVisibility(brls::Visibility::GONE);
+
+    PlayerArt a      = art;
+    std::string type = currentSourceType;
+    int idx          = f.fileIndex;
+    brls::Logger::info("[player] episode list -> file {} ({})", idx, f.label);
+    brls::sync([src, a, title, idx, w, type]() {
+        popActivitiesThen(1, [src, a, title, idx, w, type]() {
+            startPlaybackPrompt(src, a, title, idx, w, type);
+        });
+    });
+}
+
 void MpvView::updatePill()
 {
     if (!pillFlashActive) return;
@@ -1199,92 +1642,159 @@ void MpvView::updatePill()
     if (hintPill) hintPill->setVisibility(brls::Visibility::GONE);
 }
 
-void MpvView::openTrackMenu()
+// Walks mpv's track-list once, splitting audio and subtitle tracks and noting
+// which is selected. Subtitles get an "Off" entry first so the one selector
+// both switches and disables them.
+MpvView::TrackList MpvView::readTracks()
 {
-    if (!ready || !mpv)
-        return;
-
-    // Playback is deliberately NOT paused here any more. The panel leaves the
-    // picture on screen, and every control in it -- the subtitle timing above
-    // all -- can only be judged against moving video. The controls overlay does
-    // come down, though: a play button, a title and a seek bar beside the panel
-    // are clutter over the very frame it exists to let you watch.
-    setControlsVisible(false);
-    settingsOpen = true;
+    TrackList t;
+    t.sLabels = { tr("Off") };
+    t.sIds    = { -1 };
+    if (!mpv) return t;
 
     // Human label for a track: uppercased language, then its title, else "Track N".
-    auto label = [](const std::string& lang, const std::string& title,
-                    int64_t id) {
+    auto label = [](const std::string& lang, const std::string& title, int64_t id) {
         std::string s = lang;
         for (auto& c : s) c = (char)std::toupper((unsigned char)c);
         if (!title.empty()) s += (s.empty() ? "" : " - ") + title;
         if (s.empty()) s = tr("Track ") + std::to_string(id);
-        return s;  // full name kept: the cell truncates/marquees, the dropdown shows it whole
+        return s;  // full name kept: the cell truncates/marquees it
     };
 
-    // Walk mpv's track-list once, splitting audio and subtitle tracks and noting
-    // which is selected. Subtitles get an "Off" entry so the one selector both
-    // switches and disables them.
-    std::vector<std::string> aLabels, sLabels{ tr("Off") };
-    std::vector<int64_t> aIds, sIds{ -1 };
-    int aCur = 0, sCur = 0;  // sCur 0 = Off
-
     mpv_node node;
-    if (mpv_get_property(mpv, "track-list", MPV_FORMAT_NODE, &node) >= 0)
-    {
-        if (node.format == MPV_FORMAT_NODE_ARRAY && node.u.list)
-            for (int i = 0; i < node.u.list->num; i++)
+    if (mpv_get_property(mpv, "track-list", MPV_FORMAT_NODE, &node) < 0) return t;
+    if (node.format == MPV_FORMAT_NODE_ARRAY && node.u.list)
+        for (int i = 0; i < node.u.list->num; i++)
+        {
+            mpv_node& tn = node.u.list->values[i];
+            if (tn.format != MPV_FORMAT_NODE_MAP || !tn.u.list) continue;
+
+            std::string type, lang, title;
+            int64_t id = 0;
+            bool sel   = false;
+            for (int k = 0; k < tn.u.list->num; k++)
             {
-                mpv_node& tn = node.u.list->values[i];
-                if (tn.format != MPV_FORMAT_NODE_MAP || !tn.u.list) continue;
-
-                std::string type, lang, title;
-                int64_t id = 0;
-                bool sel = false;
-                for (int k = 0; k < tn.u.list->num; k++)
-                {
-                    const char* key = tn.u.list->keys[k];
-                    mpv_node& v     = tn.u.list->values[k];
-                    if (!std::strcmp(key, "type") && v.format == MPV_FORMAT_STRING)
-                        type = v.u.string;
-                    else if (!std::strcmp(key, "id") && v.format == MPV_FORMAT_INT64)
-                        id = v.u.int64;
-                    else if (!std::strcmp(key, "lang") && v.format == MPV_FORMAT_STRING)
-                        lang = v.u.string;
-                    else if (!std::strcmp(key, "title") && v.format == MPV_FORMAT_STRING)
-                        title = v.u.string;
-                    else if (!std::strcmp(key, "selected") && v.format == MPV_FORMAT_FLAG)
-                        sel = v.u.flag;
-                }
-
-                if (type == "audio")
-                {
-                    if (sel) aCur = (int)aIds.size();
-                    aLabels.push_back(label(lang, title, id));
-                    aIds.push_back(id);
-                }
-                else if (type == "sub")
-                {
-                    if (sel) sCur = (int)sIds.size();
-                    sLabels.push_back(label(lang, title, id));
-                    sIds.push_back(id);
-                }
+                const char* key = tn.u.list->keys[k];
+                mpv_node& v     = tn.u.list->values[k];
+                if (!std::strcmp(key, "type") && v.format == MPV_FORMAT_STRING)
+                    type = v.u.string;
+                else if (!std::strcmp(key, "id") && v.format == MPV_FORMAT_INT64)
+                    id = v.u.int64;
+                else if (!std::strcmp(key, "lang") && v.format == MPV_FORMAT_STRING)
+                    lang = v.u.string;
+                else if (!std::strcmp(key, "title") && v.format == MPV_FORMAT_STRING)
+                    title = v.u.string;
+                else if (!std::strcmp(key, "selected") && v.format == MPV_FORMAT_FLAG)
+                    sel = v.u.flag;
             }
-        mpv_free_node_contents(&node);
+
+            if (type == "audio")
+            {
+                if (sel) t.aCur = (int)t.aIds.size();
+                t.aLabels.push_back(label(lang, title, id));
+                t.aIds.push_back(id);
+            }
+            else if (type == "sub")
+            {
+                if (sel) t.sCur = (int)t.sIds.size();
+                t.sLabels.push_back(label(lang, title, id));
+                t.sIds.push_back(id);
+            }
+        }
+    mpv_free_node_contents(&node);
+    return t;
+}
+
+// ---- subtitles: one list, wherever they come from --------------------------
+// The tracks muxed into the file and the ones the account's Stremio subtitle
+// addons offer are the same choice to whoever is watching, so they are one
+// list. What differs is only what picking costs: an mpv track switches
+// instantly, an addon entry is fetched first (loadOnlineSub) and then joins
+// the track list -- which is why a loaded one is skipped in the addon section
+// rather than being listed twice.
+void MpvView::subtitleChoices(const TrackList& t, std::vector<SubPick>& picks,
+                              std::vector<std::string>& labels, int& cur)
+{
+    constexpr int64_t kNoteSid = -2;
+    picks.clear();
+    labels.clear();
+    cur = 0;
+
+    for (size_t i = 0; i < t.sIds.size(); i++)
+    {
+        picks.push_back({ t.sIds[i], -1 });
+        labels.push_back(t.sLabels[i]);
+        if ((int)i == t.sCur) cur = (int)labels.size() - 1;
     }
 
-    // ---- the panel ------------------------------------------------------
-    // A right-hand panel rather than the centred dialog this used to be. Every
-    // control here changes something you can only judge by looking at the
-    // picture -- a subtitle's size, its timing, which track is playing -- and a
-    // box in the middle of the screen covers exactly what you need to see.
+    // The addon ones we have not pulled yet. A loaded one is already an mpv
+    // track above, carrying the title and language sub-add was given.
+    for (size_t i = 0; i < onlineSubs.size(); i++)
+    {
+        if (loadedSubs.count((int)i)) continue;
+        std::string l = config::langLabelFor(onlineSubs[i].lang);
+        if (l.empty()) l = tr("Unknown");
+        if (!onlineSubs[i].addon.empty()) l += " - " + onlineSubs[i].addon;
+        picks.push_back({ -1, (int)i });
+        labels.push_back(l);
+    }
+
+    // A last, inert entry when the lookup has something to say for itself.
+    // Picking it does nothing -- it is there so an empty-looking list is
+    // explained rather than just empty.
+    const char* note = nullptr;
+    if (watch.authKey.empty() || watch.videoId.empty())
+        note = nullptr;  // local torrent: no addons were ever in play
+    else if (onlineSubState == SubFetch::Busy || onlineSubState == SubFetch::Idle)
+        note = tr("Searching addons...");
+    else if (onlineSubState == SubFetch::Failed)
+        note = tr("Addons unavailable");
+    if (note)
+    {
+        picks.push_back({ kNoteSid, -1 });
+        labels.push_back(note);
+    }
+}
+
+void MpvView::applySubPick(const SubPick& p)
+{
+    if (!mpv || p.sid == -2) return;  // the status entry: not a choice
+    if (p.sub >= 0)
+    {
+        loadOnlineSub(p.sub);
+        return;
+    }
+    if (p.sid < 0)
+    {
+        mpv_set_property_string(mpv, "sid", "no");
+        return;
+    }
+    char v[24];
+    std::snprintf(v, sizeof(v), "%lld", (long long)p.sid);
+    mpv_set_property_string(mpv, "sid", v);
+}
+
+namespace
+{
+const std::vector<std::string>& videoSizeLabels()
+{
+    static const std::vector<std::string> l = { tr("Default"), tr("Fill the screen"),
+                                                tr("Stretch"), tr("Zoom 115%"),
+                                                tr("Zoom 130%") };
+    return l;
+}
+
+// The side panel's frame: the clear rest of the screen (a tap there closes
+// it), the panel itself with its title, and a scrolling column for the rows.
+// B closes it from anywhere inside.
+brls::Box* sidePanel(const std::string& titleText, brls::Box* content,
+                     brls::Box*& panelOut, float width)
+{
     auto* root = new brls::Box();
     root->setAxis(brls::Axis::ROW);
     root->setJustifyContent(brls::JustifyContent::FLEX_END);
     root->setGrow(1.0f);
 
-    // The uncovered part of the frame. Not a scrim -- it is left clear on
-    // purpose -- but it is what a tap outside the panel lands on.
     auto* rest = new brls::Box();
     rest->setGrow(1.0f);
     rest->setHeightPercentage(100.0f);
@@ -1294,7 +1804,7 @@ void MpvView::openTrackMenu()
 
     auto* panel = new brls::Box();
     panel->setAxis(brls::Axis::COLUMN);
-    panel->setWidth(kPanelW);
+    panel->setWidth(width);
     panel->setHeightPercentage(100.0f);
     panel->setPadding(40.0f, 32.0f, 24.0f, 32.0f);
     // Near-opaque: this sits over moving video, and anything lighter makes
@@ -1303,8 +1813,6 @@ void MpvView::openTrackMenu()
                                                : nvgRGBA(18, 18, 22, 238));
     root->addView(panel);
 
-    // B closes it. Registered on the panel, and actions bubble from the focused
-    // cell up the parents, so it works wherever the cursor is inside.
     panel->registerAction(
         tr("Close"), brls::BUTTON_B,
         [](brls::View*) {
@@ -1314,23 +1822,196 @@ void MpvView::openTrackMenu()
         false, false, brls::SOUND_BACK);
 
     auto* title = new brls::Label();
-    title->setText(tr("Playback"));
+    title->setText(titleText);
     title->setFontSize(28.0f);
     title->setTextColor(theme::text());
     title->setMarginBottom(4.0f);
     panel->addView(title);
 
-    // Everything below scrolls: the subtitle section grows by three rows the
-    // moment a file has subtitles, and at the 100% UI size that is already most
-    // of the panel's height.
     auto* scroll = new brls::ScrollingFrame();
     scroll->setGrow(1.0f);
     // CENTERED, like every other list in the app: one cell per press.
     scroll->setScrollingBehavior(brls::ScrollingBehavior::CENTERED);
-    auto* content = new brls::Box();
     content->setAxis(brls::Axis::COLUMN);
     scroll->setContentView(content);
     panel->addView(scroll);
+    panelOut = panel;
+    return root;
+}
+
+// A column that hands the first focus to a chosen row (the current choice)
+// rather than to its first one, so a picker opens on what is playing.
+class PreferFocusBox : public brls::Box
+{
+  public:
+    brls::View* preferred = nullptr;
+    brls::View* getDefaultFocus() override
+    {
+        if (preferred)
+            if (brls::View* f = preferred->getDefaultFocus()) return f;
+        return brls::Box::getDefaultFocus();
+    }
+};
+} // namespace
+
+void MpvView::applyVideoSize(int mode)
+{
+    if (!mpv) return;
+    videoSize = mode;
+    // Back to neutral first, then the one change the mode is.
+    mpv_set_property_string(mpv, "panscan", "0");
+    mpv_set_property_string(mpv, "video-zoom", "0");
+    mpv_set_property_string(mpv, "video-aspect-override", "no");
+    switch (mode)
+    {
+        case 1:  // fill: crop the bars away
+            mpv_set_property_string(mpv, "panscan", "1.0");
+            break;
+        case 2:  // stretch: the picture takes the screen's own shape
+            mpv_set_property_string(mpv, "video-aspect-override", "16:9");
+            break;
+        case 3:  // video-zoom is log2 of the scale
+            mpv_set_property_string(mpv, "video-zoom", "0.2016");
+            break;
+        case 4:
+            mpv_set_property_string(mpv, "video-zoom", "0.3785");
+            break;
+        default:
+            break;
+    }
+}
+
+void MpvView::openChoicePanel(const std::string& titleText,
+                              const std::vector<std::string>& labels,
+                              const std::vector<std::string>& details, int current,
+                              std::function<void(int)> onPick)
+{
+    controlsBeforePanel = controlsShown;
+    setControlsVisible(false);
+    settingsOpen = true;
+
+    brls::Box* panel = nullptr;
+    auto* content    = new PreferFocusBox();
+    auto* root       = sidePanel(titleText, content, panel, 520.0f);
+
+    auto pick = std::make_shared<std::function<void(int)>>(std::move(onPick));
+    for (size_t i = 0; i < labels.size(); i++)
+    {
+        auto* cell = new brls::DetailCell();
+        cell->title->setSingleLine(true);
+        cell->setText(((int)i == current ? "\xE2\x97\x8F  " : "     ") + labels[i]);
+        if ((int)i == current) cell->setTextColor(theme::accentText());
+        std::string d = i < details.size() ? details[i] : "";
+        cell->setDetailText(d);
+        cell->setDetailTextColor(theme::textMuted());
+        int idx = (int)i;
+        cell->registerClickAction([pick, idx](brls::View*) {
+            auto p = pick;  // the pop frees the cell, and this lambda with it
+            brls::Application::popActivity(brls::TransitionAnimation::FADE,
+                                           [p, idx]() { (*p)(idx); });
+            return true;
+        });
+        content->addView(cell);
+        if ((int)i == current) content->preferred = cell;
+    }
+    if (labels.empty())
+    {
+        auto* cell = new brls::DetailCell();
+        cell->setText(tr("None"));
+        cell->setFocusable(true);
+        content->addView(cell);
+    }
+
+    auto liveFlag = this->alive;
+    brls::Application::pushActivity(new PlayerSettingsActivity(root, [this, liveFlag]() {
+        if (!*liveFlag) return;
+        settingsOpen = false;
+        if (controlsBeforePanel) setControlsVisible(true);
+    }));
+}
+
+void MpvView::openAudioPanel()
+{
+    if (!ready || !mpv) return;
+    TrackList t = readTracks();
+    std::vector<int64_t> ids = t.aIds;
+    auto live = this->alive;
+    openChoicePanel(tr("Audio track"), t.aLabels, {}, t.aCur, [this, live, ids](int sel) {
+        if (!*live || !mpv || sel < 0 || sel >= (int)ids.size()) return;
+        char v[24];
+        std::snprintf(v, sizeof(v), "%lld", (long long)ids[(size_t)sel]);
+        mpv_set_property_string(mpv, "aid", v);
+    });
+}
+
+void MpvView::openSubtitlesPanel()
+{
+    if (!ready || !mpv) return;
+    TrackList t = readTracks();
+    std::vector<SubPick> picks;
+    std::vector<std::string> labels;
+    int cur = 0;
+    subtitleChoices(t, picks, labels, cur);
+    auto live = this->alive;
+    openChoicePanel(tr("Subtitles"), labels, {}, cur, [this, live, picks](int sel) {
+        if (!*live || sel < 0 || sel >= (int)picks.size()) return;
+        applySubPick(picks[(size_t)sel]);
+    });
+}
+
+void MpvView::openEpisodesPanel()
+{
+    if (!ready || playlist.size() < 2) return;
+    std::vector<std::string> labels, details;
+    for (size_t i = 0; i < playlist.size(); i++)
+    {
+        const PlaylistItem& p = playlist[i];
+        labels.push_back(p.label);
+        // Where each one stands, from the watch history: done, or where it
+        // was left.
+        std::string d;
+        if ((int)i == playlistCur)
+            d = tr("Now playing");
+        else
+        {
+            history::Item h;
+            if (history::find(currentSource, p.fileIndex, "", h) ||
+                history::find(currentSource, p.fileIndex, watch.videoId, h))
+            {
+                if (h.completed)
+                    d = tr("Watched");
+                else if (h.positionSec >= 15.0)
+                    d = fmtTime(h.positionSec);
+            }
+        }
+        details.push_back(d);
+    }
+    auto live = this->alive;
+    openChoicePanel(tr("Episodes"), labels, details, playlistCur, [this, live](int sel) {
+        if (!*live) return;
+        playPlaylistItem(sel);
+    });
+}
+
+void MpvView::openTrackMenu()
+{
+    if (!ready || !mpv)
+        return;
+
+    // Playback is deliberately NOT paused here. The panel leaves the picture
+    // on screen, and every control in it -- the subtitle timing above all --
+    // can only be judged against moving video. The control panel does come
+    // down, though: it would be clutter over the very frame this exists to
+    // let you watch.
+    controlsBeforePanel = controlsShown;
+    setControlsVisible(false);
+    settingsOpen = true;
+
+    TrackList tracks = readTracks();
+
+    brls::Box* panel   = nullptr;
+    auto* content      = new brls::Box();
+    auto* root         = sidePanel(tr("Playback"), content, panel, kPanelW);
 
     // The index whose value sits closest to `x`: these are doubles read back from
     // mpv, so matching them by equality would fail on the first rounding.
@@ -1361,10 +2042,11 @@ void MpvView::openTrackMenu()
 
     // Always show the track, even when there is only one -- it tells you what
     // is playing (language/title).
-    if (!aLabels.empty())
+    if (!tracks.aLabels.empty())
     {
         auto* a = new TrackCell();
-        a->init(tr("Track"), aLabels, aCur, [this, aIds](int sel) {
+        std::vector<int64_t> aIds = tracks.aIds;
+        a->init(tr("Track"), tracks.aLabels, tracks.aCur, [this, aIds](int sel) {
             char v[24];
             std::snprintf(v, sizeof(v), "%lld", (long long)aIds[sel]);
             mpv_set_property_string(mpv, "aid", v);
@@ -1385,84 +2067,29 @@ void MpvView::openTrackMenu()
         content->addView(sp);
     }
 
+    content->addView(panelSection(tr("VIDEO"), 18.0f));
+
+    // Video size (Lampa's "Размер видео"): how the picture meets the screen.
+    {
+        auto* vs = new brls::SelectorCell();
+        vs->init(tr("Video size"), videoSizeLabels(), videoSize,
+                 [this](int sel) { applyVideoSize(sel); });
+        content->addView(vs);
+    }
+
     content->addView(panelSection(tr("SUBTITLES"), 18.0f));
 
-    // ---- subtitles: one list, wherever they come from --------------------
-    // The tracks muxed into the file and the ones the account's Stremio
-    // subtitle addons offer are the same choice to whoever is watching, so they
-    // are one selector. What differs is only what picking costs: an mpv track
-    // switches instantly, an addon entry is fetched first (loadOnlineSub) and
-    // then joins the track list -- which is why a loaded one is skipped in the
-    // addon section below rather than being listed twice.
     {
-        // Whether each entry is an mpv track or an addon subtitle to fetch.
-        // sub >= 0 indexes onlineSubs; otherwise sid is the mpv track, -1 for
-        // "Off" and -2 for the inert status entry at the end.
-        struct Pick
-        {
-            int64_t sid = -1;
-            int sub     = -1;
-        };
-        constexpr int64_t kNoteSid = -2;
-        std::vector<Pick> picks;
+        std::vector<SubPick> picks;
         std::vector<std::string> labels;
         int cur = 0;
-
-        for (size_t i = 0; i < sIds.size(); i++)
-        {
-            picks.push_back({ sIds[i], -1 });
-            labels.push_back(sLabels[i]);
-            if ((int)i == sCur) cur = (int)labels.size() - 1;
-        }
-
-        // The addon ones we have not pulled yet. A loaded one is already an
-        // mpv track above, carrying the title and language sub-add was given.
-        for (size_t i = 0; i < onlineSubs.size(); i++)
-        {
-            if (loadedSubs.count((int)i)) continue;
-            std::string l = config::langLabelFor(onlineSubs[i].lang);
-            if (l.empty()) l = tr("Unknown");
-            if (!onlineSubs[i].addon.empty()) l += " - " + onlineSubs[i].addon;
-            picks.push_back({ -1, (int)i });
-            labels.push_back(l);
-        }
-
-        // A last, inert entry when the lookup has something to say for itself.
-        // Picking it does nothing -- it is there so an empty-looking list is
-        // explained rather than just empty.
-        const char* note = nullptr;
-        if (watch.authKey.empty() || watch.videoId.empty())
-            note = nullptr;  // local torrent: no addons were ever in play
-        else if (onlineSubState == SubFetch::Busy ||
-                 onlineSubState == SubFetch::Idle)
-            note = tr("Searching addons...");
-        else if (onlineSubState == SubFetch::Failed)
-            note = tr("Addons unavailable");
-        if (note)
-        {
-            picks.push_back({ kNoteSid, -1 });
-            labels.push_back(note);
-        }
+        subtitleChoices(tracks, picks, labels, cur);
 
         if (labels.size() > 1)  // something besides "Off"
         {
             auto* s = new TrackCell();
             s->init(tr("Subtitles"), labels, cur, [this, picks](int sel) {
-                const Pick& p = picks[(size_t)sel];
-                if (p.sid == kNoteSid) return;  // the status entry: not a choice
-                if (p.sub >= 0)
-                {
-                    loadOnlineSub(p.sub);
-                    return;
-                }
-                if (p.sid < 0)
-                {
-                    mpv_set_property_string(mpv, "sid", "no");
-                    return;
-                }
-                char v[24];
-                std::snprintf(v, sizeof(v), "%lld", (long long)p.sid);
-                mpv_set_property_string(mpv, "sid", v);
+                applySubPick(picks[(size_t)sel]);
             });
             content->addView(s);
         }
@@ -1474,12 +2101,14 @@ void MpvView::openTrackMenu()
         }
     }
 
+    bool anySubs = tracks.sIds.size() > 1 || !onlineSubs.empty();
+
     // Subtitle size, as a percentage of the size the app configures at startup
     // (sub-font-size): sub-scale multiplies it, so 100% is that baseline rather
     // than mpv's own default. Only offered when there is something to scale --
     // including a subtitle only an addon has yet, since picking it is one step
     // away in the row above.
-    if (sIds.size() > 1 || !onlineSubs.empty())
+    if (anySubs)
     {
         const std::vector<double> scales = { 0.75, 0.9, 1.0, 1.15, 1.3, 1.5 };
         auto* z = new brls::SelectorCell();
@@ -1492,10 +2121,8 @@ void MpvView::openTrackMenu()
 
     // Subtitle timing. Offered whenever there is any subtitle to shift --
     // including one just pulled from an addon, which is where a release that
-    // does not match the rip usually comes from. Finer steps near zero: that is
-    // where the answer almost always is, and a 21-entry list of even steps is
-    // worse to walk than an uneven one that puts the useful values up front.
-    if (sIds.size() > 1 || !onlineSubs.empty())
+    // does not match the rip usually comes from.
+    if (anySubs)
     {
         // A readout, not a dropdown. L/R step it by 0.1 s while the panel is
         // open, so the figure is very often not one of a preset list -- and a
@@ -1545,9 +2172,9 @@ void MpvView::openTrackMenu()
             if (!*liveFlag) return;
             settingsOpen = false;
             subDelaySink = nullptr;  // the row it fed is about to be freed
-            // Back to whatever the overlay was doing: up while paused, and up
-            // mid-scrub too -- that is where the seek bar lives.
-            setControlsVisible(userPaused || seeking);
+            // Back to what the panel was doing: up if it was (or while paused,
+            // where it lives).
+            if (controlsBeforePanel || userPaused || seeking) setControlsVisible(true);
         }));
 }
 
@@ -1659,8 +2286,21 @@ void MpvView::pumpEvents()
                     openFailed = true;
                     break;
                 }
-                if (ef && ef->reason == MPV_END_FILE_REASON_EOF && !ended)
+                if (ef && ef->reason == MPV_END_FILE_REASON_EOF && !ended && !switching)
                 {
+                    // An episode with one after it goes on to it, as Lampa
+                    // does: the next file of the pack plays straight away, or
+                    // the next episode's page / sources come up.
+                    if (isEpisodic() && hasNextEpisode())
+                    {
+                        brls::Logger::info("[mpv event] EOF -> next episode");
+                        goToEpisode(+1);
+                        if (switching)
+                        {
+                            ended = true;  // played to the end: it is finished
+                            break;
+                        }
+                    }
                     ended   = true;
                     int pops = watch.endPop;
                     brls::Logger::info("[mpv event] EOF -> pop {}", pops);
@@ -1936,35 +2576,8 @@ void MpvView::buildLoadingOverlay(const std::string& title)
     }
     this->addView(pauseOverlay);
 
-    // Title, top-left, shown alongside the pause icon. Semi-transparent pill so
-    // it reads over any frame.
-    pauseTitleBox = new brls::Box();
-    pauseTitleBox->setPositionType(brls::PositionType::ABSOLUTE);
-    pauseTitleBox->setPositionTop(48.0f);
-    pauseTitleBox->setPositionLeft(60.0f);
-    pauseTitleBox->setPadding(12.0f, 22.0f, 12.0f, 22.0f);
-    pauseTitleBox->setCornerRadius(8.0f);
-    pauseTitleBox->setBackgroundColor(nvgRGBA(0, 0, 0, 140));
-    pauseTitleBox->setVisibility(brls::Visibility::GONE);
-    {
-        auto* tl = new brls::Label();
-        tl->setText(pauseTitle);
-        tl->setFontSize(26.0f);
-        tl->setTextColor(nvgRGB(255, 255, 255));
-        tl->setSingleLine(true);
-        // Cap the width so a long title is cut with an ellipsis instead of
-        // running across the screen into the top-right hints. Shortened to clear
-        // the wider top-right cluster (Options + the Y-lock hint). Short titles
-        // keep their natural width (the pill shrinks to fit).
-        tl->setMaxWidth(760.0f);
-        pauseTitleBox->addView(tl);
-    }
-    this->addView(pauseTitleBox);
-
-    // Top-right cluster shown while paused: the Options hint, then the Y-lock
-    // hint at the far right. Right-anchored so they stay together against the
-    // edge, and each pill toggles its own visibility (the lock one also flashes
-    // on a blocked input) without the other moving.
+    // Top-right: the padlock pill, flashed when the lock is toggled and when an
+    // input is blocked by it (the panel's own lock button is the hint now).
     auto* topRight = new brls::Box();
     topRight->setPositionType(brls::PositionType::ABSOLUTE);
     topRight->setPositionTop(48.0f);
@@ -1973,45 +2586,10 @@ void MpvView::buildLoadingOverlay(const std::string& title)
     topRight->setAlignItems(brls::AlignItems::CENTER);
     this->addView(topRight);
 
-    // The X button glyph + a gear: X opens the audio/subtitle options. Same
-    // show/hide as the pause overlays. Nudged left of the Y-lock pill.
-    optionsHint = new brls::Box();
-    // Fixed height (not content-driven): keeps both pills the same thickness and
-    // stops the cluster from reflowing -- and the lock pill from jumping a pixel
-    // -- when Options is hidden on lock. Vertical space comes from centring.
-    optionsHint->setHeight(56.0f);
-    optionsHint->setPadding(4.0f, 20.0f, 0.0f, 20.0f);
-    optionsHint->setMarginRight(16.0f);
-    optionsHint->setCornerRadius(8.0f);
-    optionsHint->setBackgroundColor(nvgRGBA(0, 0, 0, 140));
-    optionsHint->setAxis(brls::Axis::ROW);
-    optionsHint->setAlignItems(brls::AlignItems::CENTER);
-    optionsHint->setVisibility(brls::Visibility::GONE);
-    {
-        auto* x = new brls::Label();
-        x->setText("");  // borealis font: the X button glyph
-        x->setFontSize(26.0f);
-        x->setTextColor(nvgRGB(255, 255, 255));
-        x->setMargins(0.0f, 12.0f, 0.0f, 0.0f);
-        optionsHint->addView(x);
-
-        // Gear from the Material Icons font bundled in romfs (settings glyph).
-        auto* gear = new brls::Label();
-        gear->setText("");
-        gear->setFontSize(26.0f);
-        gear->setTextColor(nvgRGB(255, 255, 255));
-        // Nudge it down a touch: the Material gear glyph sits high in its box and
-        // otherwise does not line up with the X button glyph next to it.
-        gear->setMargins(5.0f, 0.0f, 0.0f, 0.0f);
-        optionsHint->addView(gear);
-    }
-    topRight->addView(optionsHint);
-
-    // The Y button glyph + "Lock": a hint that Y locks the controls while paused,
-    // and the indicator that flashes when a blocked input is attempted (its label
-    // then reads "Locked", see flashLock). Far right of the cluster.
+    // The Y button glyph + a padlock: closed while locked, open on unlocking
+    // (see flashLock).
     lockHint = new brls::Box();
-    lockHint->setHeight(56.0f);  // match optionsHint exactly (see the note there)
+    lockHint->setHeight(56.0f);
     lockHint->setPadding(4.0f, 20.0f, 0.0f, 20.0f);
     lockHint->setCornerRadius(8.0f);
     lockHint->setBackgroundColor(nvgRGBA(0, 0, 0, 140));
@@ -2122,141 +2700,28 @@ void MpvView::buildLoadingOverlay(const std::string& title)
     nextCard->addGestureRecognizer(
         new brls::TapGestureRecognizer(nextCard, [this]() {
             if (controlsLocked) { flashLock(); return; }
-            goToNextEpisode();
+            goToEpisode(+1);
         }));
     this->addView(nextCard);
 
-    // Seek bar at the bottom while paused: elapsed | progress | total.
-    seekOverlay = new brls::Box();
-    seekOverlay->setAxis(brls::Axis::ROW);
-    seekOverlay->setAlignItems(brls::AlignItems::CENTER);
-    seekOverlay->setPositionType(brls::PositionType::ABSOLUTE);
-    seekOverlay->setPositionLeft(70.0f);
-    seekOverlay->setPositionRight(70.0f);
-    seekOverlay->setPositionBottom(56.0f);
-    seekOverlay->setHeight(64.0f);
-    seekOverlay->setPadding(0, 26, 0, 26);
-    seekOverlay->setCornerRadius(10.0f);
-    seekOverlay->setBackgroundColor(nvgRGBA(0, 0, 0, 165));
-    seekOverlay->setVisibility(brls::Visibility::GONE);
-
-    // Fixed width, or the bar jitters: a Label sizes to its text, the track
-    // grows into whatever is left, so every "9:59" -> "10:00" widened the label
-    // and shoved the track a few pixels. While scrubbing the timer changes
-    // constantly, which made the whole bar shiver. Wide enough for "H:MM:SS".
-    seekCur = new brls::Label();
-    seekCur->setText("0:00");
-    seekCur->setFontSize(22);
-    seekCur->setTextColor(nvgRGB(255, 255, 255));
-    seekCur->setWidth(104.0f);
-    seekCur->setHorizontalAlign(brls::HorizontalAlign::RIGHT);
-    seekCur->setMargins(0, 20, 0, 0);
-    seekOverlay->addView(seekCur);
-
-    seekTrack = new brls::Box();
-    seekTrack->setAxis(brls::Axis::ROW);
-    seekTrack->setAlignItems(brls::AlignItems::CENTER);
-    seekTrack->setGrow(1.0f);
-    seekTrack->setHeight(8.0f);
-    seekTrack->setCornerRadius(4.0f);
-    seekTrack->setBackgroundColor(nvgRGBA(255, 255, 255, 45));
-
-    seekFill = new brls::Box();
-    seekFill->setHeight(8.0f);
-    seekFill->setWidth(0.0f);  // driven in pixels from the measured track width
-    seekFill->setCornerRadius(4.0f);
-    seekFill->setBackgroundColor(theme.getColor("brls/accent"));
-    seekTrack->addView(seekFill);
-
-    // Cursor: absolutely positioned, so it is NOT part of the row's flex flow.
-    // As a normal child it sat next to the fill and competed for width, so the
-    // fill got squeezed by the cursor's 6 px and could never reach 100% -- the
-    // cursor visibly pushed the bar instead of riding on it. Its left offset is
-    // driven from the same percentage as the fill (see updateSeekBar).
-    seekCursor = new brls::Box();
-    seekCursor->setPositionType(brls::PositionType::ABSOLUTE);
-    seekCursor->setPositionLeft(0.0f);
-    seekCursor->setDimensions(6.0f, 26.0f);
-    seekCursor->setCornerRadius(3.0f);
-    seekCursor->setBackgroundColor(nvgRGB(255, 255, 255));
-    seekTrack->addView(seekCursor);
-
-    seekOverlay->addView(seekTrack);
-
-    seekTotal = new brls::Label();
-    seekTotal->setText("0:00");
-    seekTotal->setFontSize(22);
-    seekTotal->setTextColor(nvgRGB(255, 255, 255));
-    seekTotal->setWidth(104.0f);  // fixed for the same reason as seekCur
-    seekTotal->setHorizontalAlign(brls::HorizontalAlign::LEFT);
-    seekTotal->setMargins(0, 0, 0, 20);
-    seekOverlay->addView(seekTotal);
-    this->addView(seekOverlay);
+    // The control panel: title bar + timeline + buttons (see buildControls).
+    buildControls();
 
     // --- Touch controls --------------------------------------------------
-    // Tap the video to show/hide the controls overlay. Taps on the children below
-    // (centre play/pause button, seek bar, Options / lock hints) interrupt this
-    // one -- borealis lets a child gesture win over its ancestor -- so they act on
-    // their own areas instead of toggling the overlay.
+    // Tap the video to show/hide the panel. Taps on the children (the buttons,
+    // the timeline, the centre play button, the lock pill) interrupt this one
+    // -- borealis lets a child gesture win over its ancestor -- so they act on
+    // their own areas instead of toggling the panel.
     this->addGestureRecognizer(
         new brls::TapGestureRecognizer(this, [this]() {
             if (controlsLocked) { flashLock(); return; }
-            // A tap on the video shows/hides the controls overlay -- it does NOT
-            // play/pause (that is the centre button now).
             if (ready) setControlsVisible(!controlsShown);
         }));
 
-    // Tap anywhere along the seek bar to jump there: map the tap's x within the
-    // measured track to a fraction of the duration.
-    seekOverlay->addGestureRecognizer(new brls::TapGestureRecognizer(
-        [this](brls::TapGestureStatus status, brls::Sound*) {
-            if (controlsLocked) { flashLock(); return; }
-            if (status.state != brls::GestureState::END || !seekTrack)
-                return;
-            float w = seekTrack->getWidth();
-            if (w > 0.0f)
-                seekToFraction((status.position.x - seekTrack->getX()) / w);
-        }));
-
-    // Drag along the seek bar to scrub: the cursor/target follows the finger
-    // live (updateSeekBar draws it while `seeking`), and the seek is committed on
-    // release -- one seek instead of one per pixel.
-    seekOverlay->addGestureRecognizer(new brls::PanGestureRecognizer(
-        [this](brls::PanGestureStatus status, brls::Sound*) {
-            if (controlsLocked) { flashLock(); return; }
-            if (!ready || !mpv || !seekTrack || obsDur <= 0.0)
-                return;
-            float w = seekTrack->getWidth();
-            if (w <= 0.0f)
-                return;
-            double frac = (status.position.x - seekTrack->getX()) / w;
-            if (frac < 0.0) frac = 0.0;
-            if (frac > 1.0) frac = 1.0;
-            if (status.state == brls::GestureState::END)
-                seekToFraction(frac);  // commit there, resume, hide the bar
-            else  // START / STAY: track the finger
-            {
-                // Pause and capture the start position, like the stick/button
-                // scrub -- without this the video kept playing under the preview
-                // seeks and the two fought (jumpy playback while dragging).
-                if (!seeking) beginSeek();
-                seekTarget = frac * seekDur;
-                setControlsVisible(true);
-            }
-        },
-        brls::PanAxis::HORIZONTAL));
-
-    // Tap the "Options" hint (top-right, shown while paused) for the track menu.
-    if (optionsHint)
-        optionsHint->addGestureRecognizer(new brls::TapGestureRecognizer(
-            optionsHint, [this]() {
-                if (controlsLocked) { flashLock(); return; }
-                openTrackMenu();
-            }));
-
-    // Tap the Y-lock pill to toggle the lock -- like the Y button, and NOT gated,
-    // so a tap on it is the way to unlock by touch too. (While locked and idle the
-    // pill is hidden; a tap on the video flashes it, and a tap on it then unlocks.)
+    // Tap the padlock pill to toggle the lock -- like the Y button, and NOT
+    // gated, so a tap on it is the way to unlock by touch too. (While locked
+    // and idle the pill is hidden; a tap on the video flashes it, and a tap on
+    // it then unlocks.)
     if (lockHint)
         lockHint->addGestureRecognizer(
             new brls::TapGestureRecognizer(lockHint, [this]() { toggleLock(); }));
@@ -3009,19 +3474,29 @@ void MpvView::maybeUpdateHistory(bool force)
                                 currentSourceType);
 }
 
-// Enter scrub mode: pause and pin the cursor to where playback currently is.
-void MpvView::beginSeek()
+// Start aiming a seek: the cursor starts where playback is. The stick and a
+// drag also pause the picture while they aim (`pause`); D-pad steps do not.
+void MpvView::beginSeek(bool pause)
 {
     seeking = true;
     // Async-observed values: even this one-shot must not block the UI thread
     // if the user scrubs during an mpv hiccup.
     seekDur    = obsDur;
     seekTarget = obsPos;
-    mpv_set_property_string(mpv, "pause", "yes");
-    if (pauseOverlay) pauseOverlay->setVisibility(brls::Visibility::VISIBLE);
-    if (seekOverlay) seekOverlay->setVisibility(brls::Visibility::VISIBLE);
+    seekPaused = pause;
+    if (pause && mpv) mpv_set_property_string(mpv, "pause", "yes");
     seekHeld       = 0.0;
     seekFrameValid = false;
+    seekLastInput  = std::chrono::steady_clock::now();
+}
+
+// The seek happens once the input has stopped for a moment: a run of D-pad
+// presses, a stick sweep, is one seek at the end rather than one per step.
+void MpvView::updateSeekCommit()
+{
+    if (!seeking || seekHold) return;
+    auto idle = std::chrono::steady_clock::now() - seekLastInput;
+    if (idle >= std::chrono::milliseconds(seekPaused ? 1200 : 900)) commitSeek();
 }
 
 // Analog scrubbing, driven every frame from the stick's X axis rather than from
@@ -3031,9 +3506,9 @@ void MpvView::updateStickSeek()
 {
     if (!ready || !mpv)
         return;
-    // The settings panel has the cursor, but the stick is polled straight off
-    // the controller rather than routed through focus -- so without this it
-    // would go on scrubbing the video from under an open menu.
+    // A side panel has the cursor, but the stick is polled straight off the
+    // controller rather than routed through focus -- so without this it would
+    // go on scrubbing the video from under an open menu.
     if (settingsOpen)
         return;
 
@@ -3047,11 +3522,9 @@ void MpvView::updateStickSeek()
 
     bool pushed = x <= -kStickDeadzone || x >= kStickDeadzone;
 
-    // Locked: the stick is a blocked input like any other, so it flashes the pill
-    // -- which it used to skip entirely, since the lock check sat above the axis
-    // read. Once per push, not once per frame: every other control flashes on a
-    // press, and re-arming the timer every frame would pin the pill on screen for
-    // as long as the stick is held.
+    // Locked: the stick is a blocked input like any other, so it flashes the
+    // pill. Once per push, not once per frame: re-arming the timer every frame
+    // would pin the pill on screen for as long as the stick is held.
     if (controlsLocked)
     {
         if (pushed && !stickWasPushed) flashLock();
@@ -3075,7 +3548,21 @@ void MpvView::updateStickSeek()
     }
 
     if (!seeking)
-        beginSeek();
+    {
+        beginSeek(true);
+        seekFrameValid = true;
+        seekLastFrame  = now;
+    }
+    // The timeline is where the stick works: put the cursor there with it.
+    if (!controlsShown)
+    {
+        zone = Zone::Timeline;
+        setControlsVisible(true);
+    }
+    else if (zone != Zone::Timeline)
+        setZone(Zone::Timeline);
+    pokeControls();
+    seekLastInput = now;  // held: no commit yet
 
     seekHeld += dt;
     double ramp = 1.0 + (kSeekAccelMax - 1.0) *
@@ -3089,54 +3576,275 @@ void MpvView::updateStickSeek()
     if (seekDur > 0.0 && seekTarget > seekDur) seekTarget = seekDur;
 }
 
-void MpvView::updateSeekBar()
+namespace
 {
-    if (!seekOverlay || !mpv)
-        return;
-    // Async-observed (pumpEvents): the seek bar refreshes every frame and
-    // must never block on the mpv core.
-    double pos = obsPos, dur = obsDur;
+// setText relayouts, and these are refreshed every frame: only on a change.
+void setIfChanged(brls::Label* l, const std::string& s)
+{
+    if (l && l->getFullText() != s) l->setText(s);
+}
+} // namespace
 
-    if (seeking && seekDur > 0.0)
-        dur = seekDur;
+void MpvView::buildControls()
+{
+    const NVGcolor white = nvgRGB(255, 255, 255);
+    const NVGcolor dim   = nvgRGB(196, 196, 202);
 
-    // Two different things, so two different values -- driving both from one
-    // number made the played-progress bar jump around with the stick, claiming
-    // we had watched up to wherever the cursor happened to point.
-    //   fill   = what has actually been played (time-pos). Paused while
-    //            scrubbing, so it correctly stays put.
-    //   cursor = where the scrub is aiming; equals playback when not scrubbing.
-    double cursorAt = seeking ? seekTarget : pos;
-
-    auto frac = [dur](double t) {
-        if (dur <= 0.0) return 0.0f;
-        float f = (float)(t / dur);
-        return f < 0.0f ? 0.0f : (f > 1.0f ? 1.0f : f);
-    };
-
-    // The timer follows the cursor: while scrubbing it is the target time that
-    // matters, not the frozen playback clock.
-    seekCur->setText(fmtTime(cursorAt));
-    seekTotal->setText(fmtTime(dur));
-
-    // Place both in pixels off the same measured width. As percentages they
-    // drifted apart the further along the bar you got: yoga resolves a child's
-    // width% against the parent's content box but an absolute child's left%
-    // against its padding box, so the two scales diverge and the fill ran past
-    // the cursor. One width, one unit, no room to disagree.
-    float trackW = seekTrack ? seekTrack->getWidth() : 0.0f;
-    if (trackW <= 0.0f)
-        return;  // not laid out yet; next frame will have it
-
-    float cw = seekCursor ? seekCursor->getWidth() : 0.0f;
-    seekFill->setWidth(trackW * frac(pos));
-    if (seekCursor)
+    // ---- top: title (+ episode / file) on the left, clock on the right ----
+    auto* top = new player_ui::Shade(true, 210);
+    top->setPositionType(brls::PositionType::ABSOLUTE);
+    top->setPositionTop(0.0f);
+    top->setPositionLeft(0.0f);
+    top->setWidthPercentage(100.0f);
+    top->setHeight(160.0f);
+    top->setAxis(brls::Axis::ROW);
+    top->setAlignItems(brls::AlignItems::FLEX_START);
+    top->setPadding(36.0f, 60.0f, 0.0f, 60.0f);
+    top->setVisibility(brls::Visibility::GONE);
     {
-        // Keep the cursor inside the track at both ends rather than hanging off.
-        float x = trackW * frac(cursorAt) - cw / 2.0f;
-        if (x < 0.0f) x = 0.0f;
-        if (x > trackW - cw) x = trackW - cw;
-        seekCursor->setPositionLeft(x);
+        auto* left = new brls::Box();
+        left->setAxis(brls::Axis::COLUMN);
+        left->setGrow(1.0f);
+        left->setShrink(1.0f);
+        left->setMarginRight(30.0f);
+
+        barTitle = new brls::Label();
+        barTitle->setText(pauseTitle);
+        barTitle->setFontSize(28.0f);
+        barTitle->setTextColor(white);
+        barTitle->setSingleLine(true);
+        barTitle->setMaxWidth(900.0f);
+        left->addView(barTitle);
+
+        // The episode, or the file of the pack that is playing.
+        barSubtitle = new brls::Label();
+        std::string sub = episodeLabelOf(watch.videoId);
+        if (sub.empty() && watch.content.tmdbId > 0 && watch.season > 0 && watch.episode > 0)
+            sub = tr("Season ") + std::to_string(watch.season) + " \xC2\xB7 " +
+                  tr("Episode ") + std::to_string(watch.episode);
+        barSubtitle->setText(sub);
+        barSubtitle->setFontSize(18.0f);
+        barSubtitle->setTextColor(dim);
+        barSubtitle->setSingleLine(true);
+        barSubtitle->setMaxWidth(900.0f);
+        barSubtitle->setMarginTop(6.0f);
+        barSubtitle->setVisibility(sub.empty() ? brls::Visibility::GONE
+                                               : brls::Visibility::VISIBLE);
+        left->addView(barSubtitle);
+        top->addView(left);
+
+        auto* right = new brls::Box();
+        right->setAxis(brls::Axis::COLUMN);
+        right->setAlignItems(brls::AlignItems::FLEX_END);
+
+        barClock = new brls::Label();
+        barClock->setText("");
+        barClock->setFontSize(28.0f);
+        barClock->setTextColor(white);
+        barClock->setHorizontalAlign(brls::HorizontalAlign::RIGHT);
+        right->addView(barClock);
+
+        barEnds = new brls::Label();
+        barEnds->setText("");
+        barEnds->setFontSize(17.0f);
+        barEnds->setTextColor(dim);
+        barEnds->setHorizontalAlign(brls::HorizontalAlign::RIGHT);
+        barEnds->setMarginTop(6.0f);
+        right->addView(barEnds);
+        top->addView(right);
+    }
+    this->addView(top);
+    topBar = top;
+
+    // ---- bottom: the timeline over the row of buttons ---------------------
+    auto* bot = new player_ui::Shade(false, 225);
+    bot->setPositionType(brls::PositionType::ABSOLUTE);
+    bot->setPositionBottom(0.0f);
+    bot->setPositionLeft(0.0f);
+    bot->setWidthPercentage(100.0f);
+    bot->setHeight(236.0f);
+    bot->setAxis(brls::Axis::COLUMN);
+    bot->setJustifyContent(brls::JustifyContent::FLEX_END);
+    bot->setPadding(0.0f, 60.0f, 28.0f, 60.0f);
+    bot->setVisibility(brls::Visibility::GONE);
+
+    auto* timeRow = new brls::Box();
+    timeRow->setAxis(brls::Axis::ROW);
+    timeRow->setAlignItems(brls::AlignItems::CENTER);
+    timeRow->setHeight(44.0f);
+    timeRow->setMarginBottom(28.0f);
+    {
+        // Fixed widths, or the bar jitters: a Label sizes to its text, so every
+        // "9:59" -> "10:00" would shove the track a few pixels.
+        timeCur = new brls::Label();
+        timeCur->setText("0:00");
+        timeCur->setFontSize(21.0f);
+        timeCur->setTextColor(white);
+        timeCur->setWidth(100.0f);
+        timeCur->setHorizontalAlign(brls::HorizontalAlign::LEFT);
+        timeRow->addView(timeCur);
+
+        timeline = new player_ui::Timeline();
+        timeline->setMargins(0.0f, 16.0f, 0.0f, 16.0f);
+        timeRow->addView(timeline);
+
+        timeTotal = new brls::Label();
+        timeTotal->setText("0:00");
+        timeTotal->setFontSize(21.0f);
+        timeTotal->setTextColor(white);
+        timeTotal->setWidth(100.0f);
+        timeTotal->setHorizontalAlign(brls::HorizontalAlign::RIGHT);
+        timeRow->addView(timeTotal);
+    }
+    bot->addView(timeRow);
+
+    auto* btnRow = new brls::Box();
+    btnRow->setAxis(brls::Axis::ROW);
+    btnRow->setAlignItems(brls::AlignItems::CENTER);
+    btnRow->setHeight(76.0f);
+    {
+        auto* leftGroup = new brls::Box();
+        leftGroup->setAxis(brls::Axis::ROW);
+        leftGroup->setAlignItems(brls::AlignItems::CENTER);
+        leftGroup->setMarginLeft(-6.0f);  // the first disc's edge on the inset
+
+        auto* spacer = new brls::Box();
+        spacer->setGrow(1.0f);
+
+        auto* rightGroup = new brls::Box();
+        rightGroup->setAxis(brls::Axis::ROW);
+        rightGroup->setAlignItems(brls::AlignItems::CENTER);
+        rightGroup->setMarginRight(-6.0f);
+
+        struct Def
+        {
+            int id;
+            player_ui::Icon icon;
+            const char* caption;
+            float size;
+        };
+        const Def defs[BTN_COUNT] = {
+            { BTN_PREV, player_ui::Icon::Prev, tr("Previous episode"), 60.0f },
+            { BTN_REWIND, player_ui::Icon::Rewind, tr("Rewind"), 60.0f },
+            { BTN_PLAY, player_ui::Icon::Pause, tr("Pause"), 72.0f },
+            { BTN_FORWARD, player_ui::Icon::Forward, tr("Forward"), 60.0f },
+            { BTN_NEXT, player_ui::Icon::Next, tr("Next episode"), 60.0f },
+            { BTN_EPISODES, player_ui::Icon::Episodes, tr("Episodes"), 60.0f },
+            { BTN_AUDIO, player_ui::Icon::Audio, tr("Audio track"), 60.0f },
+            { BTN_SUBS, player_ui::Icon::Subtitles, tr("Subtitles"), 60.0f },
+            { BTN_SETTINGS, player_ui::Icon::Settings, tr("Settings"), 60.0f },
+            { BTN_LOCK, player_ui::Icon::LockOpen, tr("Lock"), 60.0f },
+        };
+        for (const Def& d : defs)
+        {
+            auto* b = new player_ui::Button(d.icon, d.caption, d.size);
+            int id  = d.id;
+            b->addGestureRecognizer(new brls::TapGestureRecognizer(b, [this, id]() {
+                if (controlsLocked && id != BTN_LOCK) { flashLock(); return; }
+                focusBtn = id;
+                zone     = Zone::Buttons;
+                pokeControls();
+                activateButton(id);
+            }));
+            buttons[id] = b;
+            (id <= BTN_NEXT ? leftGroup : rightGroup)->addView(b);
+        }
+        btnRow->addView(leftGroup);
+        btnRow->addView(spacer);
+        btnRow->addView(rightGroup);
+    }
+    bot->addView(btnRow);
+    this->addView(bot);
+    bottomBar = bot;
+
+    // Tap the timeline to jump there; drag along it to aim, the seek is done
+    // on release -- one seek instead of one per pixel.
+    timeRow->addGestureRecognizer(new brls::TapGestureRecognizer(
+        [this](brls::TapGestureStatus status, brls::Sound*) {
+            if (controlsLocked) { flashLock(); return; }
+            if (status.state != brls::GestureState::END || !timeline) return;
+            seekToFraction(timeline->fractionAt(status.position.x));
+        }));
+    timeRow->addGestureRecognizer(new brls::PanGestureRecognizer(
+        [this](brls::PanGestureStatus status, brls::Sound*) {
+            if (controlsLocked) { flashLock(); return; }
+            if (!ready || !mpv || !timeline || obsDur <= 0.0) return;
+            double frac = timeline->fractionAt(status.position.x);
+            if (status.state == brls::GestureState::END)
+            {
+                seekHold = false;
+                seekToFraction(frac);
+                return;
+            }
+            if (status.state == brls::GestureState::FAILED ||
+                status.state == brls::GestureState::INTERRUPTED)
+            {
+                seekHold = false;  // let go some other way: the timer does it
+                return;
+            }
+            // Pause while aiming, like the stick -- without it the video kept
+            // playing under the preview and the two fought.
+            if (!seeking) beginSeek(true);
+            seekHold   = true;
+            seekTarget = frac * seekDur;
+            zone       = Zone::Timeline;
+            if (!controlsShown) setControlsVisible(true);
+            refreshButtons();
+            pokeControls();
+        },
+        brls::PanAxis::HORIZONTAL));
+
+    refreshButtons();
+}
+
+// Per frame while the panel is up: the timeline, the times, the clock.
+void MpvView::updateControls()
+{
+    if (!controlsShown || !timeline) return;
+
+    // Async-observed (pumpEvents): this runs every frame and must never block
+    // on the mpv core.
+    double pos = obsPos, dur = obsDur;
+    if (seeking && seekDur > 0.0) dur = seekDur;
+
+    timeline->duration = dur;
+    timeline->position = pos;
+    timeline->buffered = pos + (obsCacheSecs > 0.0 ? obsCacheSecs : 0.0);
+    timeline->cursor   = seekTarget;
+    timeline->seeking  = seeking;
+
+    // The time on the left follows the cursor while aiming: the target is what
+    // matters then, not the frozen playback clock.
+    setIfChanged(timeCur, fmtTime(seeking ? seekTarget : pos));
+    setIfChanged(timeTotal, fmtTime(dur));
+
+    if (buttons[BTN_PLAY])
+    {
+        player_ui::Icon want = userPaused ? player_ui::Icon::Play : player_ui::Icon::Pause;
+        if (buttons[BTN_PLAY]->icon != want) refreshButtons();
+    }
+
+    // The clock, and when the film will end at this speed: once a second.
+    auto now = std::chrono::steady_clock::now();
+    if (clockValid && now - clockLast < std::chrono::seconds(1)) return;
+    clockValid = true;
+    clockLast  = now;
+    std::time_t t = std::time(nullptr);
+    char buf[64];
+    if (std::tm* tm = std::localtime(&t))
+    {
+        std::strftime(buf, sizeof(buf), "%H:%M", tm);
+        setIfChanged(barClock, buf);
+    }
+    if (obsDur > 0.0 && obsPos >= 0.0)
+    {
+        double speed = playSpeed > 0.0 ? playSpeed : 1.0;
+        std::time_t end = t + (std::time_t)((obsDur - obsPos) / speed);
+        if (std::tm* tm = std::localtime(&end))
+        {
+            std::strftime(buf, sizeof(buf), "%H:%M", tm);
+            setIfChanged(barEnds, std::string(tr("Ends at ")) + buf);
+        }
     }
 }
 
@@ -3252,9 +3960,9 @@ void MpvView::draw(NVGcontext* vg, float x, float y, float width, float height,
         updateBufferIndicator();
     if (ready)
         updateStickSeek();  // must run every frame: the stick is an axis, not an event
-    if (controlsShown || seeking)
-        updateSeekBar();
-    updateControlsAutoHide();  // hide the overlay after a few seconds of playback
+    updateSeekCommit();    // a seek that has been aimed, once input stops
+    updateControls();      // the panel's timeline, times and clock
+    updateControlsAutoHide();  // hide the panel after a few seconds of playback
     updateLockHint();  // fades the lock flash out after its moment
     updatePill();          // ... and the L/R readout after its own
     updateNextCard();      // "next episode", over the last seconds

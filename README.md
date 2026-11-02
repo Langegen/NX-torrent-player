@@ -52,7 +52,7 @@ Whether you stream through **Stremio** catalogs and addons, search across dozens
 - **True Sequential Streaming** — Starts playing almost immediately; the engine streams ahead of the playhead and automatically re-centers when you seek.
 - **Stremio Integration** — Sign in with your Stremio account to browse your library, catalogs, addons, Cinemeta descriptions, and BitTorrent streams.
 - **Local Torrents & Magnets** — Drop `.torrent` files into `/switch/NX-torrent-player/torrents/` or add magnet links via the on-screen keyboard or `magnet.txt`.
-- **Advanced Player** — Built on `mpv` with hardware acceleration, audio/subtitle track selection (including Stremio external subtitles), analog scrubbing (thumbsticks), playback speed controls, and handheld audio boost.
+- **Advanced Player** — Built on `mpv` with a Lampa-style control panel navigated with the D-pad (previous / next episode, rewind, audio, subtitles, settings), the episodes of a season pack as a playlist, autoplay of the next episode, video size modes (fill, stretch, zoom), hardware acceleration, Stremio external subtitles, analog scrubbing, playback speed controls, and handheld audio boost.
 - **Console-Native UI** — Built with `borealis`, providing a fast, responsive Nintendo Switch Horizon-style interface with full controller and touchscreen support.
 
 ---
@@ -102,7 +102,12 @@ Whether you stream through **Stremio** catalogs and addons, search across dozens
 | **X** | Stremio | Toggle library membership / Clear "Continue Watching" tile |
 | **Y** | Local / History | Delete `.torrent` or remove entry from list / history |
 | **Y** | Jackett | Save `.torrent` or magnet to Local library |
+| **D-pad** | Player | Panel up: move between the buttons (left / right), the timeline (up) and back (down). Panel down: left / right seek 10 s a press (more when held), up / down bring the panel up |
+| **A** | Player | Run the focused button; with the panel down, pause / resume |
+| **B** | Player | Hide the panel; pressed again, leave the player |
+| **X** | Player | Settings panel: audio, speed, video size, subtitles, subtitle size and delay |
 | **Y** | Player | Lock controls (prevent accidental inputs during playback) |
+| **ZL** | Player | Episode list (the videos of a season pack) |
 | **L / R** | Browser | Cycle Stremio view / filters |
 | **L / R** | Player | Adjust playback speed (or adjust subtitle delay in track menu) |
 | **Left / Right Stick** | Player | Smooth analog scrubbing (seek backward / forward) |

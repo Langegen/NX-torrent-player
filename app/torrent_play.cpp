@@ -22,13 +22,7 @@ extern "C" {
 namespace
 {
 
-struct VideoFileInfo
-{
-    int index;
-    std::string name;  // picker label (folder added when names repeat)
-    std::string path;  // the path inside the torrent
-    int64_t length;
-};
+using VideoFileInfo = VideoFile;
 
 bool isVideoExtension(const std::string& path)
 {
@@ -48,22 +42,16 @@ bool isVideoExtension(const std::string& path)
 // The video files of a loaded torrent, sorted naturally by their labels.
 std::vector<VideoFileInfo> videosOf(const torrent_meta* m)
 {
-    std::vector<int> idx;
-    std::vector<std::string> paths;
+    std::vector<VideoFile> all;
     for (int i = 0; i < m->file_count; i++)
     {
-        if (!isVideoExtension(m->files[i].path)) continue;
-        idx.push_back(i);
-        paths.push_back(m->files[i].path);
+        VideoFile f;
+        f.index  = i;
+        f.path   = m->files[i].path;
+        f.length = m->files[i].length;
+        all.push_back(f);
     }
-    std::vector<std::string> names = pickerNames(paths);
-    std::vector<VideoFileInfo> out;
-    for (size_t k = 0; k < idx.size(); k++)
-        out.push_back({ idx[k], names[k], paths[k], m->files[idx[k]].length });
-    std::sort(out.begin(), out.end(), [](const VideoFileInfo& a, const VideoFileInfo& b) {
-        return naturalCompare(a.name, b.name);
-    });
-    return out;
+    return videoFilesOf(all);
 }
 
 std::vector<VideoFileInfo> parseTorrentVideos(const std::string& path)
@@ -249,6 +237,30 @@ void resolveMagnet(const std::shared_ptr<Job>& job, const std::string& magnet)
 }
 
 } // namespace
+
+std::vector<VideoFile> videoFilesOf(const std::vector<VideoFile>& files)
+{
+    std::vector<const VideoFile*> vids;
+    std::vector<std::string> paths;
+    for (const auto& f : files)
+    {
+        if (!isVideoExtension(f.path)) continue;
+        vids.push_back(&f);
+        paths.push_back(f.path);
+    }
+    std::vector<std::string> names = pickerNames(paths);
+    std::vector<VideoFile> out;
+    for (size_t k = 0; k < vids.size(); k++)
+    {
+        VideoFile v = *vids[k];
+        v.name      = names[k];
+        out.push_back(v);
+    }
+    std::sort(out.begin(), out.end(), [](const VideoFile& a, const VideoFile& b) {
+        return naturalCompare(a.name, b.name);
+    });
+    return out;
+}
 
 void playMagnet(const std::string& magnet, const PlayHint& hint)
 {

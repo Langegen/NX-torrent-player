@@ -36,7 +36,10 @@ rewrites the container paths.
 ## Architecture
 
 - `app/` — the UI (C++, borealis): `main` (browser/tabs), `player` (mpv view +
-  loading screen + seek; torrents, direct http(s) links, TorrServer), `stremio`
+  loading screen + the Lampa-style control panel + the episode list, which is
+  the video files of a season pack; torrents, direct http(s) links,
+  TorrServer), `player_widgets` (the panel's nanovg buttons, timeline and
+  shades), `stremio`
   (API, library, artwork), `browse` (the Stremio drill-down), `settings`,
   `config` (config.json), `http` (curl + proxy), `torrserver`, `i18n` (+
   `i18n_ru.cpp`, one table per language), `home` (the TMDB home tab), `card`
@@ -84,6 +87,14 @@ The entry point is `int main()` in `app/main.cpp`.
   non-focusable view is a **no-op** — which strands `Application::currentFocus`
   on whatever it was, including freed views. See `setSubtreeFocusable()` and the
   focus parking in `StremioTab::onAuthenticated`.
+- The **player's control panel does not use borealis focus**: `MpvView` keeps
+  the focus and moves its own cursor (`Btn` / `Zone`), every D-pad direction is
+  an action on it, and the `BUTTON_NAV_*` twins are swallowed. Its icons are
+  drawn with nanovg (`player_widgets`): the Material glyphs a player needs sit
+  in U+E000-E152, which the Nintendo shared font claims first.
+- Magnet metadata is cached in `APPDATA_META` (`torrent_set_meta_cache`): a
+  magnet opened again loads its `.torrent` from there, with no peers handed
+  on — the engine's own discovery finds them.
 - The Switch outputs stereo: mpv is forced to `audio-channels=stereo` or 5.1
   dialogue (centre channel) is lost.
 - The portlibs **FFmpeg has no `https` protocol** (only file, http, ftp, tcp,

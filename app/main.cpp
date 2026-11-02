@@ -171,6 +171,7 @@ void ensureAppDataDir()
     mkdir(APPDATA_TORRENTS, 0777); // where the user drops .torrent files
     mkdir(APPDATA_POSTERS, 0777);  // cached Stremio artwork
     mkdir(APPDATA_SUBS, 0777);     // subtitles pulled from Stremio addons
+    mkdir(APPDATA_META, 0777);     // fetched magnet metadata, as .torrent files
 
     // Seed magnet.txt so the user has a file to edit from a PC (and knows the
     // format). Only when it does not exist yet -- never clobber their list.
@@ -1876,6 +1877,9 @@ int main(int argc, char* argv[])
 #endif
 
     ensureAppDataDir();
+    // A magnet opened again (the next episode of a pack, a resume) loads its
+    // metadata from here instead of asking peers for it.
+    torrent_set_meta_cache(APPDATA_META);
 #ifdef __SWITCH__
     // https:// playback verifies against the same bundle as the app's own
     // requests (app/http.cpp): the console mounts no CA store.

@@ -186,6 +186,11 @@ int torrentfs_active_pieces(const torrentfs *tfs, int64_t *idx, int *have,
 // The torrent's name, for display. Never NULL.
 const char *torrentfs_name(const torrentfs *tfs);
 
+// The parsed torrent (file list, info hash), for the player's episode list.
+// Owned by the engine: valid until torrentfs_close. Opaque here so this header
+// stays free of torrent.h; cast to const torrent_meta *.
+const void *torrentfs_meta(const torrentfs *tfs);
+
 // Last piece-fetch failure reason, for diagnostics.
 void torrentfs_last_err(const torrentfs *tfs, char *buf, size_t len);
 

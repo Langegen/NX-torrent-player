@@ -47,6 +47,16 @@ typedef struct {
 // Load and parse a .torrent file. Returns 0 on success.
 int torrent_load(torrent_meta *t, const char *path, char *err, size_t errlen);
 
+// Write `t` out as a .torrent file (its info dict verbatim, so the info hash
+// is unchanged, plus its trackers). Returns 0 on success.
+int torrent_save(const torrent_meta *t, const char *path);
+
+// A folder to keep fetched magnet metadata in, as "<info hash>.torrent": a
+// magnet opened again (the next episode of a pack, a resume) then loads from
+// there at once instead of asking peers for the metadata. NULL or "" (the
+// default) keeps nothing. Set once, before any magnet is opened.
+void torrent_set_meta_cache(const char *dir);
+
 // Load from a magnet: URI — parses it, announces to its trackers to find peers,
 // fetches the metadata from a peer (BEP 9), then builds the meta. Returns 0.
 // Progress of a magnet's metadata fetch. It walks the swarm's peers serially

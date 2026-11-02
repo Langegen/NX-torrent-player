@@ -40,3 +40,7 @@
 // Watch history and saved playback positions.
 #define APPDATA_HISTORY  APPDATA_DIR "/history.json"
 
+// Magnet metadata, once fetched from peers, kept as "<info hash>.torrent"
+// (torrent_set_meta_cache): the magnet opened again -- the next episode of a
+// pack, a resume -- loads from it at once instead of asking peers again.
+#define APPDATA_META     APPDATA_DIR "/meta"
