@@ -1,61 +1,35 @@
 #include "history_tab.hpp"
 
 #include <algorithm>
-#include <ctime>
-#include <iomanip>
 #include <memory>
-#include <sstream>
+#include <set>
+#include <string>
 #include <vector>
 
 #include <borealis.hpp>
 
+#include "card.hpp"
 #include "history.hpp"
 #include "i18n.hpp"
+#include "library.hpp"
 #include "player.hpp"
 #include "theme.hpp"
+#include "widgets.hpp"
+
+// The History tab: what was watched, as the things themselves rather than the
+// files. Films and series (played from their card) come first as posters --
+// A opens the card, where "Continue from 42:10" and each episode's progress
+// are. Below them, everything played without a card (a magnet typed in, a
+// local file, a Jackett-tab result, Stremio) as before: the file, its
+// progress, A to play it again.
 
 namespace
 {
 
-class HistoryProgressBar : public brls::Box
-{
-  public:
-    explicit HistoryProgressBar(float progress) : progress(std::clamp(progress, 0.0f, 1.0f))
-    {
-        this->setHeight(4.0f);
-        this->setCornerRadius(2.0f);
-        this->setBackgroundColor(theme::scrim(30));
-    }
-
-    void draw(NVGcontext* vg, float x, float y, float w, float h,
-              brls::Style style, brls::FrameContext* ctx) override
-    {
-        brls::Box::draw(vg, x, y, w, h, style, ctx);
-        if (progress > 0.0f)
-        {
-            nvgBeginPath(vg);
-            nvgRoundedRect(vg, x, y, w * progress, h, 2.0f);
-            nvgFillColor(vg, theme::accent());
-            nvgFill(vg);
-        }
-    }
-
-  private:
-    float progress = 0.0f;
-};
-
-std::string formatDate(int64_t timestamp)
-{
-    if (timestamp <= 0) return "";
-    std::time_t t = (std::time_t)timestamp;
-    // Local time, not UTC: libnx's __libnx_init_time() reads the console's
-    // time zone (timeToCalendarTimeWithMyRule) at startup and sets TZ from it.
-    std::tm* tm = std::localtime(&t);
-    if (!tm) return "";
-    char buf[64];
-    std::strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M", tm);
-    return buf;
-}
+constexpr float kInset   = 60.0f;
+constexpr float kPosterW = 190.0f;
+constexpr float kWideW   = 300.0f;
+constexpr float kGlow    = 24.0f;
 
 // True if `v` is `ancestor` or sits under it.
 bool isUnder(brls::View* v, brls::View* ancestor)
@@ -65,6 +39,27 @@ bool isUnder(brls::View* v, brls::View* ancestor)
     return false;
 }
 
+std::string fileKey(const std::string& source, int fileIndex)
+{
+    return source + "#" + std::to_string(fileIndex);
+}
+
+// The badge on a title's poster: where it stands.
+std::string badgeFor(const library::Entry& e)
+{
+    library::Next n = library::nextOf(e);
+    if (e.item.isSeries())
+    {
+        int s = n.kind != library::Next::Kind::None ? n.season : e.lastSeason;
+        int ep = n.kind != library::Next::Kind::None ? n.episode : e.lastEpisode;
+        if (s > 0 && ep > 0) return "S" + std::to_string(s) + "E" + std::to_string(ep);
+        return "";
+    }
+    if (n.kind == library::Next::Kind::Resume) return fmtTime(e.pos);
+    if (e.done) return tr("Watched");
+    return "";
+}
+
 class HistoryTabRoot : public brls::Box
 {
   public:
@@ -72,26 +67,25 @@ class HistoryTabRoot : public brls::Box
     {
         this->setAxis(brls::Axis::COLUMN);
         this->setGrow(1.0f);
-        this->seenGen = history::generation();
+        seenHist = history::generation();
+        seenLib  = library::generation();
         rebuild();
     }
 
-    ~HistoryTabRoot() override
-    {
-        *alive = false;
-    }
+    ~HistoryTabRoot() override { *alive = false; }
 
     void draw(NVGcontext* vg, float x, float y, float width, float height,
               brls::Style style, brls::FrameContext* ctx) override
     {
         brls::Box::draw(vg, x, y, width, height, style, ctx);
-        // The list changes under us when the player records progress or a
+        // The lists change under us when the player records progress or a
         // dialog removes an entry. Rebuild only once we are the top activity
-        // again: while a dialog (or the player) sits above us, borealis'
-        // focus stack holds a raw pointer to the row that opened it, and
-        // freeing that row would crash when the dialog closes and hands the
+        // again: while a dialog (or the player, or a card) sits above us,
+        // borealis' focus stack holds a raw pointer to the view that opened
+        // it, and freeing that view would crash when it closes and hands the
         // focus back.
-        if (history::generation() != seenGen && !rebuildQueued && isOnTop())
+        bool stale = history::generation() != seenHist || library::generation() != seenLib;
+        if (stale && !rebuildQueued && isOnTop())
         {
             rebuildQueued = true;
             auto live     = alive;
@@ -99,230 +93,206 @@ class HistoryTabRoot : public brls::Box
                 if (!*live) return;  // the tab was switched away meanwhile
                 rebuildQueued = false;
                 if (!isOnTop()) return;  // draw() retries next frame
-                seenGen = history::generation();
+                seenHist = history::generation();
+                seenLib  = library::generation();
                 rebuild();
             });
         }
     }
 
-    void rebuild()
-    {
-        // clearViews() frees the rows, and the focused one with them: park the
-        // focus on ourselves first (hidden highlight), then hand it to the row
-        // at the same place in the new list. Leaving it on a freed row is an
-        // immediate crash on the next input (see StremioTab::parkFocusOffList).
-        int focusIdx       = -1;
-        brls::View* cur    = brls::Application::getCurrentFocus();
-        if (cur && isUnder(cur, this))
-        {
-            focusIdx = 0;
-            for (size_t i = 0; i < rows.size(); i++)
-                if (isUnder(cur, rows[i])) focusIdx = (int)i;
-            this->setFocusable(true);
-            this->setHideHighlight(true);
-            brls::Application::giveFocus(this);
-        }
-
-        this->clearViews();
-        rows.clear();
-
-        std::vector<history::Item> items = history::all();
-        if (items.empty())
-        {
-            auto* emptyBox = new brls::Box();
-            emptyBox->setAxis(brls::Axis::COLUMN);
-            emptyBox->setJustifyContent(brls::JustifyContent::CENTER);
-            emptyBox->setAlignItems(brls::AlignItems::CENTER);
-            emptyBox->setGrow(1.0f);
-
-            auto* label = new brls::Label();
-            label->setText(tr("No watch history yet"));
-            label->setFontSize(22.0f);
-            label->setTextColor(theme::textMuted());
-            emptyBox->addView(label);
-
-            this->addView(emptyBox);
-            // Nothing focusable is left: if we parked the focus on ourselves,
-            // it stays here (B still returns to the tab bar), otherwise the
-            // tab is not focusable at all.
-            if (focusIdx < 0) this->setFocusable(false);
-            return;
-        }
-
-        auto* scroll = new brls::ScrollingFrame();
-        scroll->setGrow(1.0f);
-
-        auto* list = new brls::Box();
-        list->setAxis(brls::Axis::COLUMN);
-        list->setPadding(24.0f, 40.0f, 24.0f, 40.0f);
-
-        for (const auto& it : items)
-        {
-            brls::Box* row = createItemRow(it);
-            rows.push_back(row);
-            list->addView(row);
-        }
-
-        scroll->setContentView(list);
-        this->addView(scroll);
-
-        if (focusIdx >= 0)
-        {
-            int idx = std::min(focusIdx, (int)rows.size() - 1);
-            this->setFocusable(false);
-            brls::Application::giveFocus(rows[idx]);
-        }
-        else
-        {
-            this->setFocusable(false);
-        }
-    }
-
   private:
+    std::shared_ptr<bool> alive = std::make_shared<bool>(true);
+    // The two card rows, for putting the focus back after a rebuild.
+    brls::Box* titleRow = nullptr;
+    brls::Box* fileRow  = nullptr;
+    bool rebuildQueued  = false;
+    uint32_t seenHist = 0, seenLib = 0;
+
     bool isOnTop()
     {
         auto stack = brls::Application::getActivitiesStack();
         return !stack.empty() && stack.back() == this->getParentActivity();
     }
 
-    std::shared_ptr<bool> alive = std::make_shared<bool>(true);
-    std::vector<brls::Box*> rows;  // owned by the list; cleared with it
-    bool rebuildQueued          = false;
-
-    brls::Box* createItemRow(const history::Item& item)
+    void rebuild()
     {
-        auto* row = new brls::Box();
-        row->setAxis(brls::Axis::COLUMN);
-        row->setFocusable(true);
-        row->setCornerRadius(6.0f);
-        row->setPadding(14.0f, 20.0f, 14.0f, 20.0f);
-        row->setMarginBottom(10.0f);
-        row->setBackgroundColor(theme::scrim(15));
-        row->addGestureRecognizer(new brls::TapGestureRecognizer(row));
-
-        // Line 1: Title
-        auto* titleLbl = new brls::Label();
-        titleLbl->setText(item.title.empty() ? item.source : item.title);
-        titleLbl->setFontSize(20.0f);
-        titleLbl->setSingleLine(true);
-        row->addView(titleLbl);
-
-        // Line 2: Meta (Source badge, Progress / Status, Date)
-        auto* meta = new brls::Box();
-        meta->setAxis(brls::Axis::ROW);
-        meta->setAlignItems(brls::AlignItems::CENTER);
-        meta->setMarginTop(8.0f);
-
-        // Source badge
-        // Stored in English ("Link", "Torrent"...): shown in the UI language;
-        // names (Jackett, Stremio) as they are.
-        std::string srcType = item.sourceType.empty() ? "Local" : item.sourceType;
-        std::string shown   = srcType == "Link"      ? tr("Link")
-                              : srcType == "Torrent" ? tr("Torrent")
-                              : srcType == "Local"   ? tr("Local file")
-                                                     : srcType;
-        auto* srcBadge = new brls::Label();
-        srcBadge->setText("[" + shown + "]");
-        srcBadge->setFontSize(15.0f);
-        srcBadge->setTextColor(theme::accentText());
-        srcBadge->setMarginRight(14.0f);
-        meta->addView(srcBadge);
-
-        // Progress or completed status
-        auto* statusLbl = new brls::Label();
-        if (item.completed)
+        // clearViews() frees the cards, and the focused one with them: park
+        // the focus on ourselves first (hidden highlight), then hand it to
+        // the card at the same place in the new rows.
+        int focusRow = -1, focusIdx = 0;
+        brls::View* cur = brls::Application::getCurrentFocus();
+        if (cur && isUnder(cur, this))
         {
-            statusLbl->setText(tr("Completed"));
-            statusLbl->setTextColor(theme::accentText());
+            brls::Box* rows[2] = { titleRow, fileRow };
+            for (int r = 0; r < 2; r++)
+                if (rows[r])
+                {
+                    const auto& kids = rows[r]->getChildren();
+                    for (size_t i = 0; i < kids.size(); i++)
+                        if (isUnder(cur, kids[i]))
+                        {
+                            focusRow = r;
+                            focusIdx = (int)i;
+                        }
+                }
+            if (focusRow < 0) focusRow = 0;
+            this->setFocusable(true);
+            this->setHideHighlight(true);
+            brls::Application::giveFocus(this);
         }
-        else
+
+        *alive = false;
+        alive  = std::make_shared<bool>(true);
+        this->clearViews();
+        titleRow = fileRow = nullptr;
+
+        auto* scroll = new brls::ScrollingFrame();
+        scroll->setGrow(1.0f);
+        scroll->setScrollingBehavior(brls::ScrollingBehavior::CENTERED);
+        auto* list = new brls::Box();
+        list->setAxis(brls::Axis::COLUMN);
+        list->setPadding(4.0f, 0.0f, 36.0f, 0.0f);
+        scroll->setContentView(list);
+
+        // ---- films and series ------------------------------------------
+        std::vector<library::Entry> titles = library::watched();
+        // The files those titles played from: not shown again below.
+        std::set<std::string> titleFiles;
+        for (const auto& e : titles)
         {
-            std::string posStr = fmtTime(item.positionSec);
-            std::string durStr = item.durationSec > 0.0 ? (" / " + fmtTime(item.durationSec)) : "";
-            std::string pctStr;
-            if (item.durationSec > 0.0)
+            if (!e.source.empty()) titleFiles.insert(fileKey(e.source, e.fileIndex));
+            for (const auto& kv : e.episodes)
+                if (!kv.second.source.empty())
+                    titleFiles.insert(fileKey(kv.second.source, kv.second.fileIndex));
+        }
+        if (!titles.empty())
+        {
+            list->addView(ui::heading(tr("Films and series"), kInset));
+            titleRow = new brls::Box();
+            for (const auto& e : titles)
             {
-                int pct = (int)((item.positionSec / item.durationSec) * 100.0);
-                pctStr = " (" + std::to_string(std::clamp(pct, 0, 100)) + "%)";
+                content::Item it = e.item;
+                std::string key  = e.key();
+                auto* card = ui::posterCard(it.title, it.key(), it.posterUrl, alive,
+                                            [it]() { openContentCard(it); }, kPosterW,
+                                            badgeFor(e));
+                std::string name = it.title;
+                card->registerAction(
+                    tr("Remove"), brls::BUTTON_Y,
+                    [key, name](brls::View*) {
+                        auto* d = new brls::Dialog(
+                            std::string(tr("Remove this item from watch history?")) + "\n\n" +
+                            name);
+                        d->addButton(tr("Cancel"), []() {});
+                        d->addButton(tr("Remove"), [key]() { library::forgetWatched(key); });
+                        d->open();
+                        return true;
+                    },
+                    false, false, brls::SOUND_CLICK);
+                if (titleRow->getChildren().empty()) card->setMarginLeft(kInset);
+                titleRow->addView(card);
             }
-            statusLbl->setText(posStr + durStr + pctStr);
-            statusLbl->setTextColor(theme::textBody());
+            list->addView(ui::strip(titleRow, kPosterW * 1.5f + kGlow));
         }
-        statusLbl->setFontSize(15.0f);
-        statusLbl->setMarginRight(16.0f);
-        meta->addView(statusLbl);
 
-        // Date
-        std::string dtStr = formatDate(item.lastWatched);
-        if (!dtStr.empty())
+        // ---- other files ------------------------------------------------
+        std::vector<history::Item> files;
+        for (const auto& it : history::all())
+            if (it.tmdbId <= 0 && !titleFiles.count(fileKey(it.source, it.fileIndex)))
+                files.push_back(it);
+        if (!files.empty())
         {
-            auto* dtLbl = new brls::Label();
-            dtLbl->setText(dtStr);
-            dtLbl->setFontSize(14.0f);
-            dtLbl->setTextColor(theme::textMuted());
-            meta->addView(dtLbl);
+            list->addView(ui::heading(tr("Other files"), kInset));
+            fileRow = new brls::Box();
+            for (const auto& it : files) fileRow->addView(fileCard(it));
+            fileRow->getChildren()[0]->setMarginLeft(kInset);
+            list->addView(ui::strip(fileRow, kWideW * 9.0f / 16.0f + kGlow));
         }
 
-        row->addView(meta);
-
-        // Line 3: Progress bar if not completed and duration known
-        if (!item.completed && item.durationSec > 0.0 && item.positionSec > 0.0)
+        if (titles.empty() && files.empty())
         {
-            float prog = (float)(item.positionSec / item.durationSec);
-            auto* pb = new HistoryProgressBar(prog);
-            pb->setMarginTop(10.0f);
-            row->addView(pb);
+            auto* emptyBox = new brls::Box();
+            emptyBox->setAxis(brls::Axis::COLUMN);
+            emptyBox->setJustifyContent(brls::JustifyContent::CENTER);
+            emptyBox->setAlignItems(brls::AlignItems::CENTER);
+            emptyBox->setGrow(1.0f);
+            auto* label = new brls::Label();
+            label->setText(tr("No watch history yet"));
+            label->setFontSize(22.0f);
+            label->setTextColor(theme::textMuted());
+            emptyBox->addView(label);
+            this->addView(emptyBox);
+            delete scroll;
+            // Nothing focusable is left: if we parked the focus on ourselves,
+            // it stays here (B still returns to the tab bar), otherwise the
+            // tab is not focusable at all.
+            if (focusRow < 0) this->setFocusable(false);
+            return;
         }
+        this->addView(scroll);
 
-        // Action A: Play / Resume
-        history::Item itemCopy = item;
-        row->registerClickAction([itemCopy](brls::View*) {
-            PlayerArt art;
-            art.posterPath = itemCopy.posterPath;
-            WatchInfo w;
-            w.authKey = itemCopy.stremioAuthKey;
-            w.itemId = itemCopy.stremioItemId;
-            w.videoId = itemCopy.stremioVideoId;
-            w.type = itemCopy.stremioType;
-            w.displayTitle = itemCopy.title;
-            startPlaybackPrompt(itemCopy.source, art, itemCopy.title, itemCopy.fileIndex, w, itemCopy.sourceType);
-            return true;
-        });
-
-        // Action Y: Remove item
-        row->registerAction(
-            tr("Remove"), brls::BUTTON_Y,
-            [itemCopy](brls::View*) {
-                std::string msg = std::string(tr("Remove this item from watch history?")) + "\n\n" +
-                                  (itemCopy.title.empty() ? itemCopy.source : itemCopy.title);
-                auto* d = new brls::Dialog(msg);
-                d->addButton(tr("Cancel"), []() {});
-                d->addButton(tr("Remove"), [itemCopy]() {
-                    history::remove(itemCopy.id);
-                });
-                d->open();
-                return true;
-            },
-            false, false, brls::SOUND_CLICK);
-
-        // Action X: Clear all history
-        row->registerAction(
-            tr("Clear all history"), brls::BUTTON_X,
-            [](brls::View*) {
-                auto* d = new brls::Dialog(tr("Are you sure you want to clear your entire watch history?"));
-                d->addButton(tr("Cancel"), []() {});
-                d->addButton(tr("Clear"), []() {
-                    history::clear();
-                });
-                d->open();
-                return true;
-            },
-            false, false, brls::SOUND_CLICK);
-
-        return row;
+        this->setFocusable(false);
+        if (focusRow >= 0)
+        {
+            brls::Box* rows[2] = { titleRow, fileRow };
+            brls::Box* row     = rows[focusRow] ? rows[focusRow] : (titleRow ? titleRow : fileRow);
+            int n              = (int)row->getChildren().size();
+            brls::Application::giveFocus(row->getChildren()[std::min(focusIdx, n - 1)]);
+        }
     }
 
-    uint32_t seenGen = 0;
+    // A file played without a card: its name and progress. A plays it again
+    // (the player offers the saved position), Y removes it, X clears all.
+    brls::Box* fileCard(const history::Item& item)
+    {
+        double prog = item.completed ? 1.0
+                      : item.durationSec > 0.0 ? item.positionSec / item.durationSec
+                                               : -1.0;
+        std::string title = item.title.empty() ? item.source : item.title;
+        if (!item.completed && item.positionSec >= 15.0)
+            title += "  \xC2\xB7  " + fmtTime(item.positionSec);
+        history::Item copy = item;
+        auto* card = ui::wideCard(title, "", "", item.posterPath, prog, alive,
+                                  [copy]() {
+                                      PlayerArt art;
+                                      art.posterPath = copy.posterPath;
+                                      WatchInfo w;
+                                      w.authKey      = copy.stremioAuthKey;
+                                      w.itemId       = copy.stremioItemId;
+                                      w.videoId      = copy.stremioVideoId;
+                                      w.type         = copy.stremioType;
+                                      w.displayTitle = copy.title;
+                                      startPlaybackPrompt(copy.source, art, copy.title,
+                                                          copy.fileIndex, w, copy.sourceType);
+                                  },
+                                  kWideW);
+
+        card->registerAction(
+            tr("Remove"), brls::BUTTON_Y,
+            [copy](brls::View*) {
+                std::string msg = std::string(tr("Remove this item from watch history?")) +
+                                  "\n\n" + (copy.title.empty() ? copy.source : copy.title);
+                auto* d = new brls::Dialog(msg);
+                d->addButton(tr("Cancel"), []() {});
+                d->addButton(tr("Remove"), [copy]() { history::remove(copy.id); });
+                d->open();
+                return true;
+            },
+            false, false, brls::SOUND_CLICK);
+
+        card->registerAction(
+            tr("Clear all history"), brls::BUTTON_X,
+            [](brls::View*) {
+                auto* d = new brls::Dialog(
+                    tr("Are you sure you want to clear your entire watch history?"));
+                d->addButton(tr("Cancel"), []() {});
+                d->addButton(tr("Clear"), []() { history::clear(); });
+                d->open();
+                return true;
+            },
+            false, false, brls::SOUND_CLICK);
+        return card;
+    }
 };
 
 } // namespace

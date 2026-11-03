@@ -136,6 +136,15 @@ can be read back. Only the PC build's scripted UI check (`app/autotest.cpp`,
 `NX_AUTOTEST=script`) sets it, to take screenshots; nothing is set on the
 console. Marked `LOCAL PATCH` in both files.
 
+### 8. `library/lib/views/dropdown.cpp` — full-width dropdown
+
+The dropdown's XML pins its root at `width="1280"`, borealis' stock logical
+width. The app lays out wider (1600 docked by default), so the dropdown covered
+only the left of the screen, and with 232 px of side padding the list was a
+narrow column that cut long names short (audio tracks, subtitles). The
+constructor now sizes the root to `Application::contentWidth` and sets the list's
+side padding to 8% of it. Marked `NX-torrent-player patch`.
+
 ## Updating
 
 Re-cloning upstream **drops the patch** — re-apply it, and check this file's

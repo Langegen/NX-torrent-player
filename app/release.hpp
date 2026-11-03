@@ -37,6 +37,10 @@ struct Info
 
     // Voice-overs it names: "Дубляж", "MVO", "DVO", "AVO", "LostFilm"...
     std::vector<std::string> voices;
+    // The best kind of Russian voice-over named: 4 dubbing, 3 multi-voice (or
+    // a studio, which is nearly always one), 2 two-voice, 1 single-voice /
+    // amateur; 0 none.
+    int voiceRank = 0;
     // The release group: "-NTb" at the end of a scene name, "[HDRezka]". "".
     std::string group;
     // Audio languages the name mentions: Russian (a voice-over, "Rus",

@@ -231,6 +231,50 @@ static void test_title_match()
     std::printf("      PASSED\n");
 }
 
+static void test_russian_first()
+{
+    std::printf("[8/8] Russian UI: rutracker shorthands, Russian audio ranks first...\n");
+    auto d = release::parse("Дюна: Часть вторая / Dune: Part Two (2024) BDRip 1080p | D");
+    CHECK(hasVoice(d, "Дубляж") && d.voiceRank == 4 && d.russian);
+    auto p = release::parse("Фильм / Film (2023) WEB-DL 720p | P");
+    CHECK(hasVoice(p, "MVO") && p.voiceRank == 3);
+    auto l2 = release::parse("Фильм / Film (2023) WEB-DLRip | L2");
+    CHECK(hasVoice(l2, "DVO") && l2.voiceRank == 2);
+    auto l1 = release::parse("Фильм / Film (2023) HDRip | L1");
+    CHECK(hasVoice(l1, "AVO") && l1.voiceRank == 1);
+    auto db = release::parse("Фильм (2023) WEB-DL 1080p | Дб, Ст");
+    CHECK(hasVoice(db, "Дубляж"));
+    auto pm = release::parse("Фильм (2023) WEB-DL 1080p | ПМ");
+    CHECK(hasVoice(pm, "MVO"));
+    // Without Cyrillic (or "Rus") the Latin marks mean nothing Russian.
+    auto engDub = release::parse("[SubsPlease] Anime Show - 05 (1080p) (Dub)");
+    CHECK(engDub.voices.empty() && !engDub.russian);
+    auto scene = release::parse("Film.2023.1080p.WEB-DL.DDP5.1.H.264-D");
+    CHECK(scene.voices.empty());
+    // "D" inside a word is not dubbing.
+    CHECK(!hasVoice(release::parse("Фильм / 3D Film (2023) BDRip 1080p"), "Дубляж"));
+
+    release::Want ru;
+    ru.preferRussian = true;
+    auto eng = release::parse("Film.2023.1080p.AMZN.WEB-DL.DDP5.1.H.264-FLUX");
+    auto rus720 = release::parse("Фильм / Film (2023) WEB-DL 720p | P");
+    int e = release::score(eng, 200, 6LL << 30, ru);
+    int r = release::score(rus720, 5, 3LL << 30, ru);
+    std::printf("      English 1080p/200 seeds %d, Russian 720p/5 seeds %d\n", e, r);
+    CHECK(r > e);
+    // A dead Russian release does not beat a live English one.
+    CHECK(release::score(rus720, 0, 3LL << 30, ru) < e);
+    // Dubbing over multi-voice, all else equal.
+    CHECK(release::score(release::parse("Фильм / Film (2023) WEB-DL 1080p | D"), 50, 0, ru) >
+          release::score(release::parse("Фильм / Film (2023) WEB-DL 1080p | P"), 50, 0, ru));
+    // "Rus" alone counts.
+    CHECK(release::score(release::parse("Film.2023.720p.WEB-DL.Rus.Eng"), 10, 0, ru) > e);
+    // An English UI keeps the old order.
+    release::Want en;
+    CHECK(release::score(eng, 200, 6LL << 30, en) > release::score(rus720, 5, 3LL << 30, en));
+    std::printf("      PASSED\n");
+}
+
 int main()
 {
     std::printf("=========================================\n");
@@ -243,6 +287,7 @@ int main()
     test_match_episode();
     test_edges();
     test_title_match();
+    test_russian_first();
     std::printf("\nALL TESTS PASSED\n");
     return 0;
 }

@@ -119,7 +119,10 @@ std::string toJson(const std::vector<Entry>& entries)
             o += "{\"s\":" + kv.first.substr(0, c) + ",\"e\":" + kv.first.substr(c + 1) +
                  ",\"pos\":" + num(kv.second.pos) + ",\"dur\":" + num(kv.second.dur) +
                  ",\"done\":" + (kv.second.done ? "true" : "false") +
-                 ",\"at\":" + std::to_string(kv.second.at) + "}";
+                 ",\"at\":" + std::to_string(kv.second.at) +
+                 ",\"source\":" + str(clean(kv.second.source)) +
+                 ",\"fileIndex\":" + std::to_string(kv.second.fileIndex) +
+                 ",\"sourceType\":" + str(clean(kv.second.sourceType)) + "}";
         }
         o += "]}";
         o += i + 1 < entries.size() ? ",\n" : "\n";
@@ -176,6 +179,9 @@ std::vector<Entry> fromJson(const std::string& body)
             p.dur  = json::number(ep, "dur", 0);
             p.done = json::boolean(ep, "done", false);
             p.at   = json::integer(ep, "at", 0);
+            p.source     = json::str(ep, "source");
+            p.fileIndex  = (int)json::integer(ep, "fileIndex", -1);
+            p.sourceType = json::str(ep, "sourceType");
             e.episodes[episodeKey((int)json::integer(ep, "s", 0),
                                   (int)json::integer(ep, "e", 0))] = p;
         }
@@ -432,6 +438,34 @@ void dismissContinue(const std::string& key)
     saveAsync();
 }
 
+std::vector<Entry> watched()
+{
+    std::vector<Entry> out;
+    {
+        std::lock_guard<std::mutex> g(g_lock);
+        for (const auto& e : g_entries)
+            if (e.watchedAt > 0) out.push_back(e);
+    }
+    std::sort(out.begin(), out.end(),
+              [](const Entry& a, const Entry& b) { return a.watchedAt > b.watchedAt; });
+    return out;
+}
+
+void forgetWatched(const std::string& key)
+{
+    {
+        std::lock_guard<std::mutex> g(g_lock);
+        for (auto& e : g_entries)
+            if (e.key() == key)
+            {
+                e.watchedAt = 0;
+                e.pos = e.dur = 0;
+                e.lastSeason = e.lastEpisode = 0;
+            }
+    }
+    saveAsync();
+}
+
 void recordProgress(const content::Item& item, int season, int episode, double pos,
                     double dur, bool finished, const std::string& source, int fileIndex,
                     const std::string& sourceType)
@@ -450,6 +484,9 @@ void recordProgress(const content::Item& item, int season, int episode, double p
             p.pos  = finished ? dur : pos;
             p.done = p.done || finished;
             p.at   = e.watchedAt;
+            p.source     = source;
+            p.fileIndex  = fileIndex;
+            p.sourceType = sourceType;
             e.lastSeason  = season;
             e.lastEpisode = episode;
         }

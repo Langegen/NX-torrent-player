@@ -31,7 +31,13 @@ PlayHint episodeHint(const content::Item& item, int season, int episode, int nex
 
 // The next episode of a show: from the same season pack when the last episode
 // came from one that holds it (no list to pick from), else its sources screen.
-void openNextEpisode(const content::Item& item, int season, int episode);
+void openNextEpisode(const content::Item& item, int season, int episode,
+                     int episodesInSeason = 0);
+
+// An episode picked on a show's card: the release it last played from when it
+// was played before (resuming where it stopped), else the remembered season
+// pack when that holds it, else its sources screen.
+void playEpisode(const content::Item& item, int season, int episode, int episodesInSeason);
 
 // "Continue" on a library entry (home row, card): back into the file that was
 // playing, or the next episode when the last one is done.

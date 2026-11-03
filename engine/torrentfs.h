@@ -126,6 +126,10 @@ int  torrentfs_governor(void);
 void torrentfs_set_ram_stream(int on);
 int  torrentfs_ram_stream(void);
 
+// How many bytes ahead of the playhead to fetch (default 32 MiB). In RAM mode
+// it is still capped at half the RAM window. Takes effect immediately.
+void torrentfs_set_stream_window(int64_t bytes);
+
 // Thread heartbeats, indexed netloop/writer/reader/ui: how long ago (ms) each
 // probe thread last ran, and the CPU core it last ran on. The freeze episodes
 // stall several threads at once without any syscall being slow -- these say

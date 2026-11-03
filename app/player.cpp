@@ -66,9 +66,10 @@ void* getProcAddress(void*, const char* name)
 }
 
 // Seconds of video mpv must buffer before playback starts (and the loading
-// screen reaches 100% / hands over to the video). Bump this for smoother
-// playback on scarce swarms at the cost of a longer wait.
-constexpr double kBufferSecs = 15.0;
+// screen reaches 100% / hands over to the video). From Options -> Buffer
+// size: more for smoother playback on scarce swarms, at the cost of a longer
+// wait.
+double bufferSecs() { return config::bufferPreset().startSecs; }
 
 // The loudness boost (Options -> Boost quiet audio). Realtime normalisation to
 // a consistent target: quiet 5.1 dialogue comes up without clipping the loud
@@ -406,6 +407,8 @@ void MpvView::startEngine(const std::string& source, int fileIndex)
         char err[256] = { 0 };
         // Latched into the engine at open; pick it up from config for this video.
         torrentfs_set_ram_stream(config::get().ramStream ? 1 : 0);
+        torrentfs_set_stream_window((int64_t)config::bufferPreset().streamWindowMiB *
+                                    1024 * 1024);
         torrentfs* t = torrentfs_open_file(source.c_str(), APPDATA_CACHE,
                                            fileIndex, err, sizeof(err));
         std::string e = err;
@@ -526,15 +529,19 @@ bool MpvView::startMpv()
     // demuxer cache, then unpause on reveal (see updateLoadingOverlay/draw).
     mpv_set_option_string(mpv, "cache-pause", "no");
     mpv_set_option_string(mpv, "pause", "yes");
-    // Give the demuxer enough headroom to buffer kBufferSecs before we unpause.
-    mpv_set_option_string(mpv, "demuxer-max-bytes", "128MiB");
-    mpv_set_option_string(mpv, "demuxer-readahead-secs", "30");
+    // Give the demuxer enough headroom to buffer bufferSecs() before we
+    // unpause. The sizes come from Options -> Buffer size.
+    const config::BufferPreset buf = config::bufferPreset();
+    mpv_set_option_string(mpv, "demuxer-max-bytes",
+                          (std::to_string(buf.demuxerMaxMiB) + "MiB").c_str());
+    mpv_set_option_string(mpv, "demuxer-readahead-secs",
+                          std::to_string(buf.readaheadSecs).c_str());
     // With cache=yes, mpv's cache-secs (default 10) *overrides*
     // demuxer-readahead-secs, so the demuxer stopped at exactly 10 s of
-    // readahead. kBufferSecs is 15, so "buffered enough" could never become
-    // true and the loading screen hung forever no matter how much was
-    // downloaded. Must stay comfortably above kBufferSecs.
-    mpv_set_option_string(mpv, "cache-secs", "60");
+    // readahead. The start threshold was 15, so "buffered enough" could never
+    // become true and the loading screen hung forever no matter how much was
+    // downloaded. Must stay comfortably above bufferSecs().
+    mpv_set_option_string(mpv, "cache-secs", std::to_string(buf.cacheSecs).c_str());
     // On Switch the hardware decoder's GPU work is async; without a glFinish
     // after mpv's render, glfwSwapBuffers can present before the video is drawn
     // (black frame). This is what the other Switch mpv players set too.
@@ -912,7 +919,8 @@ class TrackCell : public brls::SelectorCell
         title->setShrink(0.0f);
         detail->setSingleLine(true);
         detail->setShrink(1.0f);
-        detail->setMaxWidth(500.0f);
+        // No cap of its own: the row's width is the limit (the panel's).
+        detail->setMaxWidth(2000.0f);
         // Left-align is REQUIRED for the marquee: Label::setAnimated is a no-op
         // unless the alignment is LEFT. It also gives the natural "start...end"
         // truncation. (The value was right-aligned by default.)
@@ -955,10 +963,14 @@ class PlayerSettingsActivity : public brls::Activity
     std::function<void()> onGone;
 };
 
-// How wide the panel is, in the logical space borealis lays out in. Wide enough
-// for "Subtitles" and a track name beside it, narrow enough to leave most of
-// the frame showing.
-constexpr float kPanelW = 560.0f;
+// How wide the panel is, in the logical space borealis lays out in: about half
+// the screen. At a fixed 560 a track name beside "Subtitles" got ~330 px and
+// most names ("RUS - Dub, Movie Dubbing [Netflix]") were cut to a stub.
+float panelWidth()
+{
+    float w = brls::Application::contentWidth * 0.5f;
+    return w < 640.0f ? 640.0f : w > 900.0f ? 900.0f : w;
+}
 
 // The subtitle delay as it is shown, everywhere it is shown. Two decimals, so a
 // 0.1 step off a preset reads as "+0.10 s" rather than being rounded away into
@@ -1217,7 +1229,14 @@ void MpvView::openTrackMenu()
                     int64_t id) {
         std::string s = lang;
         for (auto& c : s) c = (char)std::toupper((unsigned char)c);
-        if (!title.empty()) s += (s.empty() ? "" : " - ") + title;
+        // A title that only repeats the language ("rus" / "Russian") adds
+        // nothing but width.
+        std::string tl, ll = config::langLabelFor(lang), lc;
+        for (char c : title) tl += (char)std::tolower((unsigned char)c);
+        for (auto& c : ll) c = (char)std::tolower((unsigned char)c);
+        for (char c : lang) lc += (char)std::tolower((unsigned char)c);
+        bool same = !lang.empty() && (tl == ll || tl == lc);
+        if (!title.empty() && !same) s += (s.empty() ? "" : " - ") + title;
         if (s.empty()) s = tr("Track ") + std::to_string(id);
         return s;  // full name kept: the cell truncates/marquees, the dropdown shows it whole
     };
@@ -1294,7 +1313,7 @@ void MpvView::openTrackMenu()
 
     auto* panel = new brls::Box();
     panel->setAxis(brls::Axis::COLUMN);
-    panel->setWidth(kPanelW);
+    panel->setWidth(panelWidth());
     panel->setHeightPercentage(100.0f);
     panel->setPadding(40.0f, 32.0f, 24.0f, 32.0f);
     // Near-opaque: this sits over moving video, and anything lighter makes
@@ -2328,7 +2347,7 @@ void MpvView::updateLoadingOverlay()
     }
 
     // Buffering percent (cheap; refresh every frame so the bar is smooth).
-    // The bar tracks how much video mpv has buffered toward the kBufferSecs
+    // The bar tracks how much video mpv has buffered toward the bufferSecs()
     // target; 100% is reached exactly when playback is allowed to start.
     int pct = 0;
     if (fileLoaded && mpv)
@@ -2337,13 +2356,14 @@ void MpvView::updateLoadingOverlay()
         double secs = obsCacheSecs;
         if (secs >= 0.0)
         {
-            pct = (int)(secs / kBufferSecs * 100.0);
-            if (secs >= kBufferSecs)
+            const double need = bufferSecs();
+            pct = (int)(secs / need * 100.0);
+            if (secs >= need)
                 ready = true;  // buffered enough -> unpause and show video
         }
 
         // Safety net for short files / a full demuxer cache: if there's nothing
-        // left to read, don't wait for the full kBufferSecs.
+        // left to read, don't wait for the full bufferSecs().
         if (obsCacheIdle && pct > 0)
             ready = true;
     }
@@ -2982,6 +3002,10 @@ void MpvView::maybeUpdateHistory(bool force)
     it.stremioItemId = watch.itemId;
     it.stremioVideoId = watch.videoId;
     it.stremioType = watch.type;
+    it.tmdbId  = watch.content.tmdbId;
+    it.series  = watch.content.isSeries();
+    it.season  = watch.season;
+    it.episode = watch.episode;
     it.id = history::makeId(it.source, it.fileIndex, it.stremioVideoId);
 
     // Only the final write (the player closing) waits for the SD card; the
@@ -3296,6 +3320,30 @@ void startPlaybackPrompt(const std::string& source, const PlayerArt& art,
         // without a word when the history entry was finished.
         resumePos = watch.resumeSec;
         if (known && itemTitle.empty()) itemTitle = item.title;
+    }
+    else if (watch.content.tmdbId > 0)
+    {
+        // A catalog title the history does not know under this file (another
+        // release, or a history that dropped it): the library's position for
+        // the film / the episode, the same one the card's button shows.
+        library::Entry en;
+        if (library::find(watch.content.key(), en))
+        {
+            double pos = en.pos, dur = en.dur;
+            bool done  = en.done;
+            if (watch.content.isSeries())
+            {
+                const library::EpisodeProgress* p = en.episode(watch.season, watch.episode);
+                pos  = p ? p->pos : 0.0;
+                dur  = p ? p->dur : 0.0;
+                done = p ? p->done : false;
+            }
+            if (!done && pos >= 15.0 && (dur <= 0.0 || pos < dur * 0.95))
+            {
+                resumePos = pos;
+                resumeDur = dur;
+            }
+        }
     }
     // Nothing to offer: from the start, whatever a caller passed in.
     if (resumePos < 15.0) watch.resumeSec = 0.0;

@@ -144,6 +144,51 @@ std::string consoleLang()
 #endif
 }
 
+std::string effectiveUiLang(const std::string& setting)
+{
+    std::string l = setting == "auto" || setting.empty() ? consoleLang() : setting;
+    // Only the languages we have a table for; anything else is English.
+    if (l == "ru" || l == "fr" || l == "en") return l;
+    return "en";
+}
+
+namespace
+{
+// Follows the UI language unless the user chose: on for Russian.
+void defaultTmdbProxy()
+{
+    cfg.tmdbProxyEnabled = effectiveUiLang(cfg.language) == "ru";
+    cfg.tmdbProxyUserSet = false;
+}
+
+const BufferPreset kBufferPresets[] = {
+    { 128, 30, 60, 15.0, 32 },    // standard: what the app always did
+    { 256, 90, 180, 30.0, 64 },   // large
+    { 512, 180, 300, 45.0, 128 }, // maximum
+};
+} // namespace
+
+BufferPreset bufferPreset()
+{
+    int m = cfg.bufferMode;
+    if (m < 0 || m > 2) m = 0;
+#ifdef __SWITCH__
+    // An applet launch (album, or a title held with R) gets a few hundred MB
+    // in all: the maximum preset would not fit next to mpv and the engine.
+    if (m > 1 && appletGetAppletType() != AppletType_Application &&
+        appletGetAppletType() != AppletType_SystemApplication)
+        m = 1;
+#endif
+    return kBufferPresets[m];
+}
+
+const std::vector<std::string>& bufferLabels()
+{
+    static std::vector<std::string> v = { tr("Standard"), tr("Large"),
+                                          tr("Maximum") };
+    return v;
+}
+
 std::string mpvLangList(const std::string& code)
 {
     std::string c = code == "auto" ? consoleLang() : code;
@@ -239,6 +284,7 @@ void load()
     if (!f)
     {
         brls::Logger::info("[config] no config.json, using defaults");
+        defaultTmdbProxy();
         return;
     }
 
@@ -271,17 +317,6 @@ void load()
     {
         cfg.tmdbProxyUrl.clear();
     }
-    if (body.find("\"tmdbProxyEnabled\"") != std::string::npos)
-    {
-        cfg.tmdbProxyEnabled = readBool(body, "tmdbProxyEnabled", cfg.tmdbProxyEnabled);
-        cfg.tmdbProxyUserSet = true;
-    }
-    else
-    {
-        std::string effectiveLang = cfg.language == "auto" ? consoleLang() : cfg.language;
-        cfg.tmdbProxyEnabled = (effectiveLang == "ru");
-        cfg.tmdbProxyUserSet = false;
-    }
     cfg.logging = readBool(body, "logging", cfg.logging);
     cfg.hide4k  = readBool(body, "hide4k", cfg.hide4k);
     cfg.rateGovernor = readBool(body, "rateGovernor", cfg.rateGovernor);
@@ -297,6 +332,23 @@ void load()
     cfg.accent       = readStr(body, "accent", cfg.accent);
     cfg.themeVariant = readStr(body, "themeVariant", cfg.themeVariant);
     cfg.listStyle    = readStr(body, "listStyle", cfg.listStyle);
+    cfg.bufferMode   = readInt(body, "bufferMode", cfg.bufferMode);
+    if (cfg.bufferMode < 0 || cfg.bufferMode > 2) cfg.bufferMode = 0;
+
+    // After the language, which the default depends on. Version 1 files always
+    // carried the key (whatever the user did), so only a version 2 file's key
+    // is a choice; older ones get the language default.
+    const int version = readInt(body, "configVersion", 1);
+    // Version 1 had no "auto" and wrote "en" for everyone who never touched
+    // the setting: those follow the console now.
+    if (version < 2 && cfg.language == "en") cfg.language = "auto";
+    if (version >= 2 && body.find("\"tmdbProxyEnabled\"") != std::string::npos)
+    {
+        cfg.tmdbProxyEnabled = readBool(body, "tmdbProxyEnabled", cfg.tmdbProxyEnabled);
+        cfg.tmdbProxyUserSet = true;
+    }
+    else
+        defaultTmdbProxy();
 
     cfg.dockedUiWidth = knownWidth(readInt(body, "dockedUiWidth", cfg.dockedUiWidth),
                                    cfg.dockedUiWidth);
@@ -324,8 +376,17 @@ bool save()
                           (cfg.startupTab == Tab::HISTORY) ? "history" :
                           (cfg.startupTab == Tab::HOME)    ? "home" :
                           (cfg.startupTab == Tab::BOOKMARKS) ? "bookmarks" : "local";
+    // Only a choice the user made is kept: otherwise the proxy keeps following
+    // the UI language.
+    const std::string proxyLine =
+        cfg.tmdbProxyUserSet
+            ? std::string("  \"tmdbProxyEnabled\": ") +
+                  (cfg.tmdbProxyEnabled ? "true" : "false") + ",\n"
+            : std::string();
     std::fprintf(f,
                  "{\n"
+                 "  \"configVersion\": 2,\n"
+                 "  \"bufferMode\": %d,\n"
                  "  \"startupTab\": \"%s\",\n"
                  "  \"jackettUrl\": \"%s\",\n"
                  "  \"jackettApiKey\": \"%s\",\n"
@@ -336,7 +397,7 @@ bool save()
                  "  \"tmdbApiUrl\": \"%s\",\n"
                  "  \"tmdbImageUrl\": \"%s\",\n"
                  "  \"tmdbProxyUrl\": \"%s\",\n"
-                 "  \"tmdbProxyEnabled\": %s,\n"
+                 "%s"
                  "  \"logging\": %s,\n"
                  "  \"hide4k\": %s,\n"
                  "  \"rateGovernor\": %s,\n"
@@ -354,7 +415,7 @@ bool save()
                  "  \"themeVariant\": \"%s\",\n"
                  "  \"listStyle\": \"%s\"\n"
                  "}\n",
-                 sTabStr,
+                 cfg.bufferMode, sTabStr,
                  cfg.jackettUrl.c_str(),
                  cfg.jackettApiKey.c_str(),
                  cfg.jackettSetupAsked ? "true" : "false",
@@ -364,7 +425,7 @@ bool save()
                  cfg.tmdbApiUrl.c_str(),
                  cfg.tmdbImageUrl.c_str(),
                  cfg.tmdbProxyUrl.c_str(),
-                 cfg.tmdbProxyEnabled ? "true" : "false",
+                 proxyLine.c_str(),
                  cfg.logging ? "true" : "false", cfg.hide4k ? "true" : "false",
                  cfg.rateGovernor ? "true" : "false",
                  cfg.ramStream ? "true" : "false",

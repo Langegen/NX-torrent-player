@@ -146,6 +146,13 @@ static volatile int g_ram_stream = 0;
 void torrentfs_set_ram_stream(int on) { g_ram_stream = on ? 1 : 0; }
 int  torrentfs_ram_stream(void)       { return g_ram_stream; }
 
+// How far ahead of the playhead pieces are fetched (the buffer-size setting).
+static volatile int64_t g_stream_window = STREAM_WINDOW;
+void torrentfs_set_stream_window(int64_t bytes) {
+    if (bytes < 4LL * 1024 * 1024) bytes = 4LL * 1024 * 1024;
+    g_stream_window = bytes;
+}
+
 //-----------------------------------------------------------------------------
 // Types
 //-----------------------------------------------------------------------------
@@ -791,7 +798,7 @@ static void calc_window(torrentfs *t, int64_t *ph, int64_t *lo, int64_t *hi) {
     int64_t flo = t->file_first_piece, fhi = t->file_last_piece;
     if (p < flo) p = flo;
     if (p > fhi) p = fhi;
-    int64_t win = STREAM_WINDOW / t->meta.piece_len;
+    int64_t win = g_stream_window / t->meta.piece_len;
     if (win < STREAM_MIN_PIECES) win = STREAM_MIN_PIECES;
     // Never look further ahead than the RAM window can hold, or the download
     // races ahead of the playhead, fills the budget, and evicts the very pieces
@@ -1087,7 +1094,7 @@ static int64_t hot_piece(torrentfs *t) {
         for (int64_t i = fhi; i > fhi - t->crit_tail && i >= lo; i--)
             if (t->status[i] != PIECE_DONE && t->status[i] != PIECE_WRITING) return i;
     }
-    int64_t win = STREAM_WINDOW / t->meta.piece_len;
+    int64_t win = g_stream_window / t->meta.piece_len;
     if (win < STREAM_MIN_PIECES) win = STREAM_MIN_PIECES;
     for (int64_t i = ph; i <= ph + win && i <= fhi; i++)
         if (t->status[i] != PIECE_DONE && t->status[i] != PIECE_WRITING) return i;

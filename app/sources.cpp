@@ -269,7 +269,11 @@ class SourcesView : public brls::Box
         want.series        = item.isSeries();
         want.season        = season;
         want.episode       = episode;
-        want.preferRussian = i18n::lang() == "ru";
+        // Russian audio is wanted with a Russian UI, or when Options ask for
+        // Russian audio tracks ("auto" there is the console's language).
+        const std::string& al = config::get().audioLang;
+        want.preferRussian = i18n::lang() == "ru" || al == "ru" ||
+                             (al == "auto" && config::consoleLang() == "ru");
         if (item.isSeries()) loadChoice(item.key(), want.voice, want.group);
 
         // Head: "Torrents" and what for.
@@ -675,6 +679,12 @@ class SourcesView : public brls::Box
 
         jackett::Category cat =
             item.isSeries() ? jackett::Category::SERIES : jackett::Category::MOVIES;
+        jackett::TitleHint hint;
+        hint.title         = item.title;
+        hint.titleOriginal = item.originalTitle;
+        hint.year          = item.year;
+        hint.series        = item.isSeries();
+        hint.anime         = item.originalLanguage == "ja";
         for (const auto& q : queries)
         {
             brls::Logger::info("[sources] jackett: {}", q);
@@ -684,7 +694,7 @@ class SourcesView : public brls::Box
                 if (r.ok)
                     for (const auto& it : r.items) added |= addSource(fromJackett(it));
                 done(r.ok ? "" : "Jackett: " + r.error, true, added);
-            });
+            }, &hint);
         }
 
         if (stremioOn)
@@ -982,7 +992,27 @@ void openSourcesScreen(const content::Item& item, int season, int episode,
     brls::Application::pushActivity(new brls::Activity(frame));
 }
 
-void openNextEpisode(const content::Item& item, int season, int episode)
+void playEpisode(const content::Item& item, int season, int episode, int episodesInSeason)
+{
+    library::Entry en;
+    if (library::find(item.key(), en))
+        if (const library::EpisodeProgress* p = en.episode(season, episode))
+            if (!p->source.empty())
+            {
+                // Played before: the same release again. The player's prompt
+                // offers the saved position when it is part-way through.
+                brls::Logger::info("[sources] S{}E{} from its last source", season, episode);
+                content::Item it = item;
+                if (it.imdbId.empty()) it.imdbId = en.item.imdbId;
+                PlayHint hint = hintFor(it, season, episode, episodesInSeason, 1);
+                startPlaybackPrompt(p->source, hint.art, hint.title, p->fileIndex, hint.watch,
+                                    p->sourceType);
+                return;
+            }
+    openNextEpisode(item, season, episode, episodesInSeason);
+}
+
+void openNextEpisode(const content::Item& item, int season, int episode, int episodesInSeason)
 {
     library::Entry en;
     bool have = library::find(item.key(), en);
@@ -997,7 +1027,7 @@ void openNextEpisode(const content::Item& item, int season, int episode)
     if (packHasIt)
     {
         brls::Logger::info("[sources] next episode S{}E{} from the same pack", season, episode);
-        PlayHint hint = hintFor(it, season, episode, 0, 1);
+        PlayHint hint = hintFor(it, season, episode, episodesInSeason, 1);
         bool httpLink = !en.packLink.empty() && en.packLink.rfind("magnet:", 0) != 0;
         if (httpLink)
         {
@@ -1015,7 +1045,7 @@ void openNextEpisode(const content::Item& item, int season, int episode)
         }
         return;
     }
-    openSourcesScreen(it, season, episode, 0);
+    openSourcesScreen(it, season, episode, episodesInSeason);
 }
 
 void continueContent(const library::Entry& en)
@@ -1029,10 +1059,19 @@ void continueContent(const library::Entry& en)
     if (n.kind == library::Next::Kind::Resume && !en.source.empty())
     {
         // Straight back into what was playing: the player's own prompt offers
-        // the saved position (it is keyed on this source).
+        // the saved position. An episode keeps its own source; the entry's is
+        // the last thing played, which is the same one here.
+        std::string src = en.source, type = en.sourceType;
+        int idx = en.fileIndex;
+        if (const library::EpisodeProgress* p = en.episode(n.season, n.episode))
+            if (!p->source.empty())
+            {
+                src  = p->source;
+                idx  = p->fileIndex;
+                type = p->sourceType;
+            }
         PlayHint hint = hintFor(en.item, n.season, n.episode, 0, 1);
-        startPlaybackPrompt(en.source, hint.art, hint.title, en.fileIndex, hint.watch,
-                            en.sourceType);
+        startPlaybackPrompt(src, hint.art, hint.title, idx, hint.watch, type);
         return;
     }
     // Nothing to resume from: the sources for it.

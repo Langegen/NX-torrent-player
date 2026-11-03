@@ -25,6 +25,13 @@ struct Item
     std::string stremioItemId;
     std::string stremioVideoId;
     std::string stremioType;
+
+    // A catalog title (played from a film/series card): which one, so the
+    // History tab shows its card instead of the file, and a replay keeps
+    // recording into the library. tmdbId 0 = not one.
+    int tmdbId = 0;
+    bool series = false;
+    int season = 0, episode = 0;
 };
 
 // Generates a canonical ID for history lookup and persistence

@@ -1982,7 +1982,9 @@ int main(int argc, char* argv[])
     theme::captureSystemVariant();
     theme::applyVariant();
 
-    brls::Application::setGlobalQuit(true);
+    // No global quit on +: it closed the app from the player and from every
+    // menu. B on the root view still asks to exit, and HOME still works.
+    brls::Application::setGlobalQuit(false);
 
     // Before anything is built: plenty of views read the accent and the palette
     // once, as they are constructed, and keep the colours they got.
