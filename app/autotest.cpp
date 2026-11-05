@@ -28,6 +28,8 @@ void tick() {}
 #define STB_IMAGE_WRITE_STATIC
 #include "../library/borealis/library/lib/extern/glfw/deps/stb_image_write.h"
 
+#include "picture.hpp"  // the "picture" command
+
 #include "card.hpp"
 #include "content.hpp"
 #include "home.hpp"
@@ -303,6 +305,11 @@ bool run(const std::string& line)
     if (cmd == "search")
     {
         openCatalogSearch();
+        return true;
+    }
+    if (cmd == "picture")
+    {
+        picture::openCalibration();
         return true;
     }
     if (cmd == "log")

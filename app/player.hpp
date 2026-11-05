@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "content.hpp"  // content::Item, a catalog title in WatchInfo
+#include "picture.hpp"  // picture::Eq, what the player has applied
 #include "stremio.hpp"  // stremio::Subtitle, for the addon subtitle picker
 
 struct mpv_handle;
@@ -97,6 +98,11 @@ std::string fmtTime(double s);
 // True for an http(s) URL the player streams directly (not a link to a
 // .torrent file, which is still a torrent).
 bool isDirectUrl(const std::string& source);
+
+// Draws mpv's current frame under the nanovg frame being built (which it
+// flushes first and reopens after). For any view that shows mpv: the player,
+// the picture calibration screen.
+void renderMpvFrame(NVGcontext* vg, mpv_render_context* ctx);
 
 // Prompts the user with a dialog to resume from saved position if valid history exists,
 // or starts from the beginning if requested or if no history exists.
@@ -395,6 +401,13 @@ class MpvView : public brls::Box
     // tracks what was pushed to mpv to keep pumpEvents from re-setting "af"
     // every frame.
     bool boostApplied = false;
+
+    // The picture settings mpv has now (picture::sync): handheld they are the
+    // user's, docked all zero -- the TV's job.
+    picture::Eq eqApplied;
+    // A picture row in the panel changed: config is saved when it closes,
+    // not on every step of a held button.
+    bool pictureDirty = false;
 
     torrentfs* tfs = nullptr;
     // The source is an http(s) URL played as is (a Stremio url stream, a

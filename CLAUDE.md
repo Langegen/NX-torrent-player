@@ -49,7 +49,10 @@ rewrites the container paths.
   `release` (release-name parsing, ranking, episode-in-pack matching),
   `torrent_play` (open a Jackett result or magnet and pick the file to play),
   `library` (bookmarks + per-title/per-episode progress, library.json),
-  `bookmarks` (the Bookmarks tab)
+  `bookmarks` (the Bookmarks tab), `picture` (handheld-only brightness /
+  contrast / gamma / saturation through mpv's equalizer, and the calibration
+  screen with the test patterns in `assets/patterns`, made by
+  `tools/make_patterns.py`)
 - `engine/` — the torrent engine (C), ported from TorrentShopNX (same
   lineage; the `TSNX_*` names are kept so the files stay diffable):
   `torrentfs` (block-level scheduler: several peers per piece, hedged

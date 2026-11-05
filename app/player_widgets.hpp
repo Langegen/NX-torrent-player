@@ -90,4 +90,28 @@ class Shade : public brls::Box
     int alpha;
 };
 
+// A row whose value changes in place: left/right step it (held, they repeat)
+// and OK does `onOk` -- by default the next value, wrapping round. A dropdown
+// cost three presses a notch and hid the video behind its list; this is one
+// press, with the picture still in view. Used by the player's settings panel
+// and the picture calibration screen.
+class StepperCell : public brls::DetailCell
+{
+  public:
+    // `step(dir)` changes the value and says whether it could (false at an
+    // end); `value()` is how it reads now.
+    StepperCell(const std::string& titleText, std::function<std::string()> valueFn,
+                std::function<bool(int)> stepFn, std::function<void()> onOk = nullptr);
+
+    void refresh();
+
+    void draw(NVGcontext* vg, float x, float y, float width, float height, brls::Style style,
+              brls::FrameContext* ctx) override;
+
+  private:
+    static constexpr float kChevronRoom = 30.0f;
+    std::function<std::string()> value;
+    std::function<bool(int)> step;
+};
+
 } // namespace player_ui

@@ -327,6 +327,15 @@ void load()
     cfg.subtitles    = readBool(body, "subtitles", cfg.subtitles);
     cfg.hwDecode     = readBool(body, "hwDecode", cfg.hwDecode);
     cfg.audioBoost   = readBool(body, "audioBoost", cfg.audioBoost);
+    // mpv's own range; a hand-edited value outside it is pulled back in.
+    auto eq = [&](const char* key, int dflt) {
+        int v = readInt(body, key, dflt);
+        return v < -100 ? -100 : v > 100 ? 100 : v;
+    };
+    cfg.picBrightness = eq("picBrightness", cfg.picBrightness);
+    cfg.picContrast   = eq("picContrast", cfg.picContrast);
+    cfg.picGamma      = eq("picGamma", cfg.picGamma);
+    cfg.picSaturation = eq("picSaturation", cfg.picSaturation);
 
     cfg.language     = readStr(body, "language", cfg.language);
     cfg.accent       = readStr(body, "accent", cfg.accent);
@@ -408,6 +417,10 @@ bool save()
                  "  \"subtitles\": %s,\n"
                  "  \"hwDecode\": %s,\n"
                  "  \"audioBoost\": %s,\n"
+                 "  \"picBrightness\": %d,\n"
+                 "  \"picContrast\": %d,\n"
+                 "  \"picGamma\": %d,\n"
+                 "  \"picSaturation\": %d,\n"
                  "  \"dockedUiWidth\": %d,\n"
                  "  \"handheldUiWidth\": %d,\n"
                  "  \"language\": \"%s\",\n"
@@ -432,7 +445,8 @@ bool save()
                  cfg.checkUpdates ? "true" : "false", cfg.audioLang.c_str(),
                  cfg.subLang.c_str(), cfg.subtitles ? "true" : "false",
                  cfg.hwDecode ? "true" : "false",
-                 cfg.audioBoost ? "true" : "false", cfg.dockedUiWidth,
+                 cfg.audioBoost ? "true" : "false", cfg.picBrightness,
+                 cfg.picContrast, cfg.picGamma, cfg.picSaturation, cfg.dockedUiWidth,
                  cfg.handheldUiWidth, cfg.language.c_str(), cfg.accent.c_str(),
                  cfg.themeVariant.c_str(), cfg.listStyle.c_str());
     std::fclose(f);

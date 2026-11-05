@@ -334,4 +334,62 @@ void Shade::draw(NVGcontext* vg, float x, float y, float w, float h, brls::Style
     brls::Box::draw(vg, x, y, w, h, style, ctx);
 }
 
+StepperCell::StepperCell(const std::string& titleText, std::function<std::string()> valueFn,
+                         std::function<bool(int)> stepFn, std::function<void()> onOk)
+    : value(std::move(valueFn)), step(std::move(stepFn))
+{
+    setText(titleText);
+    title->setSingleLine(true);
+    detail->setMarginRight(kChevronRoom);  // the right chevron goes there
+    refresh();
+
+    auto by = [this](int dir) {
+        if (step(dir))
+        {
+            refresh();
+            brls::Application::getAudioPlayer()->play(brls::SOUND_FOCUS_CHANGE);
+        }
+        return true;  // consumed even at an end: no wandering off the row
+    };
+    registerAction("", brls::BUTTON_NAV_LEFT, [by](brls::View*) { return by(-1); }, true,
+                   true, brls::SOUND_NONE);
+    registerAction("", brls::BUTTON_NAV_RIGHT, [by](brls::View*) { return by(1); }, true,
+                   true, brls::SOUND_NONE);
+    registerClickAction([this, onOk](brls::View*) {
+        if (onOk)
+            onOk();
+        else if (!step(1))
+            while (step(-1)) {}  // past the last: back to the first
+        refresh();
+        return true;
+    });
+}
+
+void StepperCell::refresh() { setDetailText(value()); }
+
+void StepperCell::draw(NVGcontext* vg, float x, float y, float width, float height,
+                       brls::Style style, brls::FrameContext* ctx)
+{
+    brls::DetailCell::draw(vg, x, y, width, height, style, ctx);
+    // Chevrons either side of the value while the row has the cursor: it
+    // says "left/right change this" without a line of help text.
+    if (!isFocused()) return;
+    float dx = detail->getX(), dw = detail->getWidth();
+    float cy = detail->getY() + detail->getHeight() / 2.0f;
+    float s  = 6.0f;
+    nvgStrokeColor(vg, brls::Application::getTheme()["brls/list/listItem_value_color"]);
+    nvgStrokeWidth(vg, 2.6f);
+    nvgLineCap(vg, NVG_ROUND);
+    nvgLineJoin(vg, NVG_ROUND);
+    float lx = dx - 16.0f, rx = dx + dw + 16.0f;
+    nvgBeginPath(vg);
+    nvgMoveTo(vg, lx + s * 0.6f, cy - s);
+    nvgLineTo(vg, lx - s * 0.6f, cy);
+    nvgLineTo(vg, lx + s * 0.6f, cy + s);
+    nvgMoveTo(vg, rx - s * 0.6f, cy - s);
+    nvgLineTo(vg, rx + s * 0.6f, cy);
+    nvgLineTo(vg, rx - s * 0.6f, cy + s);
+    nvgStroke(vg);
+}
+
 } // namespace player_ui

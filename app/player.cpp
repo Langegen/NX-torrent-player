@@ -1264,78 +1264,7 @@ class TrackCell : public brls::SelectorCell
     }
 };
 
-// A row whose value changes in place: left/right step it (held, they repeat)
-// and OK does `onOk` -- by default the next value, wrapping round. A dropdown
-// cost three presses a notch and hid the video behind its list; this is one
-// press, with the picture still in view.
-class StepperCell : public brls::DetailCell
-{
-  public:
-    // `step(dir)` changes the value and says whether it could (false at an
-    // end); `value()` is how it reads now.
-    StepperCell(const std::string& titleText, std::function<std::string()> valueFn,
-                std::function<bool(int)> stepFn, std::function<void()> onOk = nullptr)
-        : value(std::move(valueFn)), step(std::move(stepFn))
-    {
-        setText(titleText);
-        title->setSingleLine(true);
-        detail->setMarginRight(kChevronRoom);  // the right chevron goes there
-        refresh();
-
-        auto by = [this](int dir) {
-            if (step(dir))
-            {
-                refresh();
-                brls::Application::getAudioPlayer()->play(brls::SOUND_FOCUS_CHANGE);
-            }
-            return true;  // consumed even at an end: no wandering off the row
-        };
-        registerAction("", brls::BUTTON_NAV_LEFT, [by](brls::View*) { return by(-1); }, true,
-                       true, brls::SOUND_NONE);
-        registerAction("", brls::BUTTON_NAV_RIGHT, [by](brls::View*) { return by(1); }, true,
-                       true, brls::SOUND_NONE);
-        registerClickAction([this, onOk](brls::View*) {
-            if (onOk)
-                onOk();
-            else if (!step(1))
-                while (step(-1)) {}  // past the last: back to the first
-            refresh();
-            return true;
-        });
-    }
-
-    void refresh() { setDetailText(value()); }
-
-    void draw(NVGcontext* vg, float x, float y, float width, float height, brls::Style style,
-              brls::FrameContext* ctx) override
-    {
-        brls::DetailCell::draw(vg, x, y, width, height, style, ctx);
-        // Chevrons either side of the value while the row has the cursor: it
-        // says "left/right change this" without a line of help text.
-        if (!isFocused()) return;
-        float dx = detail->getX(), dw = detail->getWidth();
-        float cy = detail->getY() + detail->getHeight() / 2.0f;
-        float s  = 6.0f;
-        nvgStrokeColor(vg, brls::Application::getTheme()["brls/list/listItem_value_color"]);
-        nvgStrokeWidth(vg, 2.6f);
-        nvgLineCap(vg, NVG_ROUND);
-        nvgLineJoin(vg, NVG_ROUND);
-        float lx = dx - 16.0f, rx = dx + dw + 16.0f;
-        nvgBeginPath(vg);
-        nvgMoveTo(vg, lx + s * 0.6f, cy - s);
-        nvgLineTo(vg, lx - s * 0.6f, cy);
-        nvgLineTo(vg, lx + s * 0.6f, cy + s);
-        nvgMoveTo(vg, rx - s * 0.6f, cy - s);
-        nvgLineTo(vg, rx + s * 0.6f, cy);
-        nvgLineTo(vg, rx - s * 0.6f, cy + s);
-        nvgStroke(vg);
-    }
-
-  private:
-    static constexpr float kChevronRoom = 30.0f;
-    std::function<std::string()> value;
-    std::function<bool(int)> step;
-};
+using player_ui::StepperCell;
 
 // The settings panel's own activity. Translucent, so borealis keeps drawing the
 // player underneath -- which is the whole point of a side panel: the picture
@@ -2339,6 +2268,36 @@ void MpvView::openTrackMenu()
             return true;
         }));
 
+    // The picture on the console's own screen (picture.hpp). Handheld only:
+    // docked the TV sets the picture, so the rows give way to a line saying
+    // so. pumpEvents brings mpv to the new value on the next frame.
+    if (picture::handheld())
+    {
+        for (int p = 0; p < picture::PROP_COUNT; p++)
+        {
+            content->addView(new StepperCell(
+                picture::label(p), [p]() { return picture::valueText(picture::value(p)); },
+                [this, p](int d) {
+                    if (!picture::step(p, d)) return false;
+                    pictureDirty = true;
+                    return true;
+                },
+                [this, p]() {
+                    picture::value(p) = 0;
+                    pictureDirty      = true;
+                }));
+        }
+    }
+    else
+    {
+        auto* pic = new brls::DetailCell();
+        pic->setText(tr("Picture"));
+        pic->setDetailText(tr("Set by the TV"));
+        pic->setDetailTextColor(theme::textMuted());
+        pic->detail->setMarginRight(30.0f);  // in line with the rows around it
+        content->addView(pic);
+    }
+
     content->addView(panelSection(tr("SUBTITLES"), 18.0f));
 
     {
@@ -2464,6 +2423,11 @@ void MpvView::openTrackMenu()
             if (!*liveFlag) return;
             settingsOpen = false;
             subDelaySink = nullptr;  // the row it fed is about to be freed
+            if (pictureDirty)
+            {
+                pictureDirty = false;
+                config::save();
+            }
             // Back to what the panel was doing: up if it was (or while paused,
             // where it lives).
             if (controlsBeforePanel || userPaused || seeking) setControlsVisible(true);
@@ -2482,6 +2446,7 @@ MpvView::~MpvView()
     // and the push itself runs on a background thread with no reference to us.
     maybePushWatchState(true);
     maybeUpdateHistory(true);
+    if (pictureDirty) config::save();  // the panel closes with the player
 
     // Tell any in-flight startEngine() that we are gone, so it closes the engine
     // it opened instead of writing into a destroyed view.
@@ -2547,6 +2512,10 @@ void MpvView::pumpEvents()
         mpv_set_property_string(mpv, "af", want ? kAudioBoostFilter : "");
         brls::Logger::info("[audio] loudness boost {}", want ? "on" : "off");
     }
+
+    // The picture settings, the same way: the user's in handheld, neutral
+    // docked, and whatever a panel row just changed.
+    picture::sync(mpv, eqApplied);
 
     while (true)
     {
@@ -4212,37 +4181,11 @@ void MpvView::updateControls()
     }
 }
 
-void MpvView::draw(NVGcontext* vg, float x, float y, float width, float height,
-                   brls::Style style, brls::FrameContext* ctx)
+// Renders mpv's current frame into the framebuffer borealis is drawing, in
+// the middle of the nanovg frame (see the comment inside), and reopens that
+// frame so whatever is drawn next lands on top of the video.
+void renderMpvFrame(NVGcontext* vg, mpv_render_context* rctx)
 {
-    pumpEvents();  // also feeds the engine's backlog (async property observe)
-    if (tfs)
-        torrentfs_hb_ui(tfs);  // render-thread heartbeat (ui age in the ZR panel)
-
-    // A touch on the screen flips borealis into TOUCH input mode, and the first
-    // gamepad press after that is consumed just to switch back -- so A took two
-    // presses to pause/resume once the screen had been tapped. Nothing here uses
-    // touch, so keep it in GAMEPAD mode; the next A then acts on the first press.
-    if (brls::Application::getInputType() == brls::InputType::TOUCH)
-        brls::Application::setInputType(brls::InputType::GAMEPAD);
-
-    // No render context yet: the engine is still opening (a magnet spends up to
-    // a minute finding a peer that will serve its metadata). There is no video
-    // to composite, but the loading screen still has to be drawn -- returning
-    // here left the whole view blank, which is exactly the black screen the
-    // async open was supposed to fix.
-    if (!renderCtx)
-    {
-        updateLoadingOverlay();
-        // This IS the metadata-fetch / engine-opening phase -- the one most
-        // likely to hang -- so the ZR panel has to be fed here too. The normal
-        // update() call is past the early return below and never ran during it,
-        // which left the toggled-on overlay an empty transparent box.
-        updateInfoOverlay();
-        brls::Box::draw(vg, x, y, width, height, style, ctx);
-        return;
-    }
-
     // nanovg is a *batched* renderer: every nvg* call in this frame (including
     // this view's opaque black background drawn by View::frame just before us,
     // and any lower view) is only submitted to GL at the outer nvgEndFrame --
@@ -4282,7 +4225,7 @@ void MpvView::draw(NVGcontext* vg, float x, float y, float width, float height,
     glDisable(GL_BLEND);
     glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
 
-    mpv_render_context_render(renderCtx, params);
+    mpv_render_context_render(rctx, params);
 
     glBindFramebuffer(GL_FRAMEBUFFER, fbo);
     glViewport(0, 0, brls::Application::windowWidth, brls::Application::windowHeight);
@@ -4296,7 +4239,7 @@ void MpvView::draw(NVGcontext* vg, float x, float y, float width, float height,
     glClear(GL_COLOR_BUFFER_BIT);
     glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
 
-    mpv_render_context_report_swap(renderCtx);
+    mpv_render_context_report_swap(rctx);
 
     // Resume the nanovg frame that we flushed above, matching the parameters
     // Application::frame() opened it with, so the loading overlay (and the outer
@@ -4306,6 +4249,40 @@ void MpvView::draw(NVGcontext* vg, float x, float y, float width, float height,
     nvgBeginFrame(vg, brls::Application::windowWidth,
                   brls::Application::windowHeight, (float)scaleFactor);
     nvgScale(vg, brls::Application::windowScale, brls::Application::windowScale);
+}
+
+void MpvView::draw(NVGcontext* vg, float x, float y, float width, float height,
+                   brls::Style style, brls::FrameContext* ctx)
+{
+    pumpEvents();  // also feeds the engine's backlog (async property observe)
+    if (tfs)
+        torrentfs_hb_ui(tfs);  // render-thread heartbeat (ui age in the ZR panel)
+
+    // A touch on the screen flips borealis into TOUCH input mode, and the first
+    // gamepad press after that is consumed just to switch back -- so A took two
+    // presses to pause/resume once the screen had been tapped. Nothing here uses
+    // touch, so keep it in GAMEPAD mode; the next A then acts on the first press.
+    if (brls::Application::getInputType() == brls::InputType::TOUCH)
+        brls::Application::setInputType(brls::InputType::GAMEPAD);
+
+    // No render context yet: the engine is still opening (a magnet spends up to
+    // a minute finding a peer that will serve its metadata). There is no video
+    // to composite, but the loading screen still has to be drawn -- returning
+    // here left the whole view blank, which is exactly the black screen the
+    // async open was supposed to fix.
+    if (!renderCtx)
+    {
+        updateLoadingOverlay();
+        // This IS the metadata-fetch / engine-opening phase -- the one most
+        // likely to hang -- so the ZR panel has to be fed here too. The normal
+        // update() call is past the early return below and never ran during it,
+        // which left the toggled-on overlay an empty transparent box.
+        updateInfoOverlay();
+        brls::Box::draw(vg, x, y, width, height, style, ctx);
+        return;
+    }
+
+    renderMpvFrame(vg, renderCtx);
 
     // Loading screen: keep it fed until the first frame is up, then take it down
     // once so it stops laying out. Drawn via Box::draw (our child views) on top

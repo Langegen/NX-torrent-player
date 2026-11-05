@@ -163,7 +163,12 @@ typedef enum {
 } AppletFocusState;
 
 static inline AppletType appletGetAppletType(void) { return AppletType_Application; }
-static inline AppletOperationMode appletGetOperationMode(void) { return AppletOperationMode_Console; }
+// Docked on a PC, unless NX_HANDHELD is set: that runs the handheld-only paths
+// (the audio boost, the picture settings) for a check.
+static inline AppletOperationMode appletGetOperationMode(void)
+{
+    return getenv("NX_HANDHELD") ? AppletOperationMode_Handheld : AppletOperationMode_Console;
+}
 static inline AppletFocusState appletGetFocusState(void) { return AppletFocusState_InFocus; }
 static inline void appletSetMediaPlaybackState(bool state) { (void)state; }
 static inline void romfsExit(void) {}

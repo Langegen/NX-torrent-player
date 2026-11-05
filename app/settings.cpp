@@ -16,6 +16,7 @@
 
 #include "config.hpp"
 #include "jackett.hpp"
+#include "picture.hpp"
 #include "http.hpp"
 #include "torrserver.hpp"
 #include "tmdb.hpp"
@@ -340,6 +341,24 @@ brls::View* playbackPane()
     list->addView(hwdec);
     list->addView(caption(
         tr("On by default. Off decodes in software: slower, may stutter on 1080p.")));
+
+    // The picture on the console's own screen (picture.hpp). The settings
+    // themselves are on the calibration screen, next to the patterns they are
+    // judged against -- and in the player's panel, against the film.
+    auto* picHdr = new brls::Header();
+    picHdr->setTitle(tr("Picture in handheld"));
+    list->addView(picHdr);
+
+    auto* pic = new brls::DetailCell();
+    pic->setText(tr("Picture and test patterns"));
+    pic->registerClickAction([](brls::View*) {
+        picture::openCalibration();
+        return true;
+    });
+    list->addView(pic);
+    list->addView(caption(
+        tr("Brightness, contrast, gamma and saturation of the video on the console's "
+           "screen. Docked they are off: the TV sets the picture.")));
 
     return pane;
 }

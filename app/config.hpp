@@ -57,6 +57,15 @@ struct Config
     // mid-film drops it (see MpvView::pumpEvents).
     bool audioBoost = true;
 
+    // The picture in handheld: mpv's video equalizer (brightness, contrast,
+    // gamma, saturation), each -100..100 with 0 = untouched. Handheld only,
+    // like the boost: docked the TV owns the picture, so the player sends
+    // zeros there and docking mid-film drops them (see picture.hpp).
+    int picBrightness = 0;
+    int picContrast   = 0;
+    int picGamma      = 0;
+    int picSaturation = 0;
+
     // Hardware video decoding (nvtegra). On by default. Turn it off to decode in
     // software instead -- slower and it may stutter on 1080p, but it sidesteps the
     // GPU decode path, which helps tell whether the random freezes come from it.

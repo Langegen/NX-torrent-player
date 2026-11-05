@@ -17,6 +17,7 @@
 //   focuson <text>         focus the first focusable view showing <text>
 //   focus                  log what has the focus
 //   search                 open the catalog search
+//   picture                open the picture calibration screen
 //   log <text>             a line in <out>/run.log
 //   quit
 // <out> is NX_AUTOTEST_OUT, or ./autotest.
