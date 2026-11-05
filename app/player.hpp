@@ -126,6 +126,15 @@ class MpvView : public brls::Box
     std::shared_ptr<bool> alive = std::make_shared<bool>(true);
     std::string pendingSource;
     void updateLoadingOverlay();
+    // Seconds of video to buffer before the first frame: the Options preset at
+    // most, as little as kMinStartSecs when the download outruns the bitrate.
+    double startTargetSecs() const;
+    // "[startup] +N ms <what>" in the log, once per phase, from the moment the
+    // player was opened -- where the wait before the first frame goes.
+    void startupMark(const char* what);
+    std::chrono::steady_clock::time_point startupT0 = std::chrono::steady_clock::now();
+    bool markedFirstPiece = false, markedFirstPeer = false;
+    std::string startupLine;   // the marks so far, for the ZR panel
     void updateBufferIndicator();
     void updateInfoOverlay();
     void updateSeekBar();
@@ -332,6 +341,9 @@ class MpvView : public brls::Box
     // Download-speed sampling.
     int64_t lastBytes = 0;
     double speedBps   = 0.0;
+    double rateEwma   = 0.0;      // smoothed speedBps, the start decision's input
+    int rateSamples   = 0;        // speed samples taken since the engine opened
+    int64_t obsFileSize = 0;      // mpv "file-size" (direct streams)
     std::chrono::steady_clock::time_point lastSample;
 
     // Stremio watch-state sync: the position is sampled alongside logStats and

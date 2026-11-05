@@ -11,7 +11,10 @@
 #include <sys/time.h>
 
 #include <switch.h>
+#include <cerrno>
+#include <errno.h>
 
+#include "engine_log.h"
 #include "utp.h"
 
 // Connection buffer sizes. Receive is generous (a peer can burst several piece
@@ -220,7 +223,10 @@ int utp_bridge_init(void) {
     if (g_started) return 0;
 
     g_udp = socket(AF_INET, SOCK_DGRAM, 0);
-    if (g_udp < 0) return -1;
+    if (g_udp < 0) {
+        engine_log(ENGINE_LOG_ERROR, "[utpbridge] socket() failed errno=%d", errno);
+        return -1;
+    }
     struct sockaddr_in me = {};
     me.sin_family = AF_INET;
     me.sin_addr.s_addr = INADDR_ANY;

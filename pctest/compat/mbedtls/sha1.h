@@ -21,6 +21,19 @@ int mbedtls_sha1_update_ret(mbedtls_sha1_context *ctx, const unsigned char *inpu
 int mbedtls_sha1_finish_ret(mbedtls_sha1_context *ctx, unsigned char output[20]);
 int mbedtls_sha1(const unsigned char *input, size_t ilen, unsigned char output[20]);
 
+// mbedtls 3 names (no _ret), as the ported dhtclient.c uses them.
+static inline int mbedtls_sha1_starts(mbedtls_sha1_context *ctx) {
+    return mbedtls_sha1_starts_ret(ctx);
+}
+static inline int mbedtls_sha1_update(mbedtls_sha1_context *ctx,
+                                      const unsigned char *in, size_t n) {
+    return mbedtls_sha1_update_ret(ctx, in, n);
+}
+static inline int mbedtls_sha1_finish(mbedtls_sha1_context *ctx,
+                                      unsigned char out[20]) {
+    return mbedtls_sha1_finish_ret(ctx, out);
+}
+
 #ifdef __cplusplus
 }
 #endif

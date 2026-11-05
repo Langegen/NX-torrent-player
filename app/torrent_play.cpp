@@ -3,6 +3,7 @@
 #include <borealis.hpp>
 
 #include <algorithm>
+#include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <memory>
@@ -223,7 +224,17 @@ void resolveMagnet(const std::shared_ptr<Job>& job, const std::string& magnet)
         std::vector<VideoFileInfo> vids;
         if (m)
         {
+            // The first half of a magnet's start: its file list. The metadata
+            // and the peers found here are cached by info-hash, so the player
+            // opening it next starts from them instead of the network.
+            auto t0 = std::chrono::steady_clock::now();
             rc = torrent_load_magnet(m, magnet.c_str(), err, sizeof(err));
+            brls::Logger::info(
+                "[startup] magnet resolved in {} ms ({})",
+                (long long)std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - t0)
+                    .count(),
+                rc == 0 ? "ok" : err);
             if (rc == 0)
             {
                 vids = videosOf(m);

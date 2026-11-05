@@ -40,15 +40,14 @@ THE SOFTWARE.
 #include <fcntl.h>
 #include <sys/time.h>
 
-#ifndef WIN32
+#if !defined(WIN32) || defined(__MINGW32__)
 #include <arpa/inet.h>
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #else
-#ifndef _WIN32_WINNT
-#define _WIN32_WINNT 0x0600
-#endif
+#include <w32api.h>
+#define WINVER WindowsXP
 #include <ws2tcpip.h>
 #endif
 
@@ -64,7 +63,13 @@ THE SOFTWARE.
 #define MSG_CONFIRM 0
 #endif
 
-#ifdef WIN32
+/* NX Torrent Player's PC build (MinGW) takes the POSIX branch below through
+   compat/, but its CRT has no random(). */
+#if defined(__MINGW32__)
+#define random() rand()
+#endif
+
+#if defined(WIN32) && !defined(__MINGW32__)
 
 #define EAFNOSUPPORT WSAEAFNOSUPPORT
 static int
@@ -84,9 +89,7 @@ random(void)
 {
     return rand();
 }
-#if defined(_WIN32_WINNT) && _WIN32_WINNT < 0x0600
 extern const char *inet_ntop(int, const void *, char *, socklen_t);
-#endif
 
 #else
 
@@ -168,6 +171,25 @@ struct search_node {
    to the destination, and use the additional ones to backtrack if any of
    the target 8 turn out to be dead. */
 #define SEARCH_NODES 14
+
+/* A bucket that hasn't confirmed any node for this long gets a maintenance
+   find_node for a random id in its range. Upstream jech uses 600 s, which
+   leaves a fresh table almost empty for the first ten minutes; a shorter
+   window fills and splits buckets fast enough to reach a few hundred nodes
+   in a couple of minutes. */
+#ifndef DHT_BUCKET_REFRESH_TIME
+#define DHT_BUCKET_REFRESH_TIME 90
+#endif
+
+/* How many stale buckets one maintenance tick refreshes. */
+#ifndef DHT_MAINTENANCE_QUERIES
+#define DHT_MAINTENANCE_QUERIES 6
+#endif
+
+/* How many neighbourhood (my-bucket range) queries one tick sends. */
+#ifndef DHT_NEIGHBOUR_QUERIES
+#define DHT_NEIGHBOUR_QUERIES 4
+#endif
 
 struct search {
     unsigned short tid;
@@ -273,11 +295,6 @@ static int parse_message(const unsigned char *buf, int buflen,
                          int *want_return);
 
 static const unsigned char zeroes[20] = {0};
-static const unsigned char ones[20] = {
-    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-    0xFF, 0xFF, 0xFF, 0xFF
-};
 static const unsigned char v4prefix[16] = {
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF, 0xFF, 0, 0, 0, 0
 };
@@ -812,7 +829,6 @@ new_node(const unsigned char *id, const struct sockaddr *sa, int salen,
 
     if(b->count >= 8) {
         /* Bucket full.  Ping a dubious node */
-        int dubious = 0;
         n = b->nodes;
         while(n) {
             /* Pick the first dubious node that we haven't pinged in the
@@ -820,7 +836,6 @@ new_node(const unsigned char *id, const struct sockaddr *sa, int salen,
                tends to concentrate on the same nodes, so that we get rid
                of bad nodes fast. */
             if(!node_good(n)) {
-                dubious = 1;
                 if(n->pinged_time < now.tv_sec - 15) {
                     unsigned char tid[4];
                     debugf("Sending ping to dubious node.\n");
@@ -836,16 +851,14 @@ new_node(const unsigned char *id, const struct sockaddr *sa, int salen,
         }
 
         split = 0;
-        if(mybucket) {
-            if(!dubious)
-                split = 1;
-            /* If there's only one bucket, split eagerly.  This is
-               incorrect unless there's more than 8 nodes in the DHT. */
-            else if(b->af == AF_INET && buckets->next == NULL)
-                split = 1;
-            else if(b->af == AF_INET6 && buckets6->next == NULL)
-                split = 1;
-        }
+        if(mybucket)
+            split = 1;
+        /* If there's only one bucket, split eagerly.  This is
+           incorrect unless there's more than 8 nodes in the DHT. */
+        else if(b->af == AF_INET && buckets->next == NULL)
+            split = 1;
+        else if(b->af == AF_INET6 && buckets6->next == NULL)
+            split = 1;
 
         if(split) {
             debugf("Splitting.\n");
@@ -1038,13 +1051,13 @@ search_send_get_peers(struct search *sr, struct search_node *n)
         int i;
         for(i = 0; i < sr->numnodes; i++) {
             if(sr->nodes[i].pinged < 3 && !sr->nodes[i].replied &&
-               sr->nodes[i].request_time < now.tv_sec - 15)
+               sr->nodes[i].request_time < now.tv_sec - 5)
                 n = &sr->nodes[i];
         }
     }
 
     if(!n || n->pinged >= 3 || n->replied ||
-       n->request_time >= now.tv_sec - 15)
+       n->request_time >= now.tv_sec - 5)
         return 0;
 
     debugf("Sending get_peers.\n");
@@ -1122,13 +1135,13 @@ search_step(struct search *sr, dht_callback *callback, void *closure)
         return;
     }
 
-    if(sr->step_time + 15 >= now.tv_sec)
+    if(sr->step_time + 5 >= now.tv_sec)
         return;
 
     j = 0;
     for(i = 0; i < sr->numnodes; i++) {
         j += search_send_get_peers(sr, &sr->nodes[i]);
-        if(j >= 3)
+        if(j >= 6)
             break;
     }
     sr->step_time = now.tv_sec;
@@ -1793,8 +1806,14 @@ neighbourhood_maintenance(int af)
     if(b == NULL)
         return 0;
 
-    memcpy(id, myid, 20);
-    id[19] = random() & 0xFF;
+    /* Target a random id inside MY bucket's range, not just myid with a
+       random last byte: once the tree has split past ~8 bits, a random
+       last byte usually falls OUTSIDE my leaf, and the replies fill a
+       neighbour bucket that never splits -- the growth cascade dies.
+       An in-range target keeps filling my leaf, which splits on overflow. */
+    if(bucket_random(b, id) < 0)
+        memcpy(id, myid, 20);
+
     q = b;
     if(q->next && (q->count == 0 || (random() & 7) == 0))
         q = b->next;
@@ -1825,16 +1844,23 @@ neighbourhood_maintenance(int af)
     return 0;
 }
 
+static struct bucket *maint_cursor = NULL;
+
 static int
 bucket_maintenance(int af)
 {
     struct bucket *b;
+    int sent = 0;
 
-    b = af == AF_INET ? buckets : buckets6;
+    /* Round-robin over the bucket list: always starting from the head
+       starves the deeper buckets, which then never fill. */
+    if (maint_cursor == NULL || maint_cursor->af != af)
+        maint_cursor = af == AF_INET ? buckets : buckets6;
+    b = maint_cursor;
 
     while(b) {
         struct bucket *q;
-        if(b->time < now.tv_sec - 600) {
+        if(b->time < now.tv_sec - DHT_BUCKET_REFRESH_TIME) {
             /* This bucket hasn't seen any positive confirmation for a long
                time.  Pick a random id in this bucket's range, and send
                a request to a random node. */
@@ -1888,15 +1914,22 @@ bucket_maintenance(int af)
                                    tid, 4, id, want,
                                    n->reply_time >= now.tv_sec - 15);
                     pinged(n, q);
-                    /* In order to avoid sending queries back-to-back,
-                       give up for now and reschedule us soon. */
-                    return 1;
+                    sent++;
+                    /* Refresh several stale buckets per tick: a fresh table
+                       otherwise grows at a few nodes per minute. */
+                    if(sent >= DHT_MAINTENANCE_QUERIES)
+                        break;
                 }
             }
         }
         b = b->next;
+        if(b == NULL)
+            b = af == AF_INET ? buckets : buckets6;  /* wrap around */
+        if(b == maint_cursor)
+            break;  /* full circle */
     }
-    return 0;
+    maint_cursor = b;
+    return sent > 0;
 }
 
 int
@@ -2134,7 +2167,7 @@ dht_periodic(const void *buf, size_t buflen,
                            203, "Announce_peer with wrong token");
                 break;
             }
-            if(port == 0) {
+            if(port <= 1) {
                 debugf("Announce_peer with forbidden port %d.\n", port);
                 send_error(from, fromlen, tid, tid_len,
                            203, "Announce_peer with forbidden port number");
@@ -2175,7 +2208,7 @@ dht_periodic(const void *buf, size_t buflen,
         sr = searches;
         while(sr) {
             if(!sr->done) {
-                time_t tm = sr->step_time + 15 + random() % 10;
+                time_t tm = sr->step_time + 5 + random() % 5;
                 if(search_time == 0 || search_time > tm)
                     search_time = tm;
             }
@@ -2189,19 +2222,22 @@ dht_periodic(const void *buf, size_t buflen,
         soon |= bucket_maintenance(AF_INET);
         soon |= bucket_maintenance(AF_INET6);
 
-        if(!soon) {
-            if(mybucket_grow_time >= now.tv_sec - 150)
-                soon |= neighbourhood_maintenance(AF_INET);
-            if(mybucket6_grow_time >= now.tv_sec - 150)
-                soon |= neighbourhood_maintenance(AF_INET6);
-        }
+        /* Grow the neighbourhood around our id as well. Upstream only ran
+           this when bucket maintenance found nothing to do, which starved
+           the bucket-splitting cascade (the main driver of table growth).
+           Run it every tick, several times: the split cascade only advances
+           while fresh nodes keep arriving in our leaf, and one query per
+           tick grows the table at a snail's pace. */
+        for (int k = 0; k < DHT_NEIGHBOUR_QUERIES; k++)
+            soon |= neighbourhood_maintenance(AF_INET);
+        soon |= neighbourhood_maintenance(AF_INET6);
 
-        /* In order to maintain all buckets' age within 600 seconds, worst
-           case is roughly 27 seconds, assuming the table is 22 bits deep.
-           We want to keep a margin for neighborhood maintenance, so keep
-           this within 25 seconds. */
+        /* In order to maintain all buckets' age within DHT_BUCKET_REFRESH_TIME
+           seconds, worst case is roughly 27 seconds, assuming the table is
+           22 bits deep. We want to keep a margin for neighborhood
+           maintenance, so keep this within 25 seconds. */
         if(soon)
-            confirm_nodes_time = now.tv_sec + 5 + random() % 20;
+            confirm_nodes_time = now.tv_sec + 2 + random() % 6;
         else
             confirm_nodes_time = now.tv_sec + 60 + random() % 120;
     }

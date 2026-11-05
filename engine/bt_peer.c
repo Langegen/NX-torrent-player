@@ -1,0 +1,772 @@
+#include "bt_peer.h"
+
+#include <errno.h>
+#include <fcntl.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <poll.h>
+#include <sys/select.h>
+#include <sys/socket.h>
+#include <sys/time.h>
+
+#include <mbedtls/sha1.h>
+
+#include "bencode.h"
+#include "utpbridge.h"
+#include "utp_nb.h"
+#include "engine_log.h"
+
+#define HANDSHAKE_LEN 68
+#define META_PIECE_LEN 16384
+#define META_CONNECT_SECS 2
+#define MAX_META_SIZE (8 * 1024 * 1024)
+
+static void set_err(char *err, size_t errlen, const char *msg) {
+    if (err && errlen) snprintf(err, errlen, "%s", msg);
+}
+
+static int set_timeout(int sock, int seconds) {
+    struct timeval tv = { .tv_sec = seconds, .tv_usec = 0 };
+    if (setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) < 0) return -1;
+    if (setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv)) < 0) return -1;
+    return 0;
+}
+
+// Blocking connect() waits for the full TCP timeout (~30s) on an unreachable
+// peer, which stalls the swarm. A non-blocking connect + poll lets us give
+// up after a few seconds and move on to another peer.
+//
+// poll() is used on purpose: on Switch, select() does not report the
+// connecting socket as writable (the same limitation as UDP readability),
+// which made every connect wait out its full timeout and starved the
+// BEP-9 metadata fetch even against live peers.
+static int connect_timeout(int sock, const struct sockaddr *sa, socklen_t salen,
+                           int seconds) {
+    int flags = fcntl(sock, F_GETFL, 0);
+    if (flags < 0) return -1;
+    fcntl(sock, F_SETFL, flags | O_NONBLOCK);
+
+    int rc = connect(sock, sa, salen);
+    if (rc == 0) {
+        fcntl(sock, F_SETFL, flags);
+        return 0;  // connected immediately
+    }
+    if (errno != EINPROGRESS) {
+        fcntl(sock, F_SETFL, flags);
+        return -1;
+    }
+
+    struct pollfd pfd;
+    pfd.fd = sock;
+    pfd.events = POLLOUT;
+    pfd.revents = 0;
+    rc = poll(&pfd, 1, seconds * 1000);
+    if (rc <= 0) {
+        fcntl(sock, F_SETFL, flags);
+        return -1;  // timeout or error
+    }
+
+    int soerr = 0;
+    socklen_t len = sizeof(soerr);
+    if (getsockopt(sock, SOL_SOCKET, SO_ERROR, &soerr, &len) < 0 || soerr != 0) {
+        fcntl(sock, F_SETFL, flags);
+        return -1;
+    }
+
+    fcntl(sock, F_SETFL, flags);  // back to blocking for the transfer phase
+    return 0;
+}
+
+// Sockets can return short reads/writes; loop until the full buffer moves.
+// Transport read/write dispatch: a peer_conn is either a TCP socket or a µTP
+// connection. Everything else in this file goes through these two helpers, so
+// the peer-wire protocol is identical over both transports.
+#define UTP_IO_TIMEOUT_MS 10000
+
+// Returns 0 on success, -1 on error/EOF, and -2 on a clean idle timeout — the
+// socket's SO_RCVTIMEO fired at a message boundary with nothing read yet. -2
+// lets the caller poll for shutdown without dropping a slow-but-alive peer.
+static int read_full(peer_conn *p, void *buf, size_t len) {
+    uint8_t *b = buf;
+    size_t got = 0;
+    while (got < len) {
+        if (p->utp) {
+            int n = utp_bridge_read(p->utp, b + got, (int)(len - got),
+                                    UTP_IO_TIMEOUT_MS);
+            if (n <= 0) return -1;
+            got += (size_t)n;
+        } else {
+            ssize_t n = recv(p->sock, b + got, len - got, 0);
+            if (n == 0) return -1;  // peer closed
+            if (n < 0) {
+                if ((errno == EAGAIN || errno == EWOULDBLOCK) && got == 0)
+                    return -2;      // idle timeout at a message boundary
+                return -1;          // real error, or timeout mid-message
+            }
+            got += (size_t)n;
+        }
+    }
+    return 0;
+}
+
+static int write_full(peer_conn *p, const void *buf, size_t len) {
+    if (p->utp)
+        return utp_bridge_write(p->utp, buf, (int)len);  // writes the whole buffer
+
+    const uint8_t *b = buf;
+    size_t sent = 0;
+    while (sent < len) {
+        ssize_t n = send(p->sock, b + sent, len - sent, 0);
+        if (n <= 0) return -1;
+        sent += (size_t)n;
+    }
+    return 0;
+}
+
+// Message framing: <4-byte big-endian length><1-byte id><payload>
+// A zero length is a keep-alive and carries no id.
+static int send_msg(peer_conn *p, uint8_t id, const void *payload, uint32_t plen) {
+    uint8_t hdr[5];
+    uint32_t len = htonl(1 + plen);
+    memcpy(hdr, &len, 4);
+    hdr[4] = id;
+    if (write_full(p, hdr, 5) != 0) return -1;
+    if (plen && write_full(p, payload, plen) != 0) return -1;
+    return 0;
+}
+
+// Reads one message, skipping keep-alives. Caller supplies the payload buffer.
+// Returns the message id, or -1 on error. *plen receives the payload length.
+static int recv_msg(peer_conn *p, uint8_t *payload, uint32_t bufcap, uint32_t *plen) {
+    for (;;) {
+        uint32_t len_be;
+        int r = read_full(p, &len_be, 4);
+        if (r == -2) return -2;  // idle timeout: no message pending
+        if (r != 0) return -1;
+        uint32_t len = ntohl(len_be);
+        if (len == 0) continue;  // keep-alive
+        if (len > MAX_MSG_LEN) return -1;
+
+        uint8_t id;
+        if (read_full(p, &id, 1) != 0) return -1;
+        uint32_t payload_len = len - 1;
+        if (payload_len > bufcap) return -1;
+        if (payload_len && read_full(p, payload, payload_len) != 0) return -1;
+        *plen = payload_len;
+        return id;
+    }
+}
+
+int peer_send(peer_conn *p, uint8_t id, const void *payload, uint32_t plen) {
+    return send_msg(p, id, payload, plen);
+}
+
+int peer_recv(peer_conn *p, uint8_t *payload, uint32_t bufcap, uint32_t *plen) {
+    return recv_msg(p, payload, bufcap, plen);
+}
+
+void peer_disconnect(peer_conn *p) {
+    if (p->utp) { utp_bridge_close(p->utp); p->utp = NULL; }
+    if (p->sock >= 0) close(p->sock);
+    free(p->bitfield);
+    p->sock = -1;
+    p->bitfield = NULL;
+    p->bitfield_len = 0;
+}
+
+bool bf_has_piece(const uint8_t *bf, size_t bf_len, int64_t index) {
+    if (!bf || index < 0) return false;
+    size_t byte = (size_t)(index / 8);
+    if (byte >= bf_len) return false;
+    // Bits are packed high-to-low within each byte.
+    return (bf[byte] & (0x80 >> (index % 8))) != 0;
+}
+
+bool peer_has_piece(const peer_conn *p, int64_t index) {
+    return bf_has_piece(p->bitfield, p->bitfield_len, index);
+}
+
+//---------------------------------------------------------------------------
+// Metadata download (BEP 10 extension protocol + BEP 9 ut_metadata)
+//---------------------------------------------------------------------------
+
+// Sends an extended message: <len><20><ext_sub_id><payload>.
+static int send_ext(peer_conn *p, uint8_t sub_id, const char *bencode, size_t blen) {
+    uint8_t msg[128];
+    if (blen + 1 > sizeof(msg)) return -1;
+    msg[0] = sub_id;
+    memcpy(msg + 1, bencode, blen);
+    return send_msg(p, MSG_EXTENDED, msg, (uint32_t)(blen + 1));
+}
+
+int peer_fetch_metadata(peer_addr addr, const uint8_t info_hash[20],
+                        const uint8_t peer_id[20], uint8_t **out, size_t *out_len,
+                        char *err, size_t errlen) {
+    int sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (sock < 0) {
+        char e[128];
+        snprintf(e, sizeof(e), "socket() failed errno=%d", errno);
+        set_err(err, errlen, e);
+        return -1;
+    }
+#ifdef __SWITCH__
+    int rcvbuf = 64 * 1024;
+    int sndbuf = 16 * 1024;
+    setsockopt(sock, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
+    setsockopt(sock, SOL_SOCKET, SO_SNDBUF, &sndbuf, sizeof(sndbuf));
+#endif
+    // A peer that will serve the metadata answers the handshake in well under
+    // a second; one that accepted the SYN and went quiet used to hold a fetch
+    // worker for 10 s per read. The fetch runs on the play path, so: 5 s.
+    set_timeout(sock, 5);
+
+    struct sockaddr_in sa = {0};
+    sa.sin_family = AF_INET;
+    sa.sin_port = htons(addr.port);
+    sa.sin_addr.s_addr = addr.ip;
+    // Most announced addresses are dead; a live peer's SYN-ACK takes tens of
+    // milliseconds. 2 s (not PEER_CONNECT_SECS) cycles the workers faster.
+    if (connect_timeout(sock, (struct sockaddr *)&sa, sizeof(sa), META_CONNECT_SECS) != 0) {
+        close(sock);
+        set_err(err, errlen, "connection refused");
+        return -1;
+    }
+
+    // Metadata fetch is TCP-only; wrap the socket so it can use the shared
+    // transport helpers (send_ext/recv_msg/read_full/write_full).
+    peer_conn mp = {0};
+    mp.sock = sock;
+    peer_conn *p = &mp;
+
+    // Handshake with the extension-protocol bit (reserved byte 5, 0x10) set.
+    uint8_t hs[HANDSHAKE_LEN];
+    hs[0] = 19;
+    memcpy(hs + 1, "BitTorrent protocol", 19);
+    memset(hs + 20, 0, 8);
+    hs[25] = 0x10;
+    memcpy(hs + 28, info_hash, 20);
+    memcpy(hs + 48, peer_id, 20);
+    if (write_full(p, hs, HANDSHAKE_LEN) != 0) {
+        close(sock); set_err(err, errlen, "handshake send failed"); return -1;
+    }
+    uint8_t resp[HANDSHAKE_LEN];
+    if (read_full(p, resp, HANDSHAKE_LEN) != 0) {
+        close(sock); set_err(err, errlen, "no handshake"); return -1;
+    }
+    if (memcmp(resp + 28, info_hash, 20) != 0) {
+        close(sock); set_err(err, errlen, "info_hash mismatch"); return -1;
+    }
+    if (!(resp[25] & 0x10)) {
+        close(sock); set_err(err, errlen, "peer without extensions"); return -1;
+    }
+
+    // Advertise ut_metadata=1 to the peer.
+    static const char my_ehs[] = "d1:md11:ut_metadatai1eee";
+    if (send_ext(p, 0, my_ehs, sizeof(my_ehs) - 1) != 0) {
+        close(sock); set_err(err, errlen, "ext handshake send failed"); return -1;
+    }
+
+    uint8_t *payload = malloc(MAX_MSG_LEN);
+    if (!payload) { close(sock); set_err(err, errlen, "out of memory"); return -1; }
+
+    // Wait for the peer's extended handshake to learn its ut_metadata id + size.
+    int peer_ut_id = -1;
+    int64_t meta_size = -1;
+    for (int i = 0; i < 16; i++) {
+        uint32_t plen = 0;
+        int id = recv_msg(p, payload, MAX_MSG_LEN, &plen);
+        if (id < 0) break;
+        if (id != MSG_EXTENDED || plen < 1 || payload[0] != 0) continue;
+
+        be_node *d = be_parse((const char *)payload + 1, plen - 1);
+        if (d) {
+            be_node *msize = be_dict_get(d, "metadata_size");
+            be_node *m = be_dict_get(d, "m");
+            be_node *utm = m ? be_dict_get(m, "ut_metadata") : NULL;
+            if (utm && utm->type == BE_INT) peer_ut_id = (int)utm->i;
+            if (msize && msize->type == BE_INT) meta_size = msize->i;
+            be_free(d);
+        }
+        break;
+    }
+    if (peer_ut_id <= 0 || meta_size <= 0 || meta_size > MAX_META_SIZE) {
+        free(payload); close(sock);
+        set_err(err, errlen, "peer does not share metadata");
+        return -1;
+    }
+
+    uint8_t *meta = malloc(meta_size);
+    int npieces = (int)((meta_size + META_PIECE_LEN - 1) / META_PIECE_LEN);
+    bool *got = calloc(npieces, 1);
+    if (!meta || !got) {
+        free(meta); free(got); free(payload); close(sock);
+        set_err(err, errlen, "out of memory"); return -1;
+    }
+
+    // Request every metadata piece up front.
+    for (int i = 0; i < npieces; i++) {
+        char req[64];
+        int n = snprintf(req, sizeof(req), "d8:msg_typei0e5:piecei%dee", i);
+        send_ext(p, (uint8_t)peer_ut_id, req, (size_t)n);
+    }
+
+    // Collect data messages (ext sub-id == our advertised id, 1).
+    int received = 0;
+    int budget = npieces * 4 + 64;
+    while (received < npieces && budget-- > 0) {
+        uint32_t plen = 0;
+        int id = recv_msg(p, payload, MAX_MSG_LEN, &plen);
+        if (id < 0) break;
+        if (id != MSG_EXTENDED || plen < 1 || payload[0] != 1) continue;
+
+        be_node *d = be_parse((const char *)payload + 1, plen - 1);
+        if (!d) continue;
+        be_node *mt = be_dict_get(d, "msg_type");
+        be_node *pc = be_dict_get(d, "piece");
+        bool is_data = mt && mt->type == BE_INT && mt->i == 1 &&
+                       pc && pc->type == BE_INT;
+        int idx = is_data ? (int)pc->i : -1;
+        size_t header_len = 1 + d->rawlen;  // sub-id byte + bencode dict
+        be_free(d);
+
+        if (!is_data || idx < 0 || idx >= npieces || got[idx]) continue;
+
+        int64_t expect = (idx == npieces - 1)
+                             ? meta_size - (int64_t)idx * META_PIECE_LEN
+                             : META_PIECE_LEN;
+        if ((int64_t)plen - (int64_t)header_len < expect) continue;
+
+        memcpy(meta + (int64_t)idx * META_PIECE_LEN, payload + header_len, expect);
+        got[idx] = true;
+        received++;
+    }
+
+    free(payload);
+    free(got);
+    close(sock);
+
+    if (received < npieces) {
+        free(meta);
+        set_err(err, errlen, "incomplete metadata");
+        return -1;
+    }
+
+    // The reassembled metadata must hash to the info hash we asked for.
+    uint8_t hash[20];
+    mbedtls_sha1(meta, meta_size, hash);
+    if (memcmp(hash, info_hash, 20) != 0) {
+        free(meta);
+        set_err(err, errlen, "invalid metadata hash");
+        return -1;
+    }
+
+    *out = meta;
+    *out_len = meta_size;
+    return 0;
+}
+
+// ---------------------------------------------------------------------------
+// Non-blocking peer transport (TCP only). See the block comment in peer.h.
+// ---------------------------------------------------------------------------
+
+// TCP options applied at socket creation: Nagle off (17-byte requests must not
+// wait for delayed ACK). Large SO_RCVBUF/SO_SNDBUF is deferred to peer_nb_apply_speed_opts
+// after handshake to avoid ENOBUFS pool exhaustion during concurrent connect waves.
+static void tcp_speed_opts(int sock) {
+    int one = 1;
+    setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+}
+
+int peer_nb_set_rcvbuf(peer_nb *p, int bytes) {
+    if (!p || p->sock < 0 || bytes <= 0) return 0;
+    while (bytes >= 64 * 1024) {
+        if (setsockopt(p->sock, SOL_SOCKET, SO_RCVBUF, &bytes, sizeof(bytes)) == 0)
+            return bytes;
+        bytes /= 2;
+    }
+    return 0;
+}
+
+void peer_nb_apply_speed_opts(peer_nb *p) {
+    if (!p || p->sock < 0) return;
+#ifdef __SWITCH__
+    /* On Horizon (libnx) every socket buffer comes out of ONE process-wide pool
+       (~13 MB, see socketPoolBytes in main.cpp). A modest 128 KB window for
+       everyone; the netloop raises it for peers that prove fast
+       (peer_nb_set_rcvbuf from torrentfs upkeep), so slow peers do not pin
+       memory the fast ones and HTTP need. */
+    peer_nb_set_rcvbuf(p, 128 * 1024);
+#else
+    int rbuf = 512 * 1024;
+    if (setsockopt(p->sock, SOL_SOCKET, SO_RCVBUF, &rbuf, sizeof(rbuf)) != 0) {
+        rbuf = 384 * 1024;
+        if (setsockopt(p->sock, SOL_SOCKET, SO_RCVBUF, &rbuf, sizeof(rbuf)) != 0) {
+            rbuf = 256 * 1024;
+            if (setsockopt(p->sock, SOL_SOCKET, SO_RCVBUF, &rbuf, sizeof(rbuf)) != 0) {
+                rbuf = 128 * 1024;
+                setsockopt(p->sock, SOL_SOCKET, SO_RCVBUF, &rbuf, sizeof(rbuf));
+            }
+        }
+    }
+#endif
+    int sbuf = 16 * 1024;
+    if (setsockopt(p->sock, SOL_SOCKET, SO_SNDBUF, &sbuf, sizeof(sbuf)) != 0) {
+        sbuf = 8 * 1024;
+        setsockopt(p->sock, SOL_SOCKET, SO_SNDBUF, &sbuf, sizeof(sbuf));
+    }
+}
+
+// Slide any fully-consumed prefix out of the rx buffer. Doing this lazily (only
+// when we need room or run out of whole messages) is what lets peer_nb_next
+// hand back a pointer straight into rx instead of copying every payload.
+static void nb_compact(peer_nb *p) {
+    if (p->rx_off == 0) return;
+    if (p->rx_len > p->rx_off)
+        memmove(p->rx, p->rx + p->rx_off, p->rx_len - p->rx_off);
+    p->rx_len -= p->rx_off;
+    p->rx_off = 0;
+}
+
+int peer_nb_init(peer_nb *p, int sock, int64_t piece_count) {
+    memset(p, 0, sizeof(*p));
+    p->sock         = sock;
+    p->utp          = NULL;
+    p->choked       = true;
+    p->bitfield_len = (size_t)((piece_count + 7) / 8);
+    p->tx_cap       = 4096;
+    p->rx           = malloc(PEER_RX_CAP);
+    p->tx           = malloc(p->tx_cap);
+    p->bitfield     = calloc(1, p->bitfield_len ? p->bitfield_len : 1);
+    if (!p->rx || !p->tx || !p->bitfield) {
+        free(p->rx);
+        free(p->tx);
+        free(p->bitfield);
+        memset(p, 0, sizeof(*p));
+        p->sock = -1;
+        return -1;
+    }
+
+    int flags = fcntl(sock, F_GETFL, 0);
+    if (flags >= 0) fcntl(sock, F_SETFL, flags | O_NONBLOCK);
+    tcp_speed_opts(sock);
+    return 0;
+}
+
+int peer_nb_init_utp(peer_nb *p, void *utp, int64_t piece_count) {
+    memset(p, 0, sizeof(*p));
+    p->sock         = -1;
+    p->utp          = utp;
+    p->choked       = true;
+    p->bitfield_len = (size_t)((piece_count + 7) / 8);
+    p->tx_cap       = 4096;
+    p->rx           = malloc(PEER_RX_CAP);
+    p->tx           = malloc(p->tx_cap);
+    p->bitfield     = calloc(1, p->bitfield_len ? p->bitfield_len : 1);
+    if (!p->rx || !p->tx || !p->bitfield) {
+        free(p->rx);
+        free(p->tx);
+        free(p->bitfield);
+        memset(p, 0, sizeof(*p));
+        p->sock = -1;
+        return -1;
+    }
+    return 0;
+}
+
+void peer_nb_free(peer_nb *p) {
+    if (p->utp) { utp_nb_close((utp_nb_sess *)p->utp); p->utp = NULL; }
+    if (p->sock >= 0) close(p->sock);
+    free(p->rx);
+    free(p->tx);
+    free(p->bitfield);
+    memset(p, 0, sizeof(*p));
+    p->sock = -1;
+}
+
+// Append raw bytes to the tx queue, growing it if needed. (Defined further
+// below; pump_rx drives the MSE handshake which queues its produced bytes.)
+static int nb_tx_append(peer_nb *p, const void *buf, size_t len);
+
+// Every recv() on the Switch is an IPC to the bsd sysmodule. A read that
+// returns less than asked for has drained the socket, so the pump stops there
+// instead of paying one more call just to get EAGAIN (level-triggered poll
+// reports the socket again if more arrives). Measured before: ~30k socket
+// calls/s at 8 MB/s, a third of the netloop's core.
+ssize_t peer_nb_pump_rx(peer_nb *p) {
+    ssize_t total = 0;
+    p->rx_more = false;
+    for (;;) {
+        if (p->rx_len >= PEER_RX_CAP) {
+            nb_compact(p);
+            if (p->rx_len >= PEER_RX_CAP) {
+                p->rx_more = true;
+                return total;  // a whole message is buffered; caller must drain it
+            }
+        }
+        ssize_t n;
+        size_t old_len = p->rx_len;
+        size_t want = PEER_RX_CAP - p->rx_len;
+        if (p->utp) {
+            n = utp_nb_read((utp_nb_sess *)p->utp,
+                            p->rx + p->rx_len, (int)(PEER_RX_CAP - p->rx_len));
+            if (n < 0) {
+                if (p->mse_want && !p->mse_active) p->mse_failed = true;
+                return -1;
+            }
+            if (n == 0) return total;
+        } else {
+            n = recv(p->sock, p->rx + p->rx_len, PEER_RX_CAP - p->rx_len, 0);
+            if (n > 0) {
+                // fall through
+            } else if (n == 0) {
+                if (p->mse_want && !p->mse_active) p->mse_failed = true;
+                return -1;  // peer closed
+            } else if (errno == EINTR) {
+                continue;
+            } else if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                return total;
+            } else {
+                if (p->mse_want && !p->mse_active) p->mse_failed = true;
+                return -1;
+            }
+        }
+        p->rx_len += (size_t)n;
+        total += n;
+
+        if (p->mse_active && p->mse.rc4_selected) {
+            // Stream is crypto-live: decrypt only what arrived just now.
+            mse_peer_decrypt(&p->mse, p->rx + old_len, (size_t)n);
+        } else if (p->mse_want) {
+            // Drive the MSE handshake over whatever has accumulated.
+            if (n >= 8)   // the dump shows 8 bytes: never read past what arrived
+                engine_log(ENGINE_LOG_DEBUG,
+                           "[mse] rx %d bytes: %02x %02x %02x %02x %02x %02x %02x %02x",
+                           (int)n, p->rx[old_len], p->rx[old_len + 1],
+                           p->rx[old_len + 2], p->rx[old_len + 3],
+                           p->rx[old_len + 4], p->rx[old_len + 5],
+                           p->rx[old_len + 6], p->rx[old_len + 7]);
+            for (;;) {
+                size_t avail = p->rx_len - p->rx_off;
+                if (avail == 0) break;
+                uint8_t out[256];
+                size_t consumed = 0, produced = 0;
+                int r = mse_peer_feed(&p->mse, p->rx + p->rx_off, avail,
+                                      &consumed, out, sizeof(out), &produced);
+                p->rx_off += consumed;
+                if (produced && nb_tx_append(p, out, produced) != 0)
+                    return -1;
+                engine_log(ENGINE_LOG_DEBUG,
+                           "[mse] feed r=%d consumed=%zu produced=%zu",
+                           r, consumed, produced);
+                if (r == MSE_FAIL || r == MSE_PLAIN) {
+                    p->mse_failed = true;
+                    return -2;  // caller: close, retry this peer plaintext
+                }
+                if (r == MSE_DONE) {
+                    p->mse_active = true;
+                    engine_log(ENGINE_LOG_DEBUG,
+                               "[mse] done rc4=%d", p->mse.rc4_selected ? 1 : 0);
+                    // Bytes past the handshake are encrypted BT data: decrypt
+                    // the buffered remainder in place.
+                    size_t rem = p->rx_len - p->rx_off;
+                    if (rem && p->mse.rc4_selected)
+                        mse_peer_decrypt(&p->mse, p->rx + p->rx_off, rem);
+                    // The BT handshake already rode inside the encrypted
+                    // request as the initial payload (IA). Re-queuing it on
+                    // the stream would send it a SECOND time, which
+                    // spec-compliant peers (qBittorrent/libtorrent) read as
+                    // garbage and close us over (measured: every completed
+                    // MSE session died right after the duplicate arrived).
+                    break;
+                }
+                if (consumed == 0) break;  // need more input
+            }
+            nb_compact(p);
+        }
+        if (!p->utp && (size_t)n < want) return total;   // socket drained
+    }
+}
+
+int peer_nb_next(peer_nb *p, uint8_t *id, uint8_t **payload, uint32_t *plen) {
+    for (;;) {
+        size_t avail = p->rx_len - p->rx_off;
+        if (avail < 4) {
+            nb_compact(p);
+            return 0;
+        }
+        uint32_t len_be;
+        memcpy(&len_be, p->rx + p->rx_off, 4);
+        uint32_t len = ntohl(len_be);
+        if (len == 0) {  // keep-alive carries no id
+            p->rx_off += 4;
+            continue;
+        }
+        // A BITFIELD is 1 + ceil(pieces / 8) bytes: over 135k pieces it is
+        // longer than MAX_MSG_LEN. Accept it as long as it fits the rx buffer.
+        if (len > MAX_MSG_LEN &&
+            (len > 1 + p->bitfield_len || len > PEER_RX_CAP - 4)) return -1;
+        if (avail < 4 + (size_t)len) {
+            nb_compact(p);
+            return 0;  // message still on the wire
+        }
+        *id      = p->rx[p->rx_off + 4];
+        *plen    = len - 1;
+        *payload = p->rx + p->rx_off + 5;
+        p->rx_off += 4 + (size_t)len;
+        return 1;
+    }
+}
+
+// Append raw bytes to the tx queue, growing it if needed.
+static int nb_tx_append(peer_nb *p, const void *buf, size_t len) {
+    if (p->tx_head > 0 && p->tx_head == p->tx_len) {
+        p->tx_head = p->tx_len = 0;  // fully drained: reuse from the front
+    }
+    if (p->tx_len + len > p->tx_cap) {
+        if (p->tx_head > 0) {  // reclaim the drained prefix before growing
+            memmove(p->tx, p->tx + p->tx_head, p->tx_len - p->tx_head);
+            p->tx_len -= p->tx_head;
+            p->tx_head = 0;
+        }
+        while (p->tx_len + len > p->tx_cap) {
+            size_t cap = p->tx_cap * 2;
+            // Serving blocks queues 16 KB a piece; cap the backlog so a peer
+            // that never drains cannot balloon us out of memory.
+            if (cap > 512 * 1024) return -1;
+            uint8_t *nt = realloc(p->tx, cap);
+            if (!nt) return -1;
+            p->tx     = nt;
+            p->tx_cap = cap;
+        }
+    }
+    memcpy(p->tx + p->tx_len, buf, len);
+    // Once the MSE handshake completes every byte we queue is RC4-encrypted
+    // (encrypt-at-queue is identical to encrypt-at-send: both consume the
+    // keystream in the same order, and a partially flushed tx buffer is
+    // never re-encrypted). Handshake bytes were queued while mse_active was
+    // false and go out raw -- the encrypted request is already ciphertext.
+    if (p->mse_active && p->mse.rc4_selected)
+        mse_rc4_crypt(&p->mse.send_rc4, p->tx + p->tx_len,
+                      p->tx + p->tx_len, len);
+    p->tx_len += len;
+    return 0;
+}
+
+int peer_nb_queue_keepalive(peer_nb *p) {
+    static const uint8_t ka[4] = {0, 0, 0, 0};
+    return nb_tx_append(p, ka, sizeof(ka));
+}
+
+int peer_nb_queue(peer_nb *p, uint8_t id, const void *payload, uint32_t plen) {
+    uint8_t hdr[5];
+    uint32_t len = htonl(1 + plen);
+    memcpy(hdr, &len, 4);
+    hdr[4] = id;
+    if (nb_tx_append(p, hdr, 5) != 0) return -1;
+    if (plen && nb_tx_append(p, payload, plen) != 0) return -1;
+    return 0;
+}
+
+int peer_nb_flush(peer_nb *p) {
+    if (p->utp) {
+        if (p->tx_head < p->tx_len) {
+            int n = utp_nb_write((utp_nb_sess *)p->utp,
+                                 p->tx + p->tx_head,
+                                 (int)(p->tx_len - p->tx_head));
+            if (n < 0) return -1;
+            if (n > 0) p->tx_head += (size_t)n;
+        }
+        if (p->tx_head >= p->tx_len) p->tx_head = p->tx_len = 0;
+        return 0;
+    }
+    while (p->tx_head < p->tx_len) {
+        // Cap each send at 32 KiB: libnx marshals one bsd IPC per call and
+        // oversized buffers stall/fail under the socket transfer-memory limit
+        // (pipensx pattern). Request traffic is tiny; the cap only matters
+        // for the rare deep pipeline flush.
+        size_t chunk = p->tx_len - p->tx_head;
+        if (chunk > 32 * 1024) chunk = 32 * 1024;
+        ssize_t n = send(p->sock, p->tx + p->tx_head, chunk, 0);
+        if (n > 0) {
+            p->tx_head += (size_t)n;
+            continue;
+        }
+        if (n < 0 && errno == EINTR) continue;
+        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) return 0;
+        return -1;
+    }
+    p->tx_head = p->tx_len = 0;
+    return 0;
+}
+
+bool peer_nb_tx_pending(const peer_nb *p) {
+    return p->tx_head < p->tx_len;
+}
+
+int peer_nb_send_handshake(peer_nb *p, const uint8_t info_hash[20],
+                           const uint8_t peer_id[20]) {
+    if (p->mse_want) {
+        // MSE first: emit pubA and ride the 68-byte BT handshake inside the
+        // encrypted request once the responder's pubB arrives. Plaintext is
+        // only retried after the handshake proves the peer is not MSE.
+        uint8_t ia[HANDSHAKE_LEN];
+        ia[0] = 19;
+        memcpy(ia + 1, "BitTorrent protocol", 19);
+        memset(ia + 20, 0, 8);
+        ia[25] = 0x10;   // BEP 10 extension bit (we speak ut_pex)
+        memcpy(ia + 28, info_hash, 20);
+        memcpy(ia + 48, peer_id, 20);
+
+        uint8_t out[MSE_DH_LEN];
+        size_t out_len = 0;
+        mse_peer_start(&p->mse, info_hash, ia, HANDSHAKE_LEN, out, &out_len);
+        return nb_tx_append(p, out, out_len);
+    }
+    uint8_t hs[HANDSHAKE_LEN];
+    hs[0] = 19;
+    memcpy(hs + 1, "BitTorrent protocol", 19);
+    memset(hs + 20, 0, 8);
+    hs[25] = 0x10;   // BEP 10 extension bit (we speak ut_pex)
+    memcpy(hs + 28, info_hash, 20);
+    memcpy(hs + 48, peer_id, 20);
+    return nb_tx_append(p, hs, HANDSHAKE_LEN);
+}
+
+int peer_nb_recv_handshake(peer_nb *p, const uint8_t info_hash[20]) {
+    if (p->rx_len - p->rx_off < HANDSHAKE_LEN) {
+        nb_compact(p);
+        return 0;  // not all 68 bytes yet
+    }
+    const uint8_t *hs = p->rx + p->rx_off;
+    if (hs[0] != 19 || memcmp(hs + 1, "BitTorrent protocol", 19) != 0) return -1;
+    if (memcmp(hs + 28, info_hash, 20) != 0) return -1;  // different torrent
+    p->rx_off += HANDSHAKE_LEN;
+    p->handshaked = true;
+    p->ext_ok = (hs[25] & 0x10) != 0;
+    nb_compact(p);
+    return 1;
+}
+
+int peer_nb_queue_ext(peer_nb *p, uint8_t ext_id, const void *payload,
+                      uint32_t plen) {
+    uint8_t hdr[6];
+    uint32_t len = htonl(2 + plen);
+    memcpy(hdr, &len, 4);
+    hdr[4] = MSG_EXTENDED;
+    hdr[5] = ext_id;
+    if (nb_tx_append(p, hdr, 6) != 0) return -1;
+    if (plen && nb_tx_append(p, payload, plen) != 0) return -1;
+    return 0;
+}
+
+int peer_nb_queue_ext_handshake(peer_nb *p) {
+    // d1:md6:ut_pexi1eee -- advertise "m": { "ut_pex": 1 }
+    static const char ehs[] = "d1:md6:ut_pexi1eee";
+    return peer_nb_queue_ext(p, 0, ehs, sizeof(ehs) - 1);
+}

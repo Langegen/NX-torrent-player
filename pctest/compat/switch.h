@@ -7,6 +7,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include <stdlib.h>
 #include <time.h>
 #include <pthread.h>
 #include <unistd.h>
@@ -30,8 +31,16 @@ static inline void mutexInit(Mutex *mtx) {
     pthread_mutex_init(&mtx->m, NULL);
     mtx->init = 1;
 }
+// libnx allows a zero-initialised Mutex, so a lock may come first. Two
+// threads racing that lazy init would both pthread_mutex_init the same mutex
+// (UB: on cygwin, deadlocks seconds later), so it goes through one global lock.
+static pthread_mutex_t g_compat_init_mtx = PTHREAD_MUTEX_INITIALIZER;
 static inline void mutexLock(Mutex *mtx) {
-    if (!mtx->init) mutexInit(mtx);   // libnx allows a zero-initialised Mutex
+    if (!mtx->init) {
+        pthread_mutex_lock(&g_compat_init_mtx);
+        if (!mtx->init) mutexInit(mtx);
+        pthread_mutex_unlock(&g_compat_init_mtx);
+    }
     pthread_mutex_lock(&mtx->m);
 }
 static inline void mutexUnlock(Mutex *mtx) { pthread_mutex_unlock(&mtx->m); }

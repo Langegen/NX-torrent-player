@@ -3,6 +3,9 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <stdbool.h>
+
+#include "torrent_meta.h"   // peer_addr
 
 // Streaming torrent backend: downloads pieces on demand, prioritizing the ones
 // just ahead of the current read position, and exposes a blocking byte-range
@@ -22,7 +25,19 @@ torrentfs *torrentfs_open(const char *source, const char *cache_path,
 torrentfs *torrentfs_open_file(const char *source, const char *cache_path,
                                int file_index, char *err, size_t errlen);
 
+// Same as torrentfs_open_file, but `cancel` (may be NULL) is polled while the
+// magnet metadata is being fetched, so opening can be aborted mid-fetch.
+torrentfs *torrentfs_open_file_cancel(const char *source, const char *cache_path,
+                                      int file_index,
+                                      const volatile bool *cancel,
+                                      char *err, size_t errlen);
+
 void torrentfs_close(torrentfs *tfs);
+
+// Switch the stream to a different file in the same torrent without tearing down
+// the peer swarm, DHT, or network connections.
+// Returns true on success.
+bool torrentfs_select_file(torrentfs *tfs, int file_index);
 
 // Total size of the streamed file, in bytes.
 int64_t torrentfs_size(const torrentfs *tfs);
@@ -36,8 +51,25 @@ int64_t torrentfs_read(torrentfs *tfs, int64_t offset, char *buf, int64_t nbytes
 // Move the download priority window without reading (used by seek).
 void torrentfs_set_playhead(torrentfs *tfs, int64_t offset);
 
+// Pause/resume downloading: no new dials or piece claims while paused; the
+// existing sessions and pipelines are left alone.
+void torrentfs_pause(torrentfs *tfs, int on);
+
+// Temporarily suspend dialing new peers for `seconds` to grant network headroom
+// to parallel metadata probes or tracker announces.
+void torrentfs_pause_dials(torrentfs *tfs, int seconds);
+
 // Unblock any in-progress read so playback can shut down.
 void torrentfs_cancel(torrentfs *tfs);
+
+// Unblock any currently blocked reader thread without stopping the network loops.
+void torrentfs_cancel_reader(torrentfs *tfs);
+
+// Resume reader thread after cancellation so subsequent reads succeed.
+void torrentfs_resume_reader(torrentfs *tfs);
+
+// Strict piece verification mode (1 = wait for full SHA-1 verified pieces).
+void torrentfs_set_strict_verify(torrentfs *tfs, int on);
 
 // Snapshot of progress for on-screen/debug reporting.
 void torrentfs_stats(const torrentfs *tfs, int64_t *pieces_done,
@@ -46,11 +78,37 @@ void torrentfs_stats(const torrentfs *tfs, int64_t *pieces_done,
 // Number of peers found by the tracker announce.
 int torrentfs_peer_count(const torrentfs *tfs);
 
+// Inject peers directly into the pool (diagnostics/manual rescue: e.g. seed
+// addresses taken from another client while the tracker is unreachable).
+// Duplicates are ignored; the entries are dialed like any tracker peer.
+void torrentfs_add_peers(torrentfs *tfs, const peer_addr *peers, int n);
+
+// Live handshaked sessions whose bitfield covers the whole streamed file
+// (true seeds for this download, as opposed to the session count).
+int torrentfs_seed_count(const torrentfs *tfs);
+
+// Information about one live/handshaking session.
+typedef struct {
+    uint32_t ip;          // network byte order
+    uint16_t port;        // host byte order
+    int64_t  bytes_recv;  // cumulative bytes received
+    double   rate_bps;    // smoothed receive rate
+    int      rtt_ms;      // -1 if unknown
+    bool     connecting;
+    bool     handshaked;
+    bool     choked;
+    int64_t  claim_piece; // highest-priority piece with an outstanding request, -1 if none
+} torrentfs_peer_info;
+
+// Fill up to `max` live session entries; returns count written.
+int torrentfs_get_peers(const torrentfs *tfs, torrentfs_peer_info *out, int max);
+
 // Rough worker diagnostics: conn_ok, conn_fail, unchoke_ok, choked, piece_ok,
 // fetch_fail, sha_fail, blocks_served, interested_recv, request_recv.
 // `out` must have room for 10 ints.
 void torrentfs_debug_counts(const torrentfs *tfs, int out[10]);
 int64_t torrentfs_bytes_recv(const torrentfs *tfs);
+int64_t torrentfs_dup_bytes(const torrentfs *tfs);
 int torrentfs_incoming_count(const torrentfs *tfs);
 
 // Peer sessions currently connected+handshaked, and the high-water mark. This
@@ -64,6 +122,11 @@ void torrentfs_live_peers(const torrentfs *tfs, int *live, int *peak,
 // timeouts = SYN sent but the peer never answered (a genuinely dead/NAT'd peer).
 void torrentfs_fail_kinds(const torrentfs *tfs, int *sock_fail, int *timeouts);
 
+// TCP connects whose handshake was rejected/never completed (the peer closed
+// on our plaintext hello, or spoke a different protocol/info_hash). High here
+// while connects succeed means encryption-required peers are refusing us.
+int torrentfs_hs_fail(const torrentfs *tfs);
+
 // claiming = live sessions actually downloading a piece; idle = sessions that
 // are unchoked but have nothing claimed, i.e. starved by the read-ahead window.
 void torrentfs_claim_stats(const torrentfs *tfs, int *claiming, int *idle);
@@ -73,8 +136,8 @@ void torrentfs_claim_stats(const torrentfs *tfs, int *claiming, int *idle);
 // messages accepted / dropped because their length didn't match what we expect.
 void torrentfs_bitfield_stats(const torrentfs *tfs, int *empty, int *ok, int *bad);
 
-// The window claim_piece last searched (playhead, and the [lo,hi) range), how
-// often it found nothing vs something, and how many pieces are held INFLIGHT.
+// The streaming window [lo,hi) around the playhead, how often the request
+// scan found nothing vs something, and how many pieces are held INFLIGHT.
 void torrentfs_claim_debug(const torrentfs *tfs, int64_t *ph, int64_t *lo,
                            int64_t *hi, int *fail, int *ok, int *inflight);
 
@@ -94,6 +157,19 @@ int64_t torrentfs_cache_written(const torrentfs *tfs);
 // a RAM-store byte count -- so the UI can label it and the SD probes honestly.
 int torrentfs_ram_active(const torrentfs *tfs);
 
+// Piece priority zones for the external scheduler. 0 = internal picker decides.
+// Higher values are lower priority; the scheduler assigns Critical/Urgent/etc.
+bool torrentfs_set_piece_zone(torrentfs *tfs, int64_t first_piece,
+                              int64_t piece_count, int zone);
+bool torrentfs_clear_piece_zones(torrentfs *tfs);
+// Replace ALL piece zones in one step: zone[r] applies to pieces
+// [first[r], first[r] + count[r]); everything else becomes unzoned. The
+// netloop never sees a half-applied window (clear + several set_piece_zone
+// calls left it empty or partial in between -- requests stopped meanwhile).
+// n == 0 clears the zones.
+bool torrentfs_set_zones(torrentfs *tfs, const int64_t *first, const int64_t *count,
+                         const int *zone, int n);
+
 // How many milliseconds of playback the player has buffered ahead. The deeper
 // the backlog, the fewer sessions the engine lets claim new work (a ramp from
 // the full swarm below 10 s down to a single session above 30 s), because the
@@ -103,9 +179,23 @@ int torrentfs_ram_active(const torrentfs *tfs);
 // (full speed) until set.
 void torrentfs_set_backlog(torrentfs *tfs, int ms);
 
+// Wake the discovery thread so it re-announces to trackers/DHT immediately.
+void torrentfs_announce_now(torrentfs *tfs);
+
 // Sessions currently allowed to claim work (the calm-mode budget); equals the
 // session cap when unrestricted. For the debug panel.
 int torrentfs_calm(const torrentfs *tfs);
+
+// Session cap for this torrent (<= the compiled MAX_SESS; <= 0 restores it).
+// The dial target follows it down. For tests and a future global budget.
+void torrentfs_set_session_limit(torrentfs *tfs, int n);
+
+// Mark a file (de)selected. Only the lookahead into the next file honours it:
+// the streamed file itself is always downloaded.
+void torrentfs_set_file_wanted(torrentfs *tfs, int file_index, bool wanted);
+
+// Peer turnover timing, process-wide (defaults 30 s / 60 s). Tests shorten it.
+void torrentfs_set_rotation_timing(int turnover_secs, int trial_secs);
 
 // Fill-rate governor (an Options toggle, on by default): when the backlog is
 // deep, pause claiming while the measured download rate exceeds a
@@ -126,8 +216,9 @@ int  torrentfs_governor(void);
 void torrentfs_set_ram_stream(int on);
 int  torrentfs_ram_stream(void);
 
-// How many bytes ahead of the playhead to fetch (default 32 MiB). In RAM mode
-// it is still capped at half the RAM window. Takes effect immediately.
+// How many bytes ahead of the playhead to fetch (default 32 MiB; the Options
+// buffer preset). The scheduler looks at least this far ahead, and in RAM mode
+// never further than 3/4 of the RAM window. Takes effect immediately.
 void torrentfs_set_stream_window(int64_t bytes);
 
 // Thread heartbeats, indexed netloop/writer/reader/ui: how long ago (ms) each
@@ -174,6 +265,9 @@ int torrentfs_active_pieces(const torrentfs *tfs, int64_t *idx, int *have,
 
 // The torrent's name, for display. Never NULL.
 const char *torrentfs_name(const torrentfs *tfs);
+
+// The torrent's 20-byte info-hash (routes incoming peers to it).
+const uint8_t *torrentfs_info_hash(const torrentfs *tfs);
 
 // Last piece-fetch failure reason, for diagnostics.
 void torrentfs_last_err(const torrentfs *tfs, char *buf, size_t len);

@@ -10,6 +10,8 @@
 /pctest/enginetest
 *.o
 /pctest/test_suite
+/pctest/test_stream
+/pctest/test_stream.exe
 /pctest/test_suite.exe
 /pctest/test_httpsrc
 /pctest/test_httpsrc.exe

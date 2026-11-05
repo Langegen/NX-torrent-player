@@ -43,6 +43,7 @@ extern "C" {
 #include "httpsrc.h"
 #include "stream.h"
 #include "torrent.h"  // magnet metadata-fetch progress counters
+#include "engine_services.h"
 }
 
 #include "i18n.hpp"
@@ -70,6 +71,15 @@ void* getProcAddress(void*, const char* name)
 // size: more for smoother playback on scarce swarms, at the cost of a longer
 // wait.
 double bufferSecs() { return config::bufferPreset().startSecs; }
+
+// The shortest buffer playback may start on: a fast swarm still gets a few
+// seconds of slack for the first stalls of a fresh connection.
+constexpr double kMinStartSecs = 3.0;
+// The download must beat the bitrate by this much to start on kMinStartSecs.
+constexpr double kStartRateMargin = 1.3;
+// Seconds of shortfall the start buffer covers when the download is slower
+// than that: (bitrate * margin / rate - 1) of a second is lost per second.
+constexpr double kStartDeficitSecs = 60.0;
 
 // The loudness boost (Options -> Boost quiet audio). Realtime normalisation to
 // a consistent target: quiet 5.1 dialogue comes up without clipping the loud
@@ -401,6 +411,8 @@ void MpvView::startEngine(const std::string& source, int fileIndex)
         statusLabel->setText(source.rfind("magnet:", 0) == 0
                                  ? tr("Fetching metadata...")
                                  : tr("Opening torrent..."));
+    startupMark(source.rfind("magnet:", 0) == 0 ? "engine open (magnet)"
+                                                 : "engine open (.torrent)");
 
     auto liveFlag = this->alive;
     brls::async([this, liveFlag, source, fileIndex]() {
@@ -428,6 +440,9 @@ void MpvView::startEngine(const std::string& source, int fileIndex)
                 return;
             }
             tfs = t;
+            // Incoming peers (the listen port) are routed to it from now on.
+            engine_register_torrent(t);
+            startupMark("torrent open: metadata ready, dialing peers");
             // A magnet from the Local list may have had no name -- now that its
             // metadata resolved, hand the real name back so it can be saved.
             if (g_magnetResolvedHook && source.compare(0, 7, "magnet:") == 0)
@@ -600,6 +615,7 @@ bool MpvView::startMpv()
     if (direct)
     {
         mpv_observe_property(mpv, 0, "cache-speed", MPV_FORMAT_DOUBLE);
+        mpv_observe_property(mpv, 0, "file-size", MPV_FORMAT_INT64);
         // http:// (and HLS over it) is FFmpeg's own; https:// is not compiled
         // into this FFmpeg, so it goes through curl as nxhttps://.
         std::string url = playUrl;
@@ -1591,7 +1607,12 @@ MpvView::~MpvView()
     // shutdown touches GL, so it MUST stay on this (UI/GL) thread -- doing it on
     // a background thread crashed. This part is fast.
     if (tfs)
+    {
+        // Before anything else: the listener must not hand it a peer while
+        // it is being torn down (the push runs under the same lock).
+        engine_unregister_torrent(tfs);
         torrentfs_cancel(tfs);
+    }
     if (renderCtx)
         mpv_render_context_free(renderCtx);
     if (mpv)
@@ -1655,6 +1676,7 @@ void MpvView::pumpEvents()
                 // connecting.
                 fileLoaded = true;
                 brls::Logger::info("[mpv event] file loaded");
+                startupMark("mpv opened the file (header + index read)");
                 // Ask the subtitle addons now: the buffering wait is dead time
                 // for the network anyway, and the list has to be there before
                 // the first X press for the menu to be worth anything.
@@ -1726,6 +1748,9 @@ void MpvView::pumpEvents()
                 else if (p->format == MPV_FORMAT_FLAG &&
                          std::strcmp(p->name, "demuxer-cache-idle") == 0)
                     obsCacheIdle = *(int*)p->data != 0;
+                else if (p->format == MPV_FORMAT_INT64 &&
+                         std::strcmp(p->name, "file-size") == 0)
+                    obsFileSize = *(int64_t*)p->data;
                 break;
             }
             default:
@@ -2316,6 +2341,37 @@ void MpvView::buildLoadingOverlay(const std::string& title)
     this->addView(infoOverlay);
 }
 
+double MpvView::startTargetSecs() const
+{
+    const double maxSecs = bufferSecs();
+    double bytes = tfs ? (double)torrentfs_size(tfs) : (double)obsFileSize;
+    double rate  = tfs ? rateEwma : obsCacheSpeed;
+    // Until the bitrate and a settled rate are known, the preset decides.
+    if (obsDur <= 1.0 || bytes <= 0.0 || rate <= 0.0 || (tfs && rateSamples < 4))
+        return maxSecs;
+    double bitrate = bytes / obsDur;   // average, bytes per second
+    double need = kMinStartSecs +
+                  (bitrate * kStartRateMargin / rate - 1.0) * kStartDeficitSecs;
+    if (need < kMinStartSecs) need = kMinStartSecs;
+    if (need > maxSecs) need = maxSecs;
+    return need;
+}
+
+void MpvView::startupMark(const char* what)
+{
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                  std::chrono::steady_clock::now() - startupT0)
+                  .count();
+    brls::Logger::info("[startup] +{} ms {}", (long long)ms, what);
+    // The short form for the ZR panel: the first word of each phase.
+    std::string word(what);
+    word = word.substr(0, word.find_first_of(" :("));
+    char part[48];
+    std::snprintf(part, sizeof(part), "%s%s %.1f", startupLine.empty() ? "" : "  ",
+                  word.c_str(), (double)ms / 1000.0);
+    startupLine += part;
+}
+
 void MpvView::updateLoadingOverlay()
 {
     if (!loadingOverlay || openFailed)
@@ -2335,9 +2391,7 @@ void MpvView::updateLoadingOverlay()
         int total = torrent_meta_peers_total;
         if (statusLabel)
         {
-            if (torrent_meta_state == META_DHT)
-                statusLabel->setText(tr("Searching DHT for peers..."));
-            else if (torrent_meta_state == META_ANNOUNCE)
+            if (torrent_meta_state == META_ANNOUNCE && total == 0)
                 statusLabel->setText(tr("Announcing to trackers..."));
             else if (total > 0)
                 statusLabel->setText(std::string(tr("Metadata: peer ")) +
@@ -2356,7 +2410,7 @@ void MpvView::updateLoadingOverlay()
         double secs = obsCacheSecs;
         if (secs >= 0.0)
         {
-            const double need = bufferSecs();
+            const double need = startTargetSecs();
             pct = (int)(secs / need * 100.0);
             if (secs >= need)
                 ready = true;  // buffered enough -> unpause and show video
@@ -2403,10 +2457,27 @@ void MpvView::updateLoadingOverlay()
         lastBytes  = bytes;
         lastSample = now;
 
+        rateEwma = rateSamples++ == 0 ? speedBps : rateEwma * 0.7 + speedBps * 0.3;
+
         int peers = tfs ? torrentfs_peer_count(tfs) : 0;
         int64_t piecesDone = 0, piecesTotal = 0, playhead = 0;
         if (tfs)
             torrentfs_stats(tfs, &piecesDone, &piecesTotal, &playhead);
+        if (tfs && !markedFirstPeer)
+        {
+            int live = 0;
+            torrentfs_live_peers(tfs, &live, nullptr, nullptr);
+            if (live > 0)
+            {
+                markedFirstPeer = true;
+                startupMark("first peer connected");
+            }
+        }
+        if (piecesDone > 0 && !markedFirstPiece)
+        {
+            markedFirstPiece = true;
+            startupMark("first piece verified");
+        }
 
         const char* status;
         if (!fileLoaded)
@@ -2763,6 +2834,9 @@ void MpvView::updateInfoOverlay()
                   "METADATA\n"
                   "Peers tried: %d / %d\n"
                   "\n"
+                  "STARTUP (s from open)\n"
+                  "%s\n"
+                  "\n"
                   "HEADER\n"
                   "%s\n"
                   "\n"
@@ -2775,6 +2849,7 @@ void MpvView::updateInfoOverlay()
                   (double)torrentfs_size(tfs) / (1024.0 * 1024.0 * 1024.0),
                   (long long)total, (long long)(plen / 1024),
                   torrent_meta_peers_tried, torrent_meta_peers_total,
+                  startupLine.empty() ? "-" : startupLine.c_str(),
                   hdr.c_str(), dl.c_str());
     if (infoLabel2) infoLabel2->setText(right);
 
@@ -3256,6 +3331,15 @@ void MpvView::draw(NVGcontext* vg, float x, float y, float width, float height,
         // Buffered enough: start playback and take the loading screen down.
         if (mpv)
             mpv_set_property_string(mpv, "pause", "no");
+        {
+            char what[160];
+            std::snprintf(what, sizeof(what),
+                          "playback starts (buffered %.1f s of %.1f s target, "
+                          "%.2f MB/s)",
+                          obsCacheSecs, startTargetSecs(),
+                          (tfs ? rateEwma : obsCacheSpeed) / (1024.0 * 1024.0));
+            startupMark(what);
+        }
         loadingOverlay->setVisibility(brls::Visibility::GONE);
         overlayHidden = true;
     }

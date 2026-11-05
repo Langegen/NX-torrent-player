@@ -35,9 +35,14 @@ peer sends 16 KB blocks, we send 17-byte requests). With the defaults the pool
 ran dry at ~20 sockets and `socket()` returned ENOBUFS ("No buffer space
 available"), capping concurrent peers regardless of swarm size.
 
-The max sizes are left at stock, so the memory footprint matches unpatched
-borealis: only the per-socket initial buffers are cut. Growing the pool instead
-starved the nvtegra video decoder, which then fell back to software H.264.
+The pool is `sb_efficiency * (tcp_tx_max + tcp_rx_max + udp_tx + udp_rx)`.
+Upload is a trickle, so the tx max drops to 64 KB and the rx max rises to
+512 KB (a receive window of 256 KB capped one peer at ~2.5 MB/s at 100 ms RTT);
+UDP is 16/32 KB. The pool stays ~5 MB, about the ~4.5 MB of the stock sizes.
+Growing the pool itself is what starved the nvtegra video decoder, which then
+fell back to software H.264 — watch for that if these numbers go up (1 MB rx
+max would make the pool ~9 MB). `num_bsd_sessions` is 16 (was 12): the
+engine's blocking sockets (announces, metadata workers, DHT, UPnP) plus curl.
 
 The patch is marked with a `LOCAL PATCH` comment in the source.
 

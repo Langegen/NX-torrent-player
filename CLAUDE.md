@@ -47,16 +47,25 @@ rewrites the container paths.
   `torrent_play` (open a Jackett result or magnet and pick the file to play),
   `library` (bookmarks + per-title/per-episode progress, library.json),
   `bookmarks` (the Bookmarks tab)
-- `engine/` — the torrent engine (C): `torrentfs` (piece picking, cache, the
-  streaming read), `peer`, `swarm`, `torrent`, `udp_tracker`, `dht`, `magnet`,
-  `stream` (the mpv `stream_cb` protocols: `torrent://` and `nxhttps://`),
-  `httpsrc` (https read through curl range requests), plus vendored libutp
-  (`utp*.cpp`)
+- `engine/` — the torrent engine (C), ported from TorrentShopNX (same
+  lineage; the `TSNX_*` names are kept so the files stay diffable):
+  `torrentfs` (block-level scheduler: several peers per piece, hedged
+  requests, endgame, slow-peer isolation, PEX, calm mode; RAM window; the
+  streaming read), `bt_peer` (wire protocol, BEP 9), `torrent_meta` (.torrent,
+  trackers, the pipelined magnet fetch, the metadata + peer caches),
+  `udp_tracker`, `dhtclient`/`dht` (one background DHT with a node cache),
+  `listen` + `upnp` (incoming peers), `utp_nb` (µTP), `engine_services` (the
+  process-wide part, started in `main()`), `magnet`, `stream` (the mpv
+  `stream_cb` protocols: `torrent://` and `nxhttps://`), `httpsrc` (https read
+  through curl range requests), plus vendored libutp (`utp*.cpp`).
+  `torrent.h`/`peer.h` are shims over `torrent_meta.h`/`bt_peer.h`;
+  `engine_compat.h` is force-included on the Switch
 - `include/` — libutp headers, paired with `engine/utp*.cpp`
 - `assets/` — app icon, logos, list icons (copied into the nro's romfs)
 - `library/borealis/` — vendored UI framework, locally patched: see its
   `VENDORED.md` (upstream commit + the ENOBUFS patch, re-apply if re-cloned)
-- `pctest/` — builds the engine for a PC, without the Switch or the UI
+- `pctest/` — builds the engine for a PC, without the Switch or the UI;
+  `test_stream` streams from mock seeders on 127.0.0.x the way mpv reads
 
 The entry point is `int main()` in `app/main.cpp`.
 
@@ -67,9 +76,15 @@ The entry point is `int main()` in `app/main.cpp`.
   the player without splitting the frame (`nvgEndFrame` / `nvgBeginFrame` around
   the mpv render) paints over the video. That was the "black video, working
   audio" bug.
-- **libnx caps concurrent *blocking* socket calls at 16** (`num_bsd_sessions`).
-  The peer loop is a single `poll()`, so it needs ~5 — this is *not* what limits
-  peer count (see the ENOBUFS patch in `library/borealis/VENDORED.md`).
+- **libnx caps concurrent *blocking* socket calls** (`num_bsd_sessions`, 16
+  here). The peer loop is a single `poll()`; the blocking ones are tracker
+  announces (3), metadata workers (5), the DHT, UPnP and curl — this is *not*
+  what limits peer count (see the socket-pool patch in
+  `library/borealis/VENDORED.md`).
+- **`torrentfs_read` must never return 0 before EOF**: mpv takes it as the end
+  of the file and the player closes (TorrentShopNX's stall timeout did that).
+- The PC app's `compat/sys/socket.h` converts `SO_RCVTIMEO` timevals to
+  Winsock's milliseconds: unconverted, a 250 ms timeout became "forever".
 - **FAT32 caps a file at 4 GB**: the piece cache is chunked for this reason.
 - The Switch mounts **no CA store**, so the app ships one: `assets/cacert.pem`
   is copied into the romfs and `app/http.cpp` points `CURLOPT_CAINFO` at
