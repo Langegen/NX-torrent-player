@@ -67,6 +67,7 @@ class Timeline : public brls::Box
     double position = 0.0;  // what has been played
     double buffered = 0.0;  // read ahead up to here
     double cursor   = 0.0;  // where a seek is aimed (shown while seeking)
+    double playing  = 0.0;  // what is on screen now: the jump is cursor - this
     bool seeking    = false;
     bool focused    = false;
 

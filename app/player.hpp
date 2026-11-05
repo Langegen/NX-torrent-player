@@ -123,7 +123,45 @@ class MpvView : public brls::Box
     void pumpEvents();
     void startEngine(const std::string& source, int fileIndex);
     bool startMpv();
+
+    // ---- Input ------------------------------------------------------------
+    // Every input source -- the Joy-Cons, a Pro controller, a USB or Bluetooth
+    // remote that the console sees as a keyboard (arrows, Enter, Esc), the PC
+    // keyboard -- is turned into one of these and handled in command(). The
+    // whole player works with the arrows, OK and Back alone; the other buttons
+    // are shortcuts to things the panel also offers.
+    enum class Cmd
+    {
+        Up,
+        Down,
+        Left,
+        Right,
+        Ok,
+        Back,
+        PlayPause,
+        Menu,         // the settings panel
+        Info,         // the stream info overlay
+        Lock,
+        Episodes,
+        PrevEpisode,
+        NextEpisode,
+        Slower,
+        Faster,
+    };
     void registerPlayerActions();
+    bool command(Cmd c);
+    void onBack();
+    void toggleInfo();
+
+    // Back while the video plays leaves only on a second press: one stray
+    // press of a remote's Back must not throw away the film.
+    bool backArmed = false;
+    std::chrono::steady_clock::time_point backArmedUntil;
+
+    // A remote has no Y: while locked, OK pressed three times in a row
+    // unlocks too. Counts the presses of the current run.
+    int unlockPresses = 0;
+    std::chrono::steady_clock::time_point unlockFirst;
     void buildLoadingOverlay(const std::string& title);
     void setBackgroundArt(const std::string& path);
     PlayerArt art;
@@ -186,7 +224,14 @@ class MpvView : public brls::Box
 
     // Playback speed, stepped through kSpeeds by L/R in the player.
     double playSpeed = 1.0;
-    void nudgeSpeed(int dir);  // dir -1 slower, +1 faster
+    // false when already at that end of kSpeeds. `pill`: report it on screen
+    // (the settings panel shows the value in its own row instead).
+    bool nudgeSpeed(int dir, bool pill = true);  // dir -1 slower, +1 faster
+
+    // mpv "volume", percent. On top of the console's own volume: a quiet dub
+    // can be brought up without touching the TV.
+    double volume = 100.0;
+    bool nudgeVolume(int dir);
 
     // The "next episode" card, shown over the last seconds of an episode that
     // has one. A (while playing) or a tap on it leaves the player and opens the
@@ -206,7 +251,7 @@ class MpvView : public brls::Box
     // A pill, top centre, that shows what an L/R press just did and fades out
     // again. Text only: it says "Subtitles +0.10 s" or "Speed 1.25x", which
     // needs no glyph to be understood.
-    void flashPill(const std::string& text);
+    void flashPill(const std::string& text, int ms = 1600);
     void updatePill();  // hides it again after its moment
     brls::Box* hintPill      = nullptr;
     brls::Label* pillLabel   = nullptr;
@@ -383,6 +428,7 @@ class MpvView : public brls::Box
     std::string pauseTitle;              // the title bar's title
     brls::Box* lockHint      = nullptr;  // padlock pill, flashed far top-right
     brls::Label* lockLabel   = nullptr;  // padlock glyph: open (unlocked) / closed (locked)
+    brls::Label* lockText    = nullptr;  // how to unlock, in words
     bool userPaused          = false;
     // Whether the controls overlay is on screen. Decoupled from userPaused: a
     // touch on the video toggles this without changing playback, and the centre

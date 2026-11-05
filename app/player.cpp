@@ -114,9 +114,14 @@ std::string episodeLabelOf(const std::string& videoId)
 // list and the panel's Speed row lists it -- one definition so the two cannot
 // disagree. mpv resamples the audio to keep the pitch at any of them.
 const std::vector<double> kSpeeds = { 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0 };
-const std::vector<std::string> kSpeedLabels = { "0.5x",  "0.75x", tr("Normal"),
-                                                "1.25x", "1.5x",  "1.75x",
-                                                "2x" };
+// A function, not a table: a static table was filled before the UI language
+// was chosen, and "Normal" stayed in English.
+std::string speedLabel(size_t i)
+{
+    static const char* const l[] = { "0.5x", "0.75x", nullptr, "1.25x", "1.5x", "1.75x", "2x" };
+    if (i >= sizeof(l) / sizeof(l[0])) return "";
+    return l[i] ? l[i] : tr("Normal");
+}
 
 // Whether the boost should be on right now. Handheld only: the built-in
 // speakers are what it exists for -- docked, the TV or receiver has all the
@@ -668,201 +673,299 @@ bool MpvView::startMpv()
     return true;
 }
 
+namespace
+{
+// A navigation press that came from a keyboard -- or from a remote the console
+// takes for one (a 2.4 GHz air remote's USB dongle in the dock, a keyboard
+// remote): on the Switch those arrows arrive only as BUTTON_NAV_*. The D-pad
+// also sends its own BUTTON_UP.. twin, which is handled there, and the sticks
+// are polled per frame (updateStickSeek) -- neither may act a second time.
+bool navFromKeys(brls::ControllerButton dpadTwin)
+{
+    brls::ControllerState st {};
+    brls::Application::getPlatform()->getInputManager()->updateUnifiedControllerState(&st);
+    if (st.buttons[dpadTwin]) return false;
+    for (int a = 0; a < brls::_AXES_MAX; a++)
+        if (st.axes[a] <= -0.3f || st.axes[a] >= 0.3f) return false;
+    return true;
+}
+} // namespace
+
 // Controls. Registered from the constructor, not from startMpv: the engine may
-// still be resolving a magnet (or may have failed outright), and B has to work
-// the whole time -- that is the only way out of a stuck load.
+// still be resolving a magnet (or may have failed outright), and Back has to
+// work the whole time -- that is the only way out of a stuck load.
 //
-// The player keeps the borealis focus itself and runs its own cursor over the
-// panel (see Btn / Zone), so every direction is an action here: D-pad
-// left/right move through the buttons (or seek, on the timeline or with the
-// panel down), up/down move between the buttons and the timeline.
+// Every button is only a name for a command (see Cmd): the player keeps the
+// borealis focus itself and runs its own cursor over the panel (see Btn /
+// Zone), so every direction is a command too.
 void MpvView::registerPlayerActions()
 {
-    // Y locks / unlocks every other control for the session (see toggleLock).
-    // Registered first, and never gated, so it is always the way out of a lock.
-    this->registerAction(
-        tr("Lock"), brls::BUTTON_Y,
-        [this](brls::View*) {
-            toggleLock();
-            return true;
-        },
-        false, false, brls::SOUND_CLICK);
+    struct Bind
+    {
+        brls::ControllerButton button;
+        Cmd cmd;
+        const char* hint;
+        bool repeat;
+        brls::Sound sound;
+    };
+    const Bind binds[] = {
+        // Lock first, and never gated (see command): the way out of itself.
+        { brls::BUTTON_Y, Cmd::Lock, tr("Lock"), false, brls::SOUND_CLICK },
+        { brls::BUTTON_B, Cmd::Back, tr("Back"), false, brls::SOUND_BACK },
+        { brls::BUTTON_A, Cmd::Ok, tr("Pause"), false, brls::SOUND_CLICK },
+        { brls::BUTTON_LEFT, Cmd::Left, tr("Seek -"), true, brls::SOUND_NONE },
+        { brls::BUTTON_RIGHT, Cmd::Right, tr("Seek +"), true, brls::SOUND_NONE },
+        { brls::BUTTON_UP, Cmd::Up, "Up", false, brls::SOUND_NONE },
+        { brls::BUTTON_DOWN, Cmd::Down, "Down", false, brls::SOUND_NONE },
+        { brls::BUTTON_LB, Cmd::Slower, tr("Slower"), false, brls::SOUND_NONE },
+        { brls::BUTTON_RB, Cmd::Faster, tr("Faster"), false, brls::SOUND_NONE },
+        { brls::BUTTON_LT, Cmd::Episodes, tr("Episodes"), false, brls::SOUND_CLICK },
+        { brls::BUTTON_RT, Cmd::Info, tr("Info"), false, brls::SOUND_NONE },
+        { brls::BUTTON_X, Cmd::Menu, tr("Options"), false, brls::SOUND_CLICK },
+        // + and -: where a controller's Start / Select land, and the Menu key
+        // of most remotes once mapped to a controller.
+        { brls::BUTTON_START, Cmd::Menu, tr("Options"), false, brls::SOUND_CLICK },
+        { brls::BUTTON_BACK, Cmd::Info, tr("Info"), false, brls::SOUND_NONE },
+    };
+    for (const Bind& b : binds)
+    {
+        Cmd c = b.cmd;
+        this->registerAction(
+            b.hint, b.button, [this, c](brls::View*) { return command(c); }, false, b.repeat,
+            b.sound);
+    }
 
-    // B steps back out: a seek being aimed, then the panel, then the player.
-    this->registerAction(
-        tr("Back"), brls::BUTTON_B,
-        [this](brls::View*) {
-            if (controlsLocked) { flashLock(); return true; }
-            if (seeking) { cancelSeek(); return true; }
-            if (controlsShown && ready)
+    // The same presses also arrive as borealis' navigation buttons -- the
+    // D-pad, the sticks, and alone the arrows of a keyboard or a remote. There
+    // is nothing for borealis to navigate to from here, so all are swallowed
+    // (else every press shook the hidden highlight and played the "cannot go
+    // there" sound); only the keyboard's are commands.
+    struct Nav
+    {
+        brls::ControllerButton nav, twin;
+        Cmd cmd;
+    };
+    const Nav navs[] = {
+        { brls::BUTTON_NAV_UP, brls::BUTTON_UP, Cmd::Up },
+        { brls::BUTTON_NAV_DOWN, brls::BUTTON_DOWN, Cmd::Down },
+        { brls::BUTTON_NAV_LEFT, brls::BUTTON_LEFT, Cmd::Left },
+        { brls::BUTTON_NAV_RIGHT, brls::BUTTON_RIGHT, Cmd::Right },
+    };
+    for (const Nav& n : navs)
+        this->registerAction(
+            "", n.nav,
+            [this, n](brls::View*) {
+                if (navFromKeys(n.twin)) command(n.cmd);
+                return true;
+            },
+            true, true, brls::SOUND_NONE);
+
+    // A keyboard's own keys (on the console, Enter and Esc are already A and
+    // B). The media keys of a remote are not passed on by the console's HID
+    // service, so these are what is left: the ones a keyboard remote has.
+    const std::pair<brls::BrlsKeyboardScancode, Cmd> keys[] = {
+        { brls::BRLS_KBD_KEY_SPACE, Cmd::PlayPause },
+        { brls::BRLS_KBD_KEY_PAUSE, Cmd::PlayPause },
+        { brls::BRLS_KBD_KEY_BACKSPACE, Cmd::Back },
+        { brls::BRLS_KBD_KEY_PAGE_UP, Cmd::PrevEpisode },
+        { brls::BRLS_KBD_KEY_PAGE_DOWN, Cmd::NextEpisode },
+        { brls::BRLS_KBD_KEY_MENU, Cmd::Menu },
+    };
+    for (const auto& k : keys)
+    {
+        Cmd c = k.second;
+        this->registerAction(brls::BrlsKeyCombination(k.first),
+                             [this, c](brls::View*) { return command(c); });
+    }
+}
+
+bool MpvView::command(Cmd c)
+{
+    if (c == Cmd::Lock)
+    {
+        toggleLock();
+        return true;
+    }
+    if (controlsLocked)
+    {
+        // OK three times in a row unlocks: a remote has no Y.
+        if (c == Cmd::Ok)
+        {
+            auto now = std::chrono::steady_clock::now();
+            if (unlockPresses == 0 || now - unlockFirst > std::chrono::seconds(2))
             {
-                setControlsVisible(false);
+                unlockPresses = 0;
+                unlockFirst   = now;
+            }
+            if (++unlockPresses >= 3)
+            {
+                unlockPresses = 0;
+                toggleLock();
                 return true;
             }
-            brls::Logger::info("[teardown] B pressed -> popActivity()");
-            bool ok = brls::Application::popActivity();
-            brls::Logger::info("[teardown] popActivity() returned {}", ok);
-            return true;
-        },
-        false, false, brls::SOUND_BACK);
+        }
+        flashLock();
+        return true;
+    }
+    // Back always works, loaded or not: it is the way out of a stuck load.
+    if (c == Cmd::Back)
+    {
+        onBack();
+        return true;
+    }
+    if (c == Cmd::Info)
+    {
+        toggleInfo();
+        return true;
+    }
+    if (!ready || !mpv) return true;
 
-    // A: does a pending seek, else runs the button under the cursor; with the
-    // panel down it pauses (and brings the panel up) or resumes.
-    this->registerAction(
-        tr("Pause"), brls::BUTTON_A,
-        [this](brls::View*) {
-            if (controlsLocked) { flashLock(); return true; }
-            if (!ready || !mpv) return true;
+    // Anything else called off a "Back again to exit": that press was not
+    // the start of leaving after all.
+    if (backArmed)
+    {
+        backArmed      = false;
+        pillFlashUntil = std::chrono::steady_clock::now();
+    }
+
+    switch (c)
+    {
+        case Cmd::Ok:
             // The buttons first: rewind pressed again while its jump is still
             // pending adds to it rather than doing it.
             if (controlsShown && zone == Zone::Buttons)
             {
                 pokeControls();
                 activateButton(focusBtn);
-                return true;
             }
-            if (seeking)
-            {
+            else if (seeking)
                 commitSeek();
-                return true;
-            }
-            if (controlsShown)  // on the timeline
+            else if (controlsShown)  // on the timeline
             {
                 pokeControls();
                 onPlayPause();
-                return true;
             }
-            // While the next-episode card is up and the video is running, A
-            // takes it -- that is what the card is asking for and what every
-            // other player does. Paused, A still resumes: the card stays put
-            // and the tap on it is the way through.
-            if (nextCardShown && !userPaused)
-            {
+            // While the next-episode card is up and the video is running, OK
+            // takes it -- that is what the card is asking for. Paused, OK
+            // still resumes: the card stays put.
+            else if (nextCardShown && !userPaused)
                 goToEpisode(+1);
-                return true;
+            else
+            {
+                focusBtn = BTN_PLAY;
+                zone     = Zone::Buttons;
+                onPlayPause();
             }
-            focusBtn = BTN_PLAY;
-            zone     = Zone::Buttons;
+            break;
+
+        // Left/right. On the buttons they move the cursor; on the timeline,
+        // or with the panel down, they seek in steps (Lampa's rewind): the
+        // cursor jumps 10 s a press, more when held, and the seek happens once
+        // they stop.
+        case Cmd::Left:
+        case Cmd::Right:
+        {
+            int dir = c == Cmd::Left ? -1 : 1;
+            if (controlsShown && zone == Zone::Buttons)
+                moveFocus(dir);
+            else
+                stepSeek(dir, true);
+            break;
+        }
+
+        // Up/down bring the panel up; with it up they move between the
+        // timeline (up) and the buttons (down).
+        case Cmd::Up:
+        case Cmd::Down:
+            if (!controlsShown)
+            {
+                zone = Zone::Buttons;
+                setControlsVisible(true);
+                break;
+            }
+            pokeControls();
+            if (c == Cmd::Up && zone == Zone::Buttons)
+                setZone(Zone::Timeline);
+            else if (c == Cmd::Down && zone == Zone::Timeline)
+            {
+                if (seeking) commitSeek();
+                setZone(Zone::Buttons);
+            }
+            break;
+
+        case Cmd::PlayPause:
+            if (!controlsShown)
+            {
+                focusBtn = BTN_PLAY;
+                zone     = Zone::Buttons;
+            }
             onPlayPause();
-            return true;
-        },
-        false, false, brls::SOUND_CLICK);
+            break;
 
-    // Left/right. On the buttons they move the cursor; on the timeline, or
-    // with the panel down, they seek in steps (Lampa's rewind): the cursor
-    // jumps 10 s a press, more when held, and the seek happens once they stop.
-    auto horizontal = [this](int dir) {
-        if (controlsLocked) { flashLock(); return true; }
-        if (!ready || !mpv) return true;
-        if (controlsShown && zone == Zone::Buttons)
-        {
-            moveFocus(dir);
-            return true;
-        }
-        stepSeek(dir, true);
-        return true;
-    };
-    this->registerAction(
-        tr("Seek -"), brls::BUTTON_LEFT,
-        [horizontal](brls::View*) { return horizontal(-1); }, false, true,
-        brls::SOUND_NONE);
-    this->registerAction(
-        tr("Seek +"), brls::BUTTON_RIGHT,
-        [horizontal](brls::View*) { return horizontal(1); }, false, true,
-        brls::SOUND_NONE);
-
-    // Up/down bring the panel up; with it up they move between the timeline
-    // (up) and the buttons (down).
-    auto vertical = [this](int dir) {
-        if (controlsLocked) { flashLock(); return true; }
-        if (!ready || !mpv) return true;
-        if (!controlsShown)
-        {
-            zone = Zone::Buttons;
-            setControlsVisible(true);
-            return true;
-        }
-        pokeControls();
-        if (dir < 0 && zone == Zone::Buttons)
-            setZone(Zone::Timeline);
-        else if (dir > 0 && zone == Zone::Timeline)
-        {
-            if (seeking) commitSeek();
-            setZone(Zone::Buttons);
-        }
-        return true;
-    };
-    this->registerAction(
-        "Up", brls::BUTTON_UP,
-        [vertical](brls::View*) { return vertical(-1); }, false, false,
-        brls::SOUND_NONE);
-    this->registerAction(
-        "Down", brls::BUTTON_DOWN,
-        [vertical](brls::View*) { return vertical(1); }, false, false,
-        brls::SOUND_NONE);
-
-    // The same presses also arrive as borealis' navigation buttons (D-pad and
-    // sticks alike). There is nothing for borealis to navigate to from here,
-    // so swallow them -- otherwise every press shook the hidden highlight and
-    // played the "cannot go there" sound. The stick scrubs on its own, polled
-    // per frame (updateStickSeek).
-    for (auto b : { brls::BUTTON_NAV_UP, brls::BUTTON_NAV_DOWN, brls::BUTTON_NAV_LEFT,
-                    brls::BUTTON_NAV_RIGHT })
-        this->registerAction(
-            "", b, [](brls::View*) { return true; }, true, true, brls::SOUND_NONE);
-
-    // L / R step the playback speed. These actions only fire while the player
-    // itself has the cursor -- with the settings panel up, focus is inside it
-    // and the same two buttons are the subtitle delay there (see openTrackMenu).
-    auto speedStep = [this](int dir) {
-        if (controlsLocked) { flashLock(); return true; }
-        if (!ready || !mpv) return true;
-        nudgeSpeed(dir);
-        return true;
-    };
-    this->registerAction(
-        tr("Slower"), brls::BUTTON_LB,
-        [speedStep](brls::View*) { return speedStep(-1); },
-        false, false, brls::SOUND_NONE);
-    this->registerAction(
-        tr("Faster"), brls::BUTTON_RB,
-        [speedStep](brls::View*) { return speedStep(1); },
-        false, false, brls::SOUND_NONE);
-
-    // ZL: the episode list, when the torrent has one.
-    this->registerAction(
-        tr("Episodes"), brls::BUTTON_LT,
-        [this](brls::View*) {
-            if (controlsLocked) { flashLock(); return true; }
-            if (ready && playlist.size() > 1) openEpisodesPanel();
-            return true;
-        },
-        false, false, brls::SOUND_CLICK);
-
-    // ZR toggles the network/torrent info panel.
-    this->registerAction(
-        tr("Info"), brls::BUTTON_RT,
-        [this](brls::View*) {
-            if (controlsLocked) { flashLock(); return true; }
-            infoShown = !infoShown;
-            brls::Logger::info("[player] ZR info toggle -> {}", infoShown);
-            if (infoOverlay)
-                infoOverlay->setVisibility(infoShown
-                                               ? brls::Visibility::VISIBLE
-                                               : brls::Visibility::GONE);
-            return true;
-        },
-        false, false, brls::SOUND_NONE);
-
-    // X opens the full settings panel for the current video.
-    this->registerAction(
-        tr("Options"), brls::BUTTON_X,
-        [this](brls::View*) {
-            if (controlsLocked) { flashLock(); return true; }
+        case Cmd::Menu:
             openTrackMenu();
-            return true;
-        },
-        false, false, brls::SOUND_CLICK);
+            break;
+
+        case Cmd::Episodes:
+            if (playlist.size() > 1) openEpisodesPanel();
+            break;
+
+        case Cmd::PrevEpisode:
+            if (hasPrevEpisode()) goToEpisode(-1);
+            break;
+
+        case Cmd::NextEpisode:
+            if (hasNextEpisode()) goToEpisode(+1);
+            break;
+
+        case Cmd::Slower:
+        case Cmd::Faster:
+            nudgeSpeed(c == Cmd::Slower ? -1 : 1);
+            break;
+
+        default:
+            break;
+    }
+    return true;
+}
+
+// Back steps out one thing at a time: a seek being aimed, then the panel, then
+// the player -- that last one only on a second press while a video plays.
+void MpvView::onBack()
+{
+    if (seeking)
+    {
+        cancelSeek();
+        return;
+    }
+    if (controlsShown && ready)
+    {
+        setControlsVisible(false);
+        return;
+    }
+    // Still loading, failed or over: nothing to lose, so no second press.
+    auto now   = std::chrono::steady_clock::now();
+    bool leave = !ready || ended || openFailed || (backArmed && now < backArmedUntil);
+    if (!leave)
+    {
+        backArmed      = true;
+        backArmedUntil = now + std::chrono::milliseconds(2500);
+        flashPill(tr("Press Back again to exit"), 2500);
+        return;
+    }
+    backArmed = false;
+    brls::Logger::info("[teardown] Back -> popActivity()");
+    bool ok = brls::Application::popActivity();
+    brls::Logger::info("[teardown] popActivity() returned {}", ok);
+}
+
+void MpvView::toggleInfo()
+{
+    infoShown = !infoShown;
+    brls::Logger::info("[player] info toggle -> {}", infoShown);
+    if (infoOverlay)
+        infoOverlay->setVisibility(infoShown ? brls::Visibility::VISIBLE
+                                             : brls::Visibility::GONE);
 }
 
 void MpvView::setControlsVisible(bool show)
@@ -917,6 +1020,14 @@ void MpvView::flashLock()
     if (!lockHint) return;
     if (lockLabel)
         lockLabel->setText(controlsLocked ? kGlyphLockClosed : kGlyphLockOpen);
+    // In words, how to get out -- the Y glyph alone means nothing on a remote.
+    if (lockText)
+    {
+        std::string t = controlsLocked ? tr("Press OK 3 times to unlock") : tr("Unlocked");
+        if (controlsLocked && unlockPresses > 0)
+            t += "  " + std::to_string(unlockPresses) + "/3";
+        lockText->setText(t);
+    }
     lockHint->setVisibility(brls::Visibility::VISIBLE);
     lockFlashActive = true;
     lockFlashUntil =
@@ -1134,6 +1245,8 @@ class TrackCell : public brls::SelectorCell
         detail->setShrink(1.0f);
         // No cap of its own: the row's width is the limit (the panel's).
         detail->setMaxWidth(2000.0f);
+        // The same right edge as the stepper rows' values (their chevron room).
+        detail->setMarginRight(30.0f);
         // Left-align is REQUIRED for the marquee: Label::setAnimated is a no-op
         // unless the alignment is LEFT. It also gives the natural "start...end"
         // truncation. (The value was right-aligned by default.)
@@ -1149,6 +1262,79 @@ class TrackCell : public brls::SelectorCell
         brls::SelectorCell::onFocusLost();
         detail->setAnimated(false);
     }
+};
+
+// A row whose value changes in place: left/right step it (held, they repeat)
+// and OK does `onOk` -- by default the next value, wrapping round. A dropdown
+// cost three presses a notch and hid the video behind its list; this is one
+// press, with the picture still in view.
+class StepperCell : public brls::DetailCell
+{
+  public:
+    // `step(dir)` changes the value and says whether it could (false at an
+    // end); `value()` is how it reads now.
+    StepperCell(const std::string& titleText, std::function<std::string()> valueFn,
+                std::function<bool(int)> stepFn, std::function<void()> onOk = nullptr)
+        : value(std::move(valueFn)), step(std::move(stepFn))
+    {
+        setText(titleText);
+        title->setSingleLine(true);
+        detail->setMarginRight(kChevronRoom);  // the right chevron goes there
+        refresh();
+
+        auto by = [this](int dir) {
+            if (step(dir))
+            {
+                refresh();
+                brls::Application::getAudioPlayer()->play(brls::SOUND_FOCUS_CHANGE);
+            }
+            return true;  // consumed even at an end: no wandering off the row
+        };
+        registerAction("", brls::BUTTON_NAV_LEFT, [by](brls::View*) { return by(-1); }, true,
+                       true, brls::SOUND_NONE);
+        registerAction("", brls::BUTTON_NAV_RIGHT, [by](brls::View*) { return by(1); }, true,
+                       true, brls::SOUND_NONE);
+        registerClickAction([this, onOk](brls::View*) {
+            if (onOk)
+                onOk();
+            else if (!step(1))
+                while (step(-1)) {}  // past the last: back to the first
+            refresh();
+            return true;
+        });
+    }
+
+    void refresh() { setDetailText(value()); }
+
+    void draw(NVGcontext* vg, float x, float y, float width, float height, brls::Style style,
+              brls::FrameContext* ctx) override
+    {
+        brls::DetailCell::draw(vg, x, y, width, height, style, ctx);
+        // Chevrons either side of the value while the row has the cursor: it
+        // says "left/right change this" without a line of help text.
+        if (!isFocused()) return;
+        float dx = detail->getX(), dw = detail->getWidth();
+        float cy = detail->getY() + detail->getHeight() / 2.0f;
+        float s  = 6.0f;
+        nvgStrokeColor(vg, brls::Application::getTheme()["brls/list/listItem_value_color"]);
+        nvgStrokeWidth(vg, 2.6f);
+        nvgLineCap(vg, NVG_ROUND);
+        nvgLineJoin(vg, NVG_ROUND);
+        float lx = dx - 16.0f, rx = dx + dw + 16.0f;
+        nvgBeginPath(vg);
+        nvgMoveTo(vg, lx + s * 0.6f, cy - s);
+        nvgLineTo(vg, lx - s * 0.6f, cy);
+        nvgLineTo(vg, lx + s * 0.6f, cy + s);
+        nvgMoveTo(vg, rx - s * 0.6f, cy - s);
+        nvgLineTo(vg, rx + s * 0.6f, cy);
+        nvgLineTo(vg, rx - s * 0.6f, cy + s);
+        nvgStroke(vg);
+    }
+
+  private:
+    static constexpr float kChevronRoom = 30.0f;
+    std::function<std::string()> value;
+    std::function<bool(int)> step;
 };
 
 // The settings panel's own activity. Translucent, so borealis keeps drawing the
@@ -1319,9 +1505,9 @@ void MpvView::setSubDelay(double seconds)
 
 // Steps through kSpeeds. Clamped at both ends rather than wrapping: running
 // into 2x and coming out at 0.5x is never what a press meant.
-void MpvView::nudgeSpeed(int dir)
+bool MpvView::nudgeSpeed(int dir, bool pill)
 {
-    if (!mpv) return;
+    if (!mpv) return false;
     int cur   = 0;
     double bd = 1e18;
     for (size_t i = 0; i < kSpeeds.size(); i++)
@@ -1331,23 +1517,40 @@ void MpvView::nudgeSpeed(int dir)
         if (d < bd) { bd = d; cur = (int)i; }
     }
     int next = cur + dir;
-    if (next < 0 || next >= (int)kSpeeds.size()) return;
+    if (next < 0 || next >= (int)kSpeeds.size()) return false;
 
     playSpeed = kSpeeds[(size_t)next];
     char v[24];
     std::snprintf(v, sizeof(v), "%.4g", playSpeed);
     mpv_set_property_string(mpv, "speed", v);
-    flashPill(tr("Speed  ") + kSpeedLabels[(size_t)next]);
+    if (pill) flashPill(tr("Speed  ") + speedLabel((size_t)next));
+    return true;
 }
 
-void MpvView::flashPill(const std::string& text)
+// 10% steps, up to mpv's own ceiling (volume-max, 130 by default): past 100 it
+// amplifies, which is what a quiet dub needs.
+bool MpvView::nudgeVolume(int dir)
+{
+    if (!mpv) return false;
+    double v = std::round(volume / 10.0) * 10.0 + dir * 10.0;
+    if (v < 0.0) v = 0.0;
+    if (v > 130.0) v = 130.0;
+    if (v == volume) return false;
+    volume = v;
+    char s[24];
+    std::snprintf(s, sizeof(s), "%.0f", volume);
+    mpv_set_property_string(mpv, "volume", s);
+    return true;
+}
+
+void MpvView::flashPill(const std::string& text, int ms)
 {
     if (!hintPill || !pillLabel) return;
     pillLabel->setText(text);
     hintPill->setVisibility(brls::Visibility::VISIBLE);
     pillFlashActive = true;
     pillFlashUntil =
-        std::chrono::steady_clock::now() + std::chrono::milliseconds(1600);
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(ms);
 }
 
 // Shows the card over the last kNextCardSecs, and only when there is somewhere
@@ -1860,7 +2063,8 @@ brls::Box* sidePanel(const std::string& titleText, brls::Box* content,
     title->setText(titleText);
     title->setFontSize(28.0f);
     title->setTextColor(theme::text());
-    title->setMarginBottom(4.0f);
+    // Room under it: a scrolled list's rows stop short of the title.
+    title->setMarginBottom(14.0f);
     panel->addView(title);
 
     auto* scroll = new brls::ScrollingFrame();
@@ -2073,6 +2277,19 @@ void MpvView::openTrackMenu()
         mpv_set_property_string(mpv, prop, v);
     };
 
+    // What is set now, read once: the rows step from here.
+    playSpeed = getScale("speed");
+    {
+        double v = 100.0;
+        mpv_get_property(mpv, "volume", MPV_FORMAT_DOUBLE, &v);
+        volume = v;
+    }
+    auto pct = [](double v) {
+        char b[16];
+        std::snprintf(b, sizeof(b), "%.0f%%", v);
+        return std::string(b);
+    };
+
     content->addView(panelSection(tr("AUDIO"), 8.0f));
 
     // Always show the track, even when there is only one -- it tells you what
@@ -2089,28 +2306,38 @@ void MpvView::openTrackMenu()
         content->addView(a);
     }
 
+    // The steppers below: left/right change the value, OK puts a number back
+    // to its default and moves a choice on to the next one.
+    content->addView(new StepperCell(
+        tr("Volume"), [this, pct]() { return pct(volume); },
+        [this](int d) { return nudgeVolume(d); },
+        [this]() {
+            volume = 100.0;
+            mpv_set_property_string(mpv, "volume", "100");
+        }));
+
     // Playback speed. Also on L/R in the player itself (see nudgeSpeed), which
     // steps through this same list -- hence the shared kSpeeds.
-    {
-        playSpeed = getScale("speed");
-        auto* sp  = new brls::SelectorCell();
-        sp->init(tr("Speed"), kSpeedLabels, nearest(kSpeeds, playSpeed),
-                 [this, setScale](int sel) {
-                     playSpeed = kSpeeds[(size_t)sel];
-                     setScale("speed", playSpeed);
-                 });
-        content->addView(sp);
-    }
+    content->addView(new StepperCell(
+        tr("Speed"),
+        [this, nearest]() { return speedLabel((size_t)nearest(kSpeeds, playSpeed)); },
+        [this](int d) { return nudgeSpeed(d, false); },
+        [this, setScale]() {
+            playSpeed = 1.0;
+            setScale("speed", 1.0);
+        }));
 
     content->addView(panelSection(tr("VIDEO"), 18.0f));
 
     // Video size (Lampa's "Размер видео"): how the picture meets the screen.
-    {
-        auto* vs = new brls::SelectorCell();
-        vs->init(tr("Video size"), videoSizeLabels(), videoSize,
-                 [this](int sel) { applyVideoSize(sel); });
-        content->addView(vs);
-    }
+    content->addView(new StepperCell(
+        tr("Video size"), [this]() { return videoSizeLabels()[(size_t)videoSize]; },
+        [this](int d) {
+            int n = videoSize + d;
+            if (n < 0 || n >= (int)videoSizeLabels().size()) return false;
+            applyVideoSize(n);
+            return true;
+        }));
 
     content->addView(panelSection(tr("SUBTITLES"), 18.0f));
 
@@ -2130,8 +2357,11 @@ void MpvView::openTrackMenu()
         }
         else  // nothing anywhere: say so rather than offering a bare "Off"
         {
-            auto* s = new brls::SelectorCell();
-            s->init(tr("Subtitles"), { tr("None") }, 0, [](int) {});
+            auto* s = new brls::DetailCell();
+            s->setText(tr("Subtitles"));
+            s->setDetailText(tr("None"));
+            s->setDetailTextColor(theme::textMuted());
+            s->detail->setMarginRight(30.0f);  // in line with the rows around it
             content->addView(s);
         }
     }
@@ -2145,44 +2375,41 @@ void MpvView::openTrackMenu()
     // away in the row above.
     if (anySubs)
     {
-        const std::vector<double> scales = { 0.75, 0.9, 1.0, 1.15, 1.3, 1.5 };
-        auto* z = new brls::SelectorCell();
-        z->init(tr("Subtitle size"),
-                { "75%", "90%", "100%", "115%", "130%", "150%" },
-                nearest(scales, getScale("sub-scale")),
-                [scales, setScale](int sel) { setScale("sub-scale", scales[sel]); });
-        content->addView(z);
+        static const std::vector<double> scales = { 0.75, 0.9, 1.0, 1.15, 1.3, 1.5 };
+        auto idx = std::make_shared<int>(nearest(scales, getScale("sub-scale")));
+        content->addView(new StepperCell(
+            tr("Subtitle size"), [idx, pct]() { return pct(scales[(size_t)*idx] * 100.0); },
+            [idx, setScale](int d) {
+                int n = *idx + d;
+                if (n < 0 || n >= (int)scales.size()) return false;
+                *idx = n;
+                setScale("sub-scale", scales[(size_t)n]);
+                return true;
+            },
+            [idx, setScale]() {
+                *idx = 2;  // 100%
+                setScale("sub-scale", 1.0);
+            }));
     }
 
-    // Subtitle timing. Offered whenever there is any subtitle to shift --
-    // including one just pulled from an addon, which is where a release that
-    // does not match the rip usually comes from.
+    // Subtitle timing, by 0.1 s: offered whenever there is any subtitle to
+    // shift -- including one just pulled from an addon, which is where a
+    // release that does not match the rip usually comes from. L/R step it too
+    // while the panel is open.
     if (anySubs)
     {
-        // A readout, not a dropdown. L/R step it by 0.1 s while the panel is
-        // open, so the figure is very often not one of a preset list -- and a
-        // selector could only ever show the nearest preset, which is how
-        // +0.10 s used to display as "None".
-        auto* sd = new brls::DetailCell();
-        sd->setText(tr("Subtitle delay"));
-        sd->setDetailText(subDelayText(subDelay));
-        sd->setDetailTextColor(
-            brls::Application::getTheme()["brls/list/listItem_value_color"]);
-        sd->setFocusable(false);  // nothing to activate: L/R are the control
-        sd->setLineBottom(0.0f);
+        auto* sd = new StepperCell(
+            tr("Subtitle delay"), [this]() { return subDelayText(subDelay); },
+            [this](int d) {
+                double before = subDelay;
+                setSubDelay(subDelay + d * 0.1);
+                return subDelay != before;
+            },
+            [this]() { setSubDelay(0.0); });
         content->addView(sd);
 
-        // Fed by setSubDelay for as long as the panel is up.
-        subDelaySink = [sd](double d) { sd->setDetailText(subDelayText(d)); };
-
-        auto* hint = new brls::Label();
-        hint->setText(tr("L / R shift the subtitles by 0.1 s. Later is positive. "
-                      "The video keeps playing behind this."));
-        hint->setFontSize(15.0f);
-        hint->setTextColor(theme::textMuted());
-        hint->setLineHeight(1.35f);
-        hint->setMargins(6.0f, 12.0f, 4.0f, 12.0f);
-        content->addView(hint);
+        // Fed by setSubDelay for as long as the panel is up (the L/R nudge).
+        subDelaySink = [sd](double) { sd->refresh(); };
 
         // L/R belong to the delay in here. The player registers the same two
         // buttons for the speed, but those never fire while the panel has the
@@ -2199,6 +2426,36 @@ void MpvView::openTrackMenu()
             tr("Subtitles later"), brls::BUTTON_RB,
             [nudge](brls::View*) { return nudge(0.1); }, false, true,
             brls::SOUND_NONE);
+    }
+
+    content->addView(panelSection(tr("OTHER"), 18.0f));
+
+    // The stream's numbers (ZR / - in the player): here as well, for a remote.
+    content->addView(new StepperCell(
+        tr("Stream info"), [this]() { return std::string(infoShown ? tr("On") : tr("Off")); },
+        [this](int d) {
+            if (infoShown == (d > 0)) return false;
+            toggleInfo();
+            return true;
+        },
+        [this]() { toggleInfo(); }));
+
+    // How the player is driven, for whoever picks up a remote: everything
+    // works with the arrows, OK and Back. One short line a key.
+    content->addView(panelSection(tr("CONTROLS"), 18.0f));
+    {
+        auto* help = new brls::Label();
+        help->setText(tr("\xE2\x86\x90 \xE2\x86\x92 in this list \xE2\x80\x94 change a value, OK resets it\n"
+                         "OK \xE2\x80\x94 pause, or the button under the cursor\n"
+                         "\xE2\x86\x90 \xE2\x86\x92 \xE2\x80\x94 seek, hold to go faster\n"
+                         "\xE2\x86\x91 \xE2\x86\x93 \xE2\x80\x94 show the panel\n"
+                         "Back twice \xE2\x80\x94 leave the player\n"
+                         "OK three times \xE2\x80\x94 unlock"));
+        help->setFontSize(16.0f);
+        help->setTextColor(theme::textMuted());
+        help->setLineHeight(1.5f);
+        help->setMargins(4.0f, 12.0f, 8.0f, 12.0f);
+        content->addView(help);
     }
 
     auto liveFlag = this->alive;
@@ -2656,6 +2913,13 @@ void MpvView::buildLoadingOverlay(const std::string& title)
         lockLabel->setTextColor(nvgRGB(255, 255, 255));
         lockLabel->setMargins(4.0f, 0.0f, 0.0f, 0.0f);
         lockHint->addView(lockLabel);
+
+        lockText = new brls::Label();
+        lockText->setText("");
+        lockText->setFontSize(20.0f);
+        lockText->setTextColor(nvgRGB(255, 255, 255));
+        lockText->setMargins(0.0f, 0.0f, 0.0f, 14.0f);
+        lockHint->addView(lockText);
     }
     topRight->addView(lockHint);
 
@@ -3910,6 +4174,7 @@ void MpvView::updateControls()
     timeline->position = pos;
     timeline->buffered = pos + (obsCacheSecs > 0.0 ? obsCacheSecs : 0.0);
     timeline->cursor   = seekTarget;
+    timeline->playing  = pos;
     timeline->seeking  = seeking;
 
     // The time on the left follows the cursor while aiming: the target is what

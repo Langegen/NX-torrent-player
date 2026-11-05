@@ -104,7 +104,12 @@ The entry point is `int main()` in `app/main.cpp`.
   focus parking in `StremioTab::onAuthenticated`.
 - The **player's control panel does not use borealis focus**: `MpvView` keeps
   the focus and moves its own cursor (`Btn` / `Zone`), every D-pad direction is
-  an action on it, and the `BUTTON_NAV_*` twins are swallowed. Its icons are
+  an action on it, and the `BUTTON_NAV_*` twins are swallowed. Every input
+  goes through `MpvView::command(Cmd)`, and the whole player works with the
+  arrows + OK + Back alone (a remote): on the console a **keyboard's or USB
+  remote's arrows arrive only as `BUTTON_NAV_*`** (Enter/Esc as A/B), so a
+  NAV press with no D-pad twin held and no stick pushed is a command
+  (`navFromKeys`). Back leaves only on a second press; OK ×3 unlocks. Its icons are
   drawn with nanovg (`player_widgets`): the Material glyphs a player needs sit
   in U+E000-E152, which the Nintendo shared font claims first.
 - Magnet metadata is cached in `APPDATA_META` (`torrent_set_meta_cache`): a

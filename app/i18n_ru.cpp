@@ -257,10 +257,25 @@ const Pair kRu[] = {
     { "Subtitles", "Субтитры" },
     { "Subtitle size", "Размер субтитров" },
     { "Subtitle delay", "Задержка субтитров" },
-    { "L / R shift the subtitles by 0.1 s. Later is positive. The video keeps "
-      "playing behind this.",
-      "L / R сдвигают субтитры на 0,1 с. Плюс — позже. Видео при этом "
-      "продолжает идти." },
+    { "CONTROLS", "УПРАВЛЕНИЕ" },
+    { "\xE2\x86\x90 \xE2\x86\x92 in this list \xE2\x80\x94 change a value, OK resets it\n"
+      "OK \xE2\x80\x94 pause, or the button under the cursor\n"
+      "\xE2\x86\x90 \xE2\x86\x92 \xE2\x80\x94 seek, hold to go faster\n"
+      "\xE2\x86\x91 \xE2\x86\x93 \xE2\x80\x94 show the panel\n"
+      "Back twice \xE2\x80\x94 leave the player\n"
+      "OK three times \xE2\x80\x94 unlock",
+      "← → в этом списке — изменить значение, OK — сбросить\n"
+      "OK — пауза или кнопка под курсором\n"
+      "← → — перемотка, удерживайте — быстрее\n"
+      "↑ ↓ — показать панель\n"
+      "«Назад» дважды — выйти из плеера\n"
+      "OK три раза — снять блокировку" },
+    { "Volume", "Громкость" },
+    { "OTHER", "ДРУГОЕ" },
+    { "Stream info", "Информация о потоке" },
+    { "Press Back again to exit", "Нажмите «Назад» ещё раз, чтобы выйти" },
+    { "Press OK 3 times to unlock", "Нажмите OK 3 раза, чтобы разблокировать" },
+    { "Unlocked", "Разблокировано" },
     { "Subtitles earlier", "Субтитры раньше" },
     { "Subtitles later", "Субтитры позже" },
     // the control panel (Lampa-style)

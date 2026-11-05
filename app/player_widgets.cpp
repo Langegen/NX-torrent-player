@@ -174,6 +174,10 @@ void Button::draw(NVGcontext* vg, float x, float y, float w, float h, brls::Styl
         nvgFillColor(vg, nvgRGBA(255, 255, 255, 240));
         nvgFill(vg);
     }
+    // A soft shadow under a bare icon: over a bright frame (snow, a white
+    // wall) a white glyph on its own all but disappears.
+    if (!focused)
+        drawIcon(vg, icon, cx, cy + 1.5f, w, nvgRGBA(0, 0, 0, 120));
     drawIcon(vg, icon, cx, cy, w,
              focused ? nvgRGB(18, 18, 22) : nvgRGBA(255, 255, 255, 235));
 
@@ -266,26 +270,47 @@ void Timeline::draw(NVGcontext* vg, float x, float y, float w, float h, brls::St
 
     if (seeking)
     {
+        // Where it will land, and how far that is from what is on screen:
+        // "1:23:45  +0:30". With a remote's arrows the jump is the number that
+        // matters -- it tells how many more presses to go.
         std::string t = fmtTime(cursor);
-        int font      = brls::Application::getFont(brls::FONT_REGULAR);
+        double d      = cursor - playing;
+        std::string j;
+        if (d >= 1.0 || d <= -1.0) j = (d > 0 ? "+" : "-") + fmtTime(d > 0 ? d : -d);
+        int font = brls::Application::getFont(brls::FONT_REGULAR);
         if (font != brls::FONT_INVALID)
         {
             nvgFontFaceId(vg, font);
-            nvgFontSize(vg, 20.0f);
-            nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+            nvgTextAlign(vg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
             float b[4];
-            nvgTextBounds(vg, 0, 0, t.c_str(), nullptr, b);
-            float bwid = (b[2] - b[0]) + 24.0f, bh = 32.0f;
+            nvgFontSize(vg, 21.0f);
+            float tw = nvgTextBounds(vg, 0, 0, t.c_str(), nullptr, b);
+            float jw = 0.0f, gap = 0.0f;
+            if (!j.empty())
+            {
+                nvgFontSize(vg, 18.0f);
+                jw  = nvgTextBounds(vg, 0, 0, j.c_str(), nullptr, b);
+                gap = 10.0f;
+            }
+            float bwid = tw + gap + jw + 26.0f, bh = 34.0f;
             float bx   = kx - bwid / 2.0f;
             if (bx < x) bx = x;
             if (bx + bwid > x + w) bx = x + w - bwid;
             float by = y + h / 2.0f - kr - bh - 8.0f;
             nvgBeginPath(vg);
-            nvgRoundedRect(vg, bx, by, bwid, bh, 6.0f);
+            nvgRoundedRect(vg, bx, by, bwid, bh, 7.0f);
             nvgFillColor(vg, nvgRGBA(255, 255, 255, 240));
             nvgFill(vg);
+            float tx = bx + 13.0f, ty = by + bh / 2.0f;
+            nvgFontSize(vg, 21.0f);
             nvgFillColor(vg, nvgRGB(18, 18, 22));
-            nvgText(vg, bx + bwid / 2.0f, by + bh / 2.0f, t.c_str(), nullptr);
+            nvgText(vg, tx, ty, t.c_str(), nullptr);
+            if (!j.empty())
+            {
+                nvgFontSize(vg, 18.0f);
+                nvgFillColor(vg, accent);
+                nvgText(vg, tx + tw + gap, ty, j.c_str(), nullptr);
+            }
         }
     }
     brls::Box::draw(vg, x, y, w, h, style, ctx);
