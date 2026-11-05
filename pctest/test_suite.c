@@ -4,8 +4,10 @@
 // link time: this file defines udp_announce() and dht_find_peers(), so
 // engine/udp_tracker.c, engine/dht.c and engine/dhtclient.c are NOT linked (see
 // run_tests.sh). The peer side is real: a mock peer listens on 127.0.0.1 and
-// serves the metadata over BEP 10 / BEP 9, so engine/peer.c's handshake and
-// metadata fetch run exactly as on the console.
+// serves the metadata over BEP 10 / BEP 9, so engine/bt_peer.c's handshake and
+// metadata fetch run exactly as on the console. The fetch is a pipeline now
+// (trackers and the DHT feed the workers at once), and fetched metadata is
+// cached on disk by info-hash: each test that needs a fresh fetch clears it.
 //
 //   ./pctest/run_tests.sh
 
@@ -88,9 +90,10 @@ static mock_tracker *tracker_add(const char *url) {
 
 int udp_announce(const char *url, const uint8_t info_hash[20],
                  const uint8_t peer_id[20], int64_t left,
+                 bool first, int port,
                  peer_addr *peers, int max_peers,
                  const volatile bool *cancel, char *err, size_t errlen) {
-    (void)info_hash; (void)peer_id; (void)left;
+    (void)info_hash; (void)peer_id; (void)left; (void)first; (void)port;
     pthread_mutex_lock(&g_mock_lock);
     g_announce_calls++;
     pthread_mutex_unlock(&g_mock_lock);
@@ -143,6 +146,14 @@ int dht_find_peers(const uint8_t info_hash[20], int target_peers, int budget_ms,
 }
 
 void dht_set_log(void (*fn)(const char *msg)) { (void)fn; }
+
+// Where the tests keep the metadata cache, and how they empty it.
+#define TEST_META_DIR "test_suite_meta"
+static void meta_cache_clear(const char *hex) {
+    char path[160];
+    snprintf(path, sizeof(path), "%s/%s.meta", TEST_META_DIR, hex);
+    remove(path);
+}
 
 //---------------------------------------------------------------------------
 // The torrent the mock peer serves: two files, 1000 pieces, so the info dict
@@ -359,7 +370,7 @@ static const char *USER_MAGNET =
     "&tr=udp%3a%2f%2fexodus.desync.com%3a6969";
 
 static void test_magnet_parsing(void) {
-    printf("[1/6] Magnet parsing: 31 trackers, dedup, case...\n");
+    printf("[1/7] Magnet parsing: 31 trackers, dedup, case...\n");
 
     magnet_info m;
     char err[256] = {0};
@@ -380,7 +391,7 @@ static void test_magnet_parsing(void) {
 }
 
 static void test_announce_cancel(void) {
-    printf("[2/6] Announce: a pre-set cancel flag returns at once...\n");
+    printf("[2/7] Announce: a pre-set cancel flag returns at once...\n");
     trackers_reset();
 
     torrent_meta t;
@@ -407,32 +418,43 @@ static void test_announce_cancel(void) {
     printf("      PASSED\n");
 }
 
-static void test_announce_stops_when_full(void) {
-    printf("[3/6] Announce: stops waiting once the peer list is full...\n");
+static void check_loaded(const torrent_meta *t);
+static void peer_start(mock_peer *mp);
+static void peer_stop(mock_peer *mp);
+static void magnet_for(char *out, size_t n, const char *tracker);
+
+static void test_slow_tracker_does_not_delay(void) {
+    printf("[3/7] Magnet: a slow tracker does not hold up the metadata...\n");
     trackers_reset();
+    meta_cache_clear(g_hash_hex);
+    g_dht_n = 0;
 
+    mock_peer mp;
+    peer_start(&mp);
+    // The slow tracker sits for 10 s; the fast one lists the mock peer. The old
+    // fetch announced to every tracker before asking any peer.
+    tracker_add("udp://slow.test:1/announce")->slow = true;
+    mock_tracker *fast = tracker_add("udp://fast.test:1/announce");
+    fast->peers[0] = loopback(mp.port);
+    fast->n = 1;
+    fast->delay_ms = 100;
+
+    char magnet[320];
+    magnet_for(magnet, sizeof(magnet),
+               "udp%3a%2f%2fslow.test%3a1%2fannounce&tr=udp%3a%2f%2ffast.test%3a1%2fannounce");
     torrent_meta t;
-    memset(&t, 0, sizeof(t));
-    // The slow one goes first, so it is already waiting when the list fills.
-    t.trackers[0] = "udp://slow.test:1/announce";
-    t.trackers[1] = "udp://full.test:1/announce";
-    t.tracker_count = 2;
-    tracker_add(t.trackers[0])->slow = true;
-    mock_tracker *full = tracker_add(t.trackers[1]);
-    for (int i = 0; i < 80; i++) full->peers[i] = loopback((uint16_t)(20000 + i));
-    full->n = 80;
-    full->delay_ms = 100;
-
-    peer_addr peers[80];
     char err[256] = {0};
     double t0 = now_s();
-    int n = torrent_announce(&t, peers, 80, err, sizeof(err));
+    int rc = torrent_load_magnet(&t, magnet, err, sizeof(err));
     double dt = now_s() - t0;
-    printf("      %d peers in %.0f ms (slow tracker cancelled: %d)\n",
-           n, dt * 1000, g_slow_cancelled);
-    CHECK(n == 80);
-    CHECK(dt < 2.0);          // not the slow tracker's 10 s
-    CHECK(g_slow_cancelled == 1);
+    printf("      rc=%d in %.0f ms (slow tracker cancelled: %d)\n",
+           rc, dt * 1000, g_slow_cancelled);
+    CHECK(rc == 0);
+    CHECK(dt < 3.0);              // not the slow tracker's 10 s
+    CHECK(mp.served == 1);
+    check_loaded(&t);
+    torrent_unload(&t);
+    peer_stop(&mp);
     printf("      PASSED\n");
 }
 
@@ -450,8 +472,9 @@ static void check_loaded(const torrent_meta *t) {
 }
 
 static void test_magnet_metadata(void) {
-    printf("[4/6] Magnet: metadata from a peer the tracker lists...\n");
+    printf("[4/7] Magnet: metadata from a peer the tracker lists...\n");
     trackers_reset();
+    meta_cache_clear(g_hash_hex);
     g_dht_n = 0;
     g_dht_calls = 0;
 
@@ -465,16 +488,6 @@ static void test_magnet_metadata(void) {
     char magnet[256];
     magnet_for(magnet, sizeof(magnet), "udp%3a%2f%2fmock.test%3a1%2fannounce");
 
-    // With the metadata cache on (the app keeps one), and empty to begin with.
-    char cached[64];
-    snprintf(cached, sizeof(cached), "./");
-    for (int i = 0; i < 20; i++)
-        snprintf(cached + strlen(cached), sizeof(cached) - strlen(cached), "%02x",
-                 g_info_hash[i]);
-    strcat(cached, ".torrent");
-    remove(cached);
-    torrent_set_meta_cache(".");
-
     torrent_meta t;
     peer_addr out[16];
     int out_n = 0;
@@ -484,50 +497,19 @@ static void test_magnet_metadata(void) {
            rc, err, mp.served, out_n);
     CHECK(rc == 0);
     CHECK(mp.served == 1);
-    CHECK(out_n == 2);
-    CHECK(g_dht_calls == 0);       // the trackers were enough
+    CHECK(out_n == 2);             // every peer found, for the download
     check_loaded(&t);
     // The magnet's tracker plus the defaults, so the download has them too.
     CHECK(t.tracker_count > 1);
-
-    // Opened again: from the cache, without a word to the peer.
-    torrent_meta again;
-    out_n = -1;
-    CHECK(torrent_load_magnet_peers(&again, magnet, out, 16, &out_n, err, sizeof(err)) == 0);
-    CHECK(mp.served == 1);
-    CHECK(out_n == 0);
-    check_loaded(&again);
-    CHECK(again.tracker_count > 1);
-    torrent_unload(&again);
-    torrent_set_meta_cache(NULL);
-    remove(cached);
-
-    // Saved as a .torrent (the player does this to move to another episode of
-    // the pack): it must load back as the same torrent -- the info dict
-    // verbatim, so the same info hash -- with the trackers on board.
-    const char *saved = "pctest_saved_meta.torrent";
-    CHECK(torrent_save(&t, saved) == 0);
-    torrent_meta back;
-    CHECK(torrent_load(&back, saved, err, sizeof(err)) == 0);
-    check_loaded(&back);
-    CHECK(back.tracker_count >= t.tracker_count);
-    // And once more from the reloaded one (a loaded file keeps the whole
-    // .torrent as its root, not just the info dict).
-    CHECK(torrent_save(&back, saved) == 0);
-    torrent_unload(&back);
-    CHECK(torrent_load(&back, saved, err, sizeof(err)) == 0);
-    check_loaded(&back);
-    torrent_unload(&back);
-    remove(saved);
-
     torrent_unload(&t);
     peer_stop(&mp);
     printf("      PASSED\n");
 }
 
 static void test_dht_after_stale_peers(void) {
-    printf("[5/6] Magnet: stale tracker peers, metadata through the DHT (upstream #3)...\n");
+    printf("[5/7] Magnet: stale tracker peers, metadata through the DHT (upstream #3)...\n");
     trackers_reset();
+    meta_cache_clear(g_hash_hex);
 
     mock_peer mp;
     peer_start(&mp);
@@ -550,10 +532,11 @@ static void test_dht_after_stale_peers(void) {
     printf("      rc=%d err='%s' dht calls=%d peers handed on=%d\n",
            rc, err, g_dht_calls, out_n);
     CHECK(rc == 0);
-    CHECK(g_dht_calls == 1);
+    CHECK(g_dht_calls == 1);                // alongside the trackers
     CHECK(mp.served == 1);
-    CHECK(out_n == 1);                      // only the DHT peer that answered
-    CHECK(out[0].port == mp.port);
+    bool handed = false;                    // the DHT peer is handed on
+    for (int i = 0; i < out_n; i++) handed = handed || out[i].port == mp.port;
+    CHECK(handed);
     check_loaded(&t);
     torrent_unload(&t);
     peer_stop(&mp);
@@ -561,8 +544,9 @@ static void test_dht_after_stale_peers(void) {
 }
 
 static void test_trackerless_no_peers(void) {
-    printf("[6/6] Magnet: no tracker, nobody anywhere -> clean failure...\n");
+    printf("[6/7] Magnet: no tracker, nobody anywhere -> clean failure...\n");
     trackers_reset();
+    meta_cache_clear(g_hash_hex);
     g_dht_n = 0;
     g_dht_calls = 0;
 
@@ -575,10 +559,55 @@ static void test_trackerless_no_peers(void) {
     printf("      rc=%d err='%s' announces=%d dht calls=%d\n",
            rc, err, g_announce_calls, g_dht_calls);
     CHECK(rc != 0);
-    CHECK(g_announce_calls > 0);            // the default trackers were asked
-    CHECK(g_dht_calls == 1);                // then the DHT
-    CHECK(strstr(err, "no peers found") != NULL);
+    // The default trackers are not necessarily asked: they "failed" three
+    // times in the tests above and sit out their cooldown, as on the console.
+    CHECK(g_dht_calls == 1);                // and the DHT
+    CHECK(strstr(err, "no peer provided the metadata") != NULL);
     CHECK(torrent_meta_state == META_FAIL);
+    printf("      PASSED\n");
+}
+
+static void test_metadata_cache(void) {
+    printf("[7/7] Magnet: a second open loads the metadata from the cache...\n");
+    trackers_reset();
+    meta_cache_clear(g_hash_hex);
+    g_dht_n = 0;
+
+    mock_peer mp;
+    peer_start(&mp);
+    mock_tracker *tr = tracker_add("udp://mock.test:1/announce");
+    tr->peers[0] = loopback(mp.port);
+    tr->n = 1;
+    char magnet[256];
+    magnet_for(magnet, sizeof(magnet), "udp%3a%2f%2fmock.test%3a1%2fannounce");
+
+    torrent_meta t;
+    char err[256] = {0};
+    CHECK(torrent_load_magnet(&t, magnet, err, sizeof(err)) == 0);
+    torrent_unload(&t);
+    CHECK(mp.served == 1);
+
+    // Again: no announce, no fetch -- and the peers found the first time come
+    // back with it (the player seeds its pool from them).
+    int calls = g_announce_calls;
+    peer_addr out[16];
+    int out_n = 0;
+    double t0 = now_s();
+    int rc = torrent_load_magnet_peers(&t, magnet, out, 16, &out_n, err, sizeof(err));
+    double dt = now_s() - t0;
+    printf("      rc=%d in %.0f ms, peers from the cache=%d\n", rc, dt * 1000, out_n);
+    CHECK(rc == 0);
+    CHECK(dt < 0.5);
+    CHECK(mp.served == 1);
+    CHECK(g_announce_calls == calls);
+    // The cache merges every peer found for this info-hash in this process
+    // (the earlier tests too): the one that served must be among them.
+    bool cached = false;
+    for (int i = 0; i < out_n; i++) cached = cached || out[i].port == mp.port;
+    CHECK(cached);
+    check_loaded(&t);
+    torrent_unload(&t);
+    peer_stop(&mp);
     printf("      PASSED\n");
 }
 
@@ -588,15 +617,19 @@ int main(void) {
     printf("=========================================\n\n");
 
     build_info();
+    torrent_meta_cache_set_dir(TEST_META_DIR);
     printf("mock torrent: %s, info dict %zu bytes\n\n", g_hash_hex, g_info_len);
 
     test_magnet_parsing();
     test_announce_cancel();
-    test_announce_stops_when_full();
+    test_slow_tracker_does_not_delay();
     test_magnet_metadata();
     test_dht_after_stale_peers();
     test_trackerless_no_peers();
+    test_metadata_cache();
 
+    meta_cache_clear(g_hash_hex);
+    rmdir(TEST_META_DIR);
     printf("\nALL TESTS PASSED\n");
     free(g_info);
     return 0;

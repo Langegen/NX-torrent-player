@@ -255,19 +255,39 @@ void readScope(const std::string& low, Info& in)
 
 struct Voice
 {
-    const char* match;  // lower-case substring
+    const char* match;  // lower-case substring; " x " = a whole word
     const char* label;
+    // A short Latin mark ("| D", "| P", "L1", "Dub") that only means a Russian
+    // voice-over on a Russian tracker's title: an English "(Dub)" anime release
+    // is not one. Only taken when the name has Cyrillic in it.
+    bool needsCyrillic;
 };
 
 const Voice kVoices[] = {
     { "\xD0\xB4\xD1\x83\xD0\xB1\xD0\xBB\xD1\x8F\xD0\xB6", "\xD0\x94\xD1\x83\xD0\xB1\xD0\xBB\xD1\x8F\xD0\xB6" },  // дубляж
     { "\xD0\xB4\xD1\x83\xD0\xB1\xD0\xBB\xD0\xB8\xD1\x80", "\xD0\x94\xD1\x83\xD0\xB1\xD0\xBB\xD1\x8F\xD0\xB6" },  // дублир(ованный)
-    { " dub ", "\xD0\x94\xD1\x83\xD0\xB1\xD0\xBB\xD1\x8F\xD0\xB6" },
-    { " mvo ", "MVO" },
+    { " dub ", "\xD0\x94\xD1\x83\xD0\xB1\xD0\xBB\xD1\x8F\xD0\xB6", true },
+    // Rutracker's shorthands, as Lampa reads them: "| D" dubbing, "| P"
+    // multi-voice, "L2" two-voice, "L1" single-voice / amateur, and the
+    // Cyrillic ones ("дб", "пм"/"лм", "пд"/"лд", "ло"/"ап").
+    { " d ", "\xD0\x94\xD1\x83\xD0\xB1\xD0\xBB\xD1\x8F\xD0\xB6", true },
+    { " дб ", "\xD0\x94\xD1\x83\xD0\xB1\xD0\xBB\xD1\x8F\xD0\xB6" },
+    { " p ", "MVO", true },
+    { " пм ", "MVO" },
+    { " лм ", "MVO" },
+    { " l2 ", "DVO", true },
+    { " пд ", "DVO" },
+    { " лд ", "DVO" },
+    { "двуголос", "DVO" },
+    { " l1 ", "AVO", true },
+    { " ло ", "AVO" },
+    { " ап ", "AVO" },
+    { "любительск", "AVO" },
+    { " mvo ", "MVO", true },
     { "\xD0\xBC\xD0\xBD\xD0\xBE\xD0\xB3\xD0\xBE\xD0\xB3\xD0\xBE\xD0\xBB\xD0\xBE\xD1\x81", "MVO" },  // многоголос
-    { " dvo ", "DVO" },
+    { " dvo ", "DVO", true },
     { "\xD0\xB4\xD0\xB2\xD1\x83\xD1\x85\xD0\xB3\xD0\xBE\xD0\xBB\xD0\xBE\xD1\x81", "DVO" },  // двухголос
-    { " avo ", "AVO" },
+    { " avo ", "AVO", true },
     { "\xD0\xB0\xD0\xB2\xD1\x82\xD0\xBE\xD1\x80\xD1\x81\xD0\xBA", "AVO" },  // авторск
     { "lostfilm", "LostFilm" },
     { "hdrezka", "HDRezka" },
@@ -288,14 +308,31 @@ const Voice kVoices[] = {
 
 void readVoices(const std::string& low, const std::string& w, Info& in)
 {
+    // A Russian tracker's title (Cyrillic in it) or one that says "Rus".
+    bool ruContext = hasWord(w, "rus");
+    for (unsigned char c : low)
+        if (c == 0xD0 || c == 0xD1)
+        {
+            ruContext = true;
+            break;
+        }
     for (const Voice& v : kVoices)
     {
+        if (v.needsCyrillic && !ruContext) continue;
         bool hit = v.match[0] == ' ' ? w.find(v.match) != std::string::npos
                                      : low.find(v.match) != std::string::npos;
         if (!hit) continue;
         bool dup = false;
         for (const auto& x : in.voices) dup = dup || x == v.label;
         if (!dup) in.voices.push_back(v.label);
+    }
+    for (const auto& v : in.voices)
+    {
+        int r = v == "\xD0\x94\xD1\x83\xD0\xB1\xD0\xBB\xD1\x8F\xD0\xB6" ? 4  // Дубляж
+              : v == "DVO"                                                 ? 2
+              : v == "AVO"                                                 ? 1
+                                                                           : 3;  // MVO, a studio
+        if (r > in.voiceRank) in.voiceRank = r;
     }
 }
 
@@ -462,7 +499,13 @@ int score(const Info& in, int seeders, int64_t size, const Want& want)
         for (const auto& v : in.voices)
             if (v == want.voice) s += 15;
     if (!want.group.empty() && in.group == want.group) s += 10;
-    if (want.preferRussian && !in.voices.empty()) s += 8;
+    // A Russian UI wants Russian audio: any live release with it ranks above
+    // every release without it (+100 is more than quality and seeders can
+    // add up to), and within that, dubbing first, then multi-, two-, single-
+    // voice. A dead one (0 seeders) gets nothing: it would never play.
+    if (want.preferRussian && in.russian && seeders != 0)
+        s += 100 + (in.voiceRank == 4 ? 20 : in.voiceRank == 3 ? 15
+                    : in.voiceRank == 2 ? 10 : in.voiceRank == 1 ? 5 : 0);
     // Ukrainian audio only, the UI in Russian: a working release, but rarely
     // the one wanted.
     if (want.preferRussian && in.ukrainian && !in.russian) s -= 12;

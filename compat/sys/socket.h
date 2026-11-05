@@ -152,9 +152,10 @@ static inline int pc_sendto(int s, const void *buf, int len, int flags, const st
 #define sendto(s, buf, len, flags, to, tolen) pc_sendto((int)(s), (const void*)(buf), (int)(len), (int)(flags), (const struct sockaddr*)(to), (int)(tolen))
 
 static inline int pc_setsockopt(int s, int level, int optname, const void *optval, int optlen) {
-    // Winsock takes SO_RCVTIMEO/SO_SNDTIMEO as a DWORD of milliseconds, not a
-    // struct timeval: passed through, {2, 0} reads as 2 ms and every UDP
-    // tracker and DHT reply "times out" before it can arrive.
+    // Winsock takes SO_RCVTIMEO/SO_SNDTIMEO as a DWORD of milliseconds, the
+    // engine passes a POSIX struct timeval. Read as a DWORD, {0, 250000} is 0
+    // -- "no timeout" -- and the DHT thread sat in recvfrom forever, hanging
+    // the app's exit on joining it.
     if (level == SOL_SOCKET && (optname == SO_RCVTIMEO || optname == SO_SNDTIMEO) &&
         optlen == (int)sizeof(struct timeval)) {
         const struct timeval *tv = (const struct timeval *)optval;

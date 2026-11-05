@@ -96,6 +96,10 @@ void load()
         it.stremioItemId = json::str(obj, "stremioItemId");
         it.stremioVideoId = json::str(obj, "stremioVideoId");
         it.stremioType = json::str(obj, "stremioType");
+        it.tmdbId = (int)json::integer(obj, "tmdbId", 0);
+        it.series = json::boolean(obj, "series", false);
+        it.season = (int)json::integer(obj, "season", 0);
+        it.episode = (int)json::integer(obj, "episode", 0);
 
         if (it.id.empty())
             it.id = makeId(it.source, it.fileIndex, it.stremioVideoId);
@@ -138,7 +142,11 @@ void save()
         out += "      \"stremioAuthKey\": \"" + json::escape(it.stremioAuthKey) + "\",\n";
         out += "      \"stremioItemId\": \"" + json::escape(it.stremioItemId) + "\",\n";
         out += "      \"stremioVideoId\": \"" + json::escape(it.stremioVideoId) + "\",\n";
-        out += "      \"stremioType\": \"" + json::escape(it.stremioType) + "\"\n";
+        out += "      \"stremioType\": \"" + json::escape(it.stremioType) + "\",\n";
+        out += "      \"tmdbId\": " + std::to_string(it.tmdbId) + ",\n";
+        out += "      \"series\": " + std::string(it.series ? "true" : "false") + ",\n";
+        out += "      \"season\": " + std::to_string(it.season) + ",\n";
+        out += "      \"episode\": " + std::to_string(it.episode) + "\n";
         out += "    }" + std::string(i + 1 < copy.size() ? "," : "") + "\n";
     }
     out += "  ]\n}\n";

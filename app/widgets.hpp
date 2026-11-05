@@ -34,6 +34,16 @@ class FieldFrame : public brls::AppletFrame
         brls::AppletFrame::draw(vg, x, y, w, h, style, ctx);
     }
 };
+
+// A horizontal strip that, when the focus comes into it from outside (up or
+// down from another row), lands on the card nearest the one being left rather
+// than on its first (or last focused) card. borealis navigates by child index
+// only, so stepping down from the fourth poster went to the first.
+class NearestStrip : public brls::HScrollingFrame
+{
+  public:
+    brls::View* getDefaultFocus() override;
+};
 } // namespace ui
 
 // A strip that fades its cards out at whichever edge still has content beyond
@@ -41,7 +51,7 @@ class FieldFrame : public brls::AppletFrame
 // treatment the episode and addon scrollers get. The scrim is the background
 // colour sampled AT the edge, fading to transparent inward; an edge with
 // nothing past it is left alone, so the first card at rest is never dimmed.
-class FadeStrip : public brls::HScrollingFrame
+class FadeStrip : public ui::NearestStrip
 {
   public:
     void setContentView(brls::View* view)

@@ -4,6 +4,8 @@
 #include "stremio.hpp"  // fetchPosterAsync / fetchHqArtAsync: the shared art cache
 #include "theme.hpp"
 
+#include <cmath>
+
 namespace ui
 {
 
@@ -110,13 +112,45 @@ brls::Label* heading(const std::string& text, float inset)
     return l;
 }
 
+brls::View* NearestStrip::getDefaultFocus()
+{
+    brls::View* cur = brls::Application::getCurrentFocus();
+    const auto& kids = getChildren();
+    if (!cur || kids.empty()) return brls::HScrollingFrame::getDefaultFocus();
+    // Inside already (moving along the row, or the frame scrolling to its
+    // focused card): borealis' own answer.
+    for (brls::View* v = cur; v; v = v->getParent())
+        if (v == this) return brls::HScrollingFrame::getDefaultFocus();
+
+    auto* row = dynamic_cast<brls::Box*>(kids[0]);
+    if (!row) return brls::HScrollingFrame::getDefaultFocus();
+    // Frames include the scroll translation, so this compares what is on
+    // screen: the card under (or above) the one being left.
+    const float cx   = cur->getFrame().getMidX();
+    brls::View* best = nullptr;
+    float bestD      = 0.0f;
+    for (brls::View* c : row->getChildren())
+    {
+        if (c->getVisibility() != brls::Visibility::VISIBLE) continue;
+        brls::View* f = c->getDefaultFocus();
+        if (!f) continue;
+        float d = std::fabs(c->getFrame().getMidX() - cx);
+        if (!best || d < bestD)
+        {
+            best  = f;
+            bestD = d;
+        }
+    }
+    return best ? best : brls::HScrollingFrame::getDefaultFocus();
+}
+
 brls::View* strip(brls::Box* row, float height, bool fade)
 {
     row->setAxis(brls::Axis::ROW);
     row->setAlignItems(brls::AlignItems::CENTER);
     // CENTERED: card by card, the focused one kept in view (NATURAL hands focus
     // to the frame and slides a card half out of sight -- see StremioTab).
-    brls::HScrollingFrame* s = fade ? new FadeStrip() : new brls::HScrollingFrame();
+    brls::HScrollingFrame* s = fade ? new FadeStrip() : new NearestStrip();
     s->setHeight(height);
     s->setScrollingBehavior(brls::ScrollingBehavior::CENTERED);
     s->setContentView(row);

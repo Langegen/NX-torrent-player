@@ -370,6 +370,19 @@ brls::View* streamingPane()
         "the stutter on each finished piece, at the cost of no resume and a "
         "limited seek-back range.")));
 
+    auto* buffer = new brls::SelectorCell();
+    buffer->init(tr("Buffer size"), config::bufferLabels(), cfg.bufferMode,
+                 [](int sel) {
+                     config::get().bufferMode = sel;
+                     config::save();
+                     // Read when the player opens: the next video.
+                 });
+    list->addView(buffer);
+    list->addView(caption(
+        tr("How far ahead the video is loaded. Larger rides out a slow swarm or "
+        "a weak wifi, but uses more memory and takes longer to start. Applies to "
+        "the next video.")));
+
     auto* governor = new brls::SelectorCell();
     governor->init(tr("Limit download rate"), { tr("Off (default)"), tr("On") },
                    cfg.rateGovernor ? 1 : 0, [](int sel) {
@@ -653,20 +666,13 @@ brls::View* networkPane()
     tmdbUrl->setText(tr("API address"));
 
     auto updateApiDetail = [tmdbUrl]() {
-        const auto& c = config::get();
-        if (!c.tmdbApiUrl.empty())
-        {
-            tmdbUrl->setDetailText(c.tmdbApiUrl);
-        }
-        else if (c.tmdbProxyEnabled)
-        {
-            if (c.tmdbProxyUrl.empty()) tmdbUrl->setDetailText("tmdb-api.rootu.top");
-            else tmdbUrl->setDetailText(c.tmdbProxyUrl);
-        }
-        else
-        {
-            tmdbUrl->setDetailText("api.themoviedb.org");
-        }
+        // What tmdb:: will actually call, shorn of the scheme and the "/3".
+        std::string base = tmdb::settings().apiBase;
+        size_t s = base.find("://");
+        if (s != std::string::npos) base.erase(0, s + 3);
+        if (base.size() >= 2 && base.compare(base.size() - 2, 2, "/3") == 0)
+            base.resize(base.size() - 2);
+        tmdbUrl->setDetailText(base);
     };
 
     auto* tmdbProxy = new brls::BooleanCell();

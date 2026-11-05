@@ -66,17 +66,23 @@ pkg_check_modules(WEBP REQUIRED IMPORTED_TARGET libwebp)
 # UI (app/, C++) + our torrent engine (engine/, C).
 file(GLOB_RECURSE MAIN_SRC ${CMAKE_CURRENT_SOURCE_DIR}/app/*.cpp)
 set(ENGINE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/engine)
-# torrentfs.c is the streaming engine: 3 threads, leech-only, one piece per
-# session with parked-claim adoption and strength-based peer steering.
+# torrentfs.c is the streaming engine, ported from TorrentShopNX: one poll()
+# netloop, a block-level scheduler (several peers per piece, hedged requests,
+# endgame), PEX, a persistent DHT service, incoming peers + UPnP, uTP.
+# engine_services.c starts the process-wide parts (DHT, listener, log).
 set(ENGINE_SRC
-    ${ENGINE_DIR}/bencode.c ${ENGINE_DIR}/torrent.c ${ENGINE_DIR}/torrentfs.c
-    ${ENGINE_DIR}/peer.c ${ENGINE_DIR}/swarm.c ${ENGINE_DIR}/magnet.c
+    ${ENGINE_DIR}/bencode.c ${ENGINE_DIR}/torrent_meta.c ${ENGINE_DIR}/torrentfs.c
+    ${ENGINE_DIR}/bt_peer.c ${ENGINE_DIR}/mse_peer.c ${ENGINE_DIR}/magnet.c
     ${ENGINE_DIR}/udp_tracker.c ${ENGINE_DIR}/dht.c ${ENGINE_DIR}/dhtclient.c
+    ${ENGINE_DIR}/listen.c ${ENGINE_DIR}/upnp.c ${ENGINE_DIR}/engine_log.c
+    ${ENGINE_DIR}/engine_services.c
     ${ENGINE_DIR}/udpdiag.c ${ENGINE_DIR}/stream.c ${ENGINE_DIR}/httpsrc.c
-    ${ENGINE_DIR}/utp.cpp ${ENGINE_DIR}/utp_utils.cpp ${ENGINE_DIR}/utpbridge.cpp)
+    ${ENGINE_DIR}/utp.cpp ${ENGINE_DIR}/utp_utils.cpp ${ENGINE_DIR}/utpbridge.cpp
+    ${ENGINE_DIR}/utp_nb.cpp)
 # libutp needs -DPOSIX for its socket types (SOCKADDR_STORAGE etc) on Switch.
 if (PLATFORM_SWITCH)
-    set_source_files_properties(${ENGINE_SRC} PROPERTIES COMPILE_DEFINITIONS "POSIX")
+    set_source_files_properties(${ENGINE_SRC} PROPERTIES COMPILE_DEFINITIONS "POSIX"
+        COMPILE_OPTIONS "-include;${ENGINE_DIR}/engine_compat.h")
 endif ()
 list(APPEND MAIN_SRC ${ENGINE_SRC})
 

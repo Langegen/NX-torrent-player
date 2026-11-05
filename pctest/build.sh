@@ -16,16 +16,19 @@ case "$(uname -s)" in
 esac
 
 gcc -O2 -g -Wall \
-    -I$compat -Iengine \
+    -I$compat -Iengine -Iinclude \
     engine/bencode.c \
-    engine/torrent.c \
+    engine/torrent_meta.c \
     engine/udp_tracker.c \
-    engine/peer.c \
+    engine/bt_peer.c \
     engine/torrentfs.c \
     engine/magnet.c \
     engine/dht.c \
     engine/dhtclient.c \
+    engine/listen.c \
+    engine/engine_log.c \
     pctest/utpstub.c \
+    pctest/nbstub.c \
     pctest/main.c \
     -o $out \
     -lpthread -lmbedcrypto -lmbedtls -lmbedx509 -lcurl -lz $extra

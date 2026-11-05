@@ -6,6 +6,7 @@
 // chunking logic is ours.
 
 #include <pthread.h>
+#include <signal.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -292,6 +293,9 @@ static void test_cancel(void) {
 }
 
 int main(void) {
+    // The mock server writes to sockets the client already closed (a
+    // cancelled or short read): EPIPE, not a dead test.
+    signal(SIGPIPE, SIG_IGN);
     printf("=========================================\n");
     printf(" NX TORRENT PLAYER: HTTP SOURCE TESTS    \n");
     printf("=========================================\n\n");

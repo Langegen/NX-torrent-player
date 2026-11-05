@@ -32,7 +32,9 @@ void userAppInit()
     AppletType at        = appletGetAppletType();
     if (at == AppletType_Application || at == AppletType_SystemApplication)
     {
-        cfg.num_bsd_sessions = 12; // default is 3
+        // 16: the engine's blocking sockets (tracker announces, metadata
+        // fetch workers, DHT, UPnP) plus the app's own curl requests.
+        cfg.num_bsd_sessions = 16; // default is 3
         cfg.sb_efficiency    = 8; // default is 4
 
         // LOCAL PATCH (NX Torrent Player) -- see CLAUDE.md, re-apply if borealis
@@ -54,10 +56,19 @@ void userAppInit()
         // so the footprint matches unpatched borealis exactly; only the initial
         // per-socket buffers are cut (a peer sends 16 KB blocks and we send
         // 17-byte requests, so 32 KB rx / 16 KB tx is ample).
-        cfg.tcp_tx_buf_size     = 0x4000; // 16 KB initial (was 32 KB)
-        cfg.tcp_rx_buf_size     = 0x8000; // 32 KB initial (was 64 KB)
-        cfg.tcp_tx_buf_max_size = 0x40000; // 256 KB -- stock, sizes the pool
-        cfg.tcp_rx_buf_max_size = 0x40000; // 256 KB -- stock
+        //
+        // The pool is sb_efficiency * (tcp_tx_max + tcp_rx_max + udp_tx +
+        // udp_rx). Upload is a trickle (we mostly send 17-byte requests), so
+        // the tx max gives up what the rx max gains: a receive window grows to
+        // 512 KB (fast peers get SO_RCVBUF 512 KB from the engine) while the
+        // pool stays ~5 MB, about what the stock 256/256 KB gave (~4.5 MB).
+        // A 256 KB window capped one peer at ~2.5 MB/s at 100 ms RTT.
+        cfg.tcp_tx_buf_size     = 0x4000;  // 16 KB initial (was 32 KB)
+        cfg.tcp_rx_buf_size     = 0x8000;  // 32 KB initial (was 64 KB)
+        cfg.tcp_tx_buf_max_size = 0x10000; // 64 KB (stock 256 KB)
+        cfg.tcp_rx_buf_max_size = 0x80000; // 512 KB (stock 256 KB)
+        cfg.udp_tx_buf_size     = 0x4000;  // 16 KB: DHT, uTP, tracker datagrams
+        cfg.udp_rx_buf_size     = 0x8000;  // 32 KB
 
         if (R_FAILED(socketInitialize(&cfg)))
             socketInitializeDefault(); // fall back if the config is rejected

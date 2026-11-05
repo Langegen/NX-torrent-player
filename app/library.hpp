@@ -34,6 +34,11 @@ struct EpisodeProgress
     double pos = 0, dur = 0;
     bool done   = false;
     int64_t at  = 0;  // unix seconds
+    // The file it played from, so a started episode resumes from the same
+    // release without picking it again. "" = not known (older libraries).
+    std::string source;
+    int fileIndex = -1;
+    std::string sourceType;
 };
 
 struct Entry
@@ -107,6 +112,13 @@ void setStatus(const content::Item& item, Status s);
 // its bookmark or the per-episode marks: the film's position, or which
 // episode was last, is forgotten.
 void dismissContinue(const std::string& key);
+
+// Titles played at some point, most recent first (the History tab).
+std::vector<Entry> watched();
+
+// Takes a title out of the History tab: it is no longer "watched at" any
+// time, and its Continue goes with it. Bookmark and episode marks stay.
+void forgetWatched(const std::string& key);
 
 // Called by the player while a title plays: progress, and what is playing.
 // `item` is only used to create the entry if it is not there yet.

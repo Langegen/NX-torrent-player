@@ -129,6 +129,17 @@ Dropdown::Dropdown(std::string title, std::vector<std::string> values, ValueSele
         ;
 
     content->setHeight(min(height, Application::contentHeight * 0.73f));
+
+    // NX-torrent-player patch: the XML pins the root at 1280, the stock
+    // logical width. At a wider logical size (1600 docked) the dropdown then
+    // covered only the left of the screen, and the 232px side padding left a
+    // narrow column that cut long names (audio tracks, subtitles) short.
+    this->setWidth(Application::contentWidth);
+    float sides = Application::contentWidth * 0.08f;
+    if (sides < 32.0f)
+        sides = 32.0f;
+    recycler->setPaddingLeft(sides);
+    recycler->setPaddingRight(sides);
 }
 
 int Dropdown::numberOfRows(RecyclerFrame* recycler, int section)

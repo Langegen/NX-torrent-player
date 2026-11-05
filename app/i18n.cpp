@@ -430,6 +430,19 @@ const Entry kFr[] = {
       "Voulez-vous vraiment effacer tout votre historique de lecture ?" },
     { "Completed", "Terminé" },
     { "Watched", "Vu" },
+    { "Buffer size", "Taille du tampon" },
+    { "Standard", "Standard" },
+    { "Large", "Grand" },
+    { "Maximum", "Maximum" },
+    { "How far ahead the video is loaded. Larger rides out a slow swarm or a weak wifi, "
+      "but uses more memory and takes longer to start. Applies to the next video.",
+      "Jusqu'où la vidéo est chargée à l'avance. Plus grand résiste mieux à un essaim lent "
+      "ou à un wifi faible, mais utilise plus de mémoire et démarre plus lentement. "
+      "S'applique à la prochaine vidéo." },
+    { " from ", " à " },
+    { "Releases", "Sources" },
+    { "Films and series", "Films et séries" },
+    { "Other files", "Autres fichiers" },
 };
 
 std::string g_lang = "en";
@@ -445,7 +458,9 @@ namespace i18n
 
 void load()
 {
-    g_lang = config::get().language;
+    // "auto" (the default) follows the console; g_lang always holds the
+    // resolved id, since the font, borealis' locale and TMDB key off it.
+    g_lang = config::effectiveUiLang(config::get().language);
     if (g_lang == "fr")
     {
         g_table = new std::unordered_map<std::string, const char*>();
@@ -475,16 +490,22 @@ const std::string& lang()
 
 const std::vector<std::string>& langIds()
 {
-    static const std::vector<std::string> v = { "en", "fr", "ru" };
+    static const std::vector<std::string> v = { "auto", "en", "fr", "ru" };
     return v;
 }
 
 const std::vector<std::string>& langLabels()
 {
     // Endonyms, and never translated: a language picker has to be readable to
-    // someone who cannot read the language the UI is currently in.
-    static const std::vector<std::string> v = { "English (default)",
-                                                "Français", "Русский" };
+    // someone who cannot read the language the UI is currently in. The
+    // console entry names what it resolved to, in that language.
+    static const std::vector<std::string> v = [] {
+        const std::string c = config::effectiveUiLang("auto");
+        const char* name = c == "ru" ? "Русский" : c == "fr" ? "Français" : "English";
+        return std::vector<std::string>{ std::string(tr("Console language")) + " (" +
+                                             name + ")",
+                                         "English", "Français", "Русский" };
+    }();
     return v;
 }
 

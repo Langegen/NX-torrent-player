@@ -66,6 +66,7 @@ extern "C" {
 #include "httpsrc.h"
 #include "torrent.h"
 #include "torrentfs.h"
+#include "engine_services.h"
 }
 
 #include "i18n.hpp"
@@ -1961,6 +1962,12 @@ int main(int argc, char* argv[])
     // (Stremio login) without ever being initialised.
     curl_global_init(CURL_GLOBAL_DEFAULT);
 
+    // The torrent engine's process-wide services: the DHT starts bootstrapping
+    // now (from the node cache of the last launch), so it is warm by the time a
+    // release is picked; the listen port lets firewalled seeders dial us. Its
+    // own log (engine.log, async) follows the Log file option.
+    engine_services_start(config::get().logging ? APPDATA_DIR "/engine.log" : nullptr);
+
 #ifdef __SWITCH__
     // Space Grotesk has no Cyrillic: in Russian the whole UI uses the system
     // font (which has it) rather than mixing two typefaces in every label.
@@ -1986,7 +1993,9 @@ int main(int argc, char* argv[])
     theme::captureSystemVariant();
     theme::applyVariant();
 
-    brls::Application::setGlobalQuit(true);
+    // No global quit on +: it closed the app from the player and from every
+    // menu. B on the root view still asks to exit, and HOME still works.
+    brls::Application::setGlobalQuit(false);
 
     // Before anything is built: plenty of views read the accent and the palette
     // once, as they are constructed, and keep the colours they got.
@@ -2024,6 +2033,10 @@ int main(int argc, char* argv[])
     // The network pool's threads, joined before main() returns (see
     // workers.hpp): a request still running past it would crash on the Switch.
     workers::stop();
+
+    // The engine's DHT/listener/UPnP threads, for the same reason (and the DHT
+    // saves its node cache for the next launch's warm start).
+    engine_services_stop();
 
     // Nothing to wait for here: ~MpvView closes the engine synchronously, and
     // Application::exit() destroys the activity stack before this returns. That

@@ -52,10 +52,23 @@ std::string formatSize(int64_t bytes);
 // by substituting the configured Jackett server host.
 std::string normalizeDownloadLink(const std::string& link);
 
+// What is known about the title being searched for, beyond the query text.
+// Jacred-style servers (jac.red, jac.black) use it to return only that
+// title's releases, the way Lampa asks them; plain Jackett ignores it.
+struct TitleHint
+{
+    std::string title;          // in the UI language
+    std::string titleOriginal;
+    std::string year;
+    bool series = false;
+    bool anime  = false;        // also searches the anime category
+};
+
 // Performs an asynchronous search request to Jackett.
 // Callback is invoked on the UI thread (via brls::sync).
 void searchAsync(const std::string& query, Category category,
-                 std::function<void(SearchResult)> cb);
+                 std::function<void(SearchResult)> cb,
+                 const TitleHint* hint = nullptr);
 
 // Sorts items in-place according to SortBy.
 void sortItems(std::vector<Item>& items, SortBy sort);

@@ -8,6 +8,7 @@
 #include "config.hpp"
 #include "i18n.hpp"
 #include "library.hpp"
+#include "player.hpp"  // fmtTime
 #include "sources.hpp"
 #include "stremio.hpp"
 #include "theme.hpp"
@@ -86,6 +87,9 @@ struct CardState
     brls::Box* seasonBar       = nullptr;
     std::vector<brls::Button*> seasonBtns;
     brls::Box* episodes        = nullptr;
+    // The season on show, kept so its cards can be redrawn with fresh
+    // progress when the library changes (an episode watched from here).
+    std::vector<content::Episode> eps;
     brls::Box* similarSection  = nullptr;  // "More like this"
     brls::Box* similarRow      = nullptr;
 };
@@ -282,10 +286,18 @@ class CardView : public brls::Box
         {
             library::Next n = library::nextOf(en);
             if (n.kind == library::Next::Kind::Resume)
+            {
+                // Where it stopped: "Continue from 42:10".
+                double pos = en.pos;
+                if (d.item.isSeries())
+                    if (const library::EpisodeProgress* p = en.episode(n.season, n.episode))
+                        pos = p->pos;
+                std::string at = pos >= 15.0 ? tr(" from ") + fmtTime(pos) : "";
                 return play + (d.item.isSeries()
                                    ? tr("Continue S") + std::to_string(n.season) + tr(" E") +
-                                         std::to_string(n.episode)
-                                   : std::string(tr("Continue")));
+                                         std::to_string(n.episode) + at
+                                   : std::string(tr("Continue")) + at);
+            }
             if (n.kind == library::Next::Kind::NextEp)
                 return play + tr("Watch S") + std::to_string(n.season) + tr(" E") +
                        std::to_string(n.episode);
@@ -347,6 +359,7 @@ class CardView : public brls::Box
             seenGen = gen;
             if (st->playBtn) st->playBtn->setText(playLabel());
             if (st->markBtn) st->markBtn->setText(markLabel());
+            refreshEpisodes();
         }
         brls::Box::draw(vg, x, y, w, h, style, ctx);
     }
@@ -386,10 +399,20 @@ class CardView : public brls::Box
         st->seasonsSection->setMarginTop(22.0f);
         st->seasonsSection->setVisibility(brls::Visibility::GONE);
 
+        // Scrolls: twenty seasons squeezed into one row became unreadable
+        // squares with the last ones out of reach. A plain frame, not a
+        // NearestStrip: coming up from the episodes should land on the
+        // season being shown (the last focused button), not the nearest.
         st->seasonBar = new brls::Box();
         st->seasonBar->setAxis(brls::Axis::ROW);
-        st->seasonBar->setMarginBottom(14.0f);
-        st->seasonsSection->addView(st->seasonBar);
+        st->seasonBar->setAlignItems(brls::AlignItems::CENTER);
+        auto* seasonScroll = new brls::HScrollingFrame();
+        seasonScroll->setHeight(64.0f);
+        seasonScroll->setScrollingBehavior(brls::ScrollingBehavior::CENTERED);
+        seasonScroll->setContentView(st->seasonBar);
+        seasonScroll->setFocusable(false);
+        seasonScroll->setMarginBottom(6.0f);
+        st->seasonsSection->addView(seasonScroll);
 
         st->episodes = new brls::Box();
         // 300 wide at 16:9, plus room for the focus glow.
@@ -510,10 +533,17 @@ class CardView : public brls::Box
                                              : tr("Season ") + std::to_string(s.number);
             int idx = (int)i;
             auto* b = ui::actionButton(name, false, [this, idx]() { selectSeason(idx); }, true);
+            b->setShrink(0.0f);  // full width each; the bar scrolls instead
             st->seasonBar->addView(b);
             st->seasonBtns.push_back(b);
         }
-        selectSeason(0);
+        // Back where the library left off: the season last watched.
+        int start = 0;
+        library::Entry en;
+        if (library::find(st->d.item.key(), en) && en.lastSeason > 0)
+            for (size_t i = 0; i < st->d.seasons.size(); i++)
+                if (st->d.seasons[i].number == en.lastSeason) start = (int)i;
+        selectSeason(start);
     }
 
     void switchSeason(int dir)
@@ -546,6 +576,7 @@ class CardView : public brls::Box
             ui::setPillActive(st->seasonBtns[i], (int)i == idx, true);
 
         st->episodes->clearViews();
+        st->eps.clear();
         auto* wait = whiteLabel(tr("Loading..."), 18.0f, 180);
         wait->setMarginLeft(4.0f);
         st->episodes->addView(wait);
@@ -563,29 +594,86 @@ class CardView : public brls::Box
                 s->episodes->addView(whiteLabel(r.ok ? tr("No episodes") : r.error, 18.0f, 180));
                 return;
             }
-            int count = (int)r.episodes.size();
-            library::Entry lib;
-            bool haveLib = library::find(s->d.item.key(), lib);
-            for (const auto& e : r.episodes)
-            {
-                // Watched part of it, from the library: a full bar when done.
-                double prog = -1.0;
-                if (const library::EpisodeProgress* p =
-                        haveLib ? lib.episode(e.season, e.number) : nullptr)
-                    prog = p->done ? 1.0 : (p->dur > 0 ? p->pos / p->dur : -1.0);
-                std::string title = std::to_string(e.number) + ". " +
-                                    (e.title.empty() ? tr("Episode ") + std::to_string(e.number)
-                                                     : e.title);
-                std::string id = s->d.item.key() + "_s" + std::to_string(e.season) +
-                                 "e" + std::to_string(e.number);
-                int season = e.season, number = e.number;
-                auto onClick = [weak, season, number, count]() {
-                    if (auto c = weak.lock()) openSources(c->d.item, season, number, count);
-                };
-                s->episodes->addView(ui::wideCard(title, id, e.stillUrl, "", prog,
-                                                  s->alive, onClick, 236.0f));
-            }
+            s->eps = r.episodes;
+            fillEpisodes(-1);
         });
+    }
+
+    // The episode cards of the season on show, with each one's progress from
+    // the library: a part-way bar, a full one when watched. `focus` is the
+    // card to hand the focus to afterwards (-1: none).
+    void fillEpisodes(int focus)
+    {
+        st->episodes->clearViews();
+        int count = (int)st->eps.size();
+        library::Entry lib;
+        bool haveLib = library::find(st->d.item.key(), lib);
+        auto weak    = std::weak_ptr<CardState>(st);
+        for (const auto& e : st->eps)
+        {
+            double prog = -1.0;
+            const library::EpisodeProgress* p =
+                haveLib ? lib.episode(e.season, e.number) : nullptr;
+            if (p) prog = p->done ? 1.0 : (p->dur > 0 ? p->pos / p->dur : -1.0);
+            std::string title = std::to_string(e.number) + ". " +
+                                (e.title.empty() ? tr("Episode ") + std::to_string(e.number)
+                                                 : e.title);
+            // Stopped part-way: where, so the row reads like a history.
+            if (p && !p->done && p->pos >= 15.0) title += "  \xC2\xB7  " + fmtTime(p->pos);
+            std::string id = st->d.item.key() + "_s" + std::to_string(e.season) + "e" +
+                             std::to_string(e.number);
+            int season = e.season, number = e.number;
+            // A: straight into it when it played before (same release, where
+            // it stopped) or the remembered pack holds it; else its releases.
+            auto onClick = [weak, season, number, count]() {
+                auto c = weak.lock();
+                if (!c) return;
+                bool jackettOn = !config::get().jackettUrl.empty();
+                bool stremioOn = !stremio::loadAuthKey().empty() && !c->d.item.imdbId.empty();
+                library::Entry en;
+                bool played = library::find(c->d.item.key(), en) &&
+                              ((en.episode(season, number) &&
+                                !en.episode(season, number)->source.empty()) ||
+                               (en.packSeason > 0 && season >= en.packSeason &&
+                                season <= en.packSeasonTo));
+                if (!played && !jackettOn && !stremioOn)
+                {
+                    openSources(c->d.item, season, number, count);  // says what to set up
+                    return;
+                }
+                playEpisode(c->d.item, season, number, count);
+            };
+            auto* card = ui::wideCard(title, id, e.stillUrl, "", prog, st->alive, onClick,
+                                      236.0f);
+            // X: pick another release for it.
+            card->registerAction(tr("Releases"), brls::BUTTON_X,
+                                 [weak, season, number, count](brls::View*) {
+                                     if (auto c = weak.lock())
+                                         openSources(c->d.item, season, number, count);
+                                     return true;
+                                 });
+            st->episodes->addView(card);
+        }
+        if (focus >= 0 && focus < (int)st->episodes->getChildren().size())
+            brls::Application::giveFocus(st->episodes->getChildren()[focus]);
+    }
+
+    // The library changed (an episode played from this card): redraw the
+    // cards' progress, keeping the focus on the same episode.
+    void refreshEpisodes()
+    {
+        if (st->eps.empty() || st->seasonBtns.empty()) return;
+        int focus = -1;
+        const auto& kids = st->episodes->getChildren();
+        for (brls::View* v = brls::Application::getCurrentFocus(); v; v = v->getParent())
+        {
+            for (size_t i = 0; i < kids.size(); i++)
+                if (kids[i] == v) focus = (int)i;
+            if (focus >= 0) break;
+        }
+        // Never free the focused card: park the focus on the season first.
+        if (focus >= 0) brls::Application::giveFocus(st->seasonBtns[st->seasonIdx]);
+        fillEpisodes(focus);
     }
 
     // The main button: a film's sources, or a series' first episode of the

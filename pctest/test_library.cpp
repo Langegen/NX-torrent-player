@@ -59,6 +59,9 @@ static void test_roundtrip()
     b.lastEpisode = 5;
     b.episodes[library::episodeKey(1, 4)] = { 3100, 3100, true, 1700000100 };
     b.episodes[library::episodeKey(1, 5)] = { 900, 3200, false, 1700000200 };
+    b.episodes[library::episodeKey(1, 5)].source     = "magnet:?xt=urn:btih:abc";
+    b.episodes[library::episodeKey(1, 5)].fileIndex  = 4;
+    b.episodes[library::episodeKey(1, 5)].sourceType = "Jackett";
     b.packTitle    = "Slovo.patsana.S01.1080p";
     b.packMagnet   = "magnet:?xt=urn:btih:abc";
     b.packSeason   = 1;
@@ -83,6 +86,12 @@ static void test_roundtrip()
     CHECK(y.episodes.size() == 2);
     CHECK(y.episode(1, 4) && y.episode(1, 4)->done);
     CHECK(y.episode(1, 5) && !y.episode(1, 5)->done && y.episode(1, 5)->pos > 899);
+    // Each episode keeps the file it played from; the entry's own source is
+    // not taken for an episode's (nor the reverse).
+    CHECK(y.episode(1, 5)->source == "magnet:?xt=urn:btih:abc" &&
+          y.episode(1, 5)->fileIndex == 4 && y.episode(1, 5)->sourceType == "Jackett");
+    CHECK(y.episode(1, 4)->source.empty() && y.episode(1, 4)->fileIndex == -1);
+    CHECK(y.source.empty());
     CHECK(y.packMagnet == b.packMagnet && y.packSeason == 1);
     CHECK(library::fromJson("not json").empty());
     std::printf("      PASSED\n");

@@ -12,6 +12,7 @@
 #include "appdata.hpp"
 #include "config.hpp"
 #include "history.hpp"
+#include "library.hpp"
 #include "http.hpp"
 #include "i18n.hpp"
 #include "json.hpp"
@@ -167,7 +168,7 @@ void sortItems(std::vector<Item>& items, SortBy sort)
 }
 
 void searchAsync(const std::string& query, Category category,
-                 std::function<void(SearchResult)> cb)
+                 std::function<void(SearchResult)> cb, const TitleHint* hint)
 {
     const auto& cfg = config::get();
     if (cfg.jackettUrl.empty())
@@ -190,6 +191,18 @@ void searchAsync(const std::string& query, Category category,
     if (category != Category::ALL)
     {
         url += "&Category[]=" + std::to_string(static_cast<int>(category));
+        if (hint && hint->anime && category != Category::ANIME)
+            url += "&Category[]=" + std::to_string(static_cast<int>(Category::ANIME));
+    }
+    // Lampa's extra parameters: a Jacred server then matches the title and
+    // year itself (a "Fallout" search stops returning game repacks).
+    if (hint)
+    {
+        if (!hint->title.empty()) url += "&title=" + http::urlEncode(hint->title);
+        if (!hint->titleOriginal.empty())
+            url += "&title_original=" + http::urlEncode(hint->titleOriginal);
+        if (!hint->year.empty()) url += "&year=" + http::urlEncode(hint->year);
+        url += std::string("&is_serial=") + (hint->series ? "2" : "1");
     }
 
     // Not the URL itself: it carries the API key, and the log is a plain file
@@ -356,11 +369,17 @@ void pruneCache()
     // stored path ("sdmc:/..." or not) does not matter.
     static const std::string marker = "/jackett/";
     std::set<std::string> used;
-    for (const auto& it : history::all())
+    auto keep = [&](const std::string& source) {
+        size_t at = source.rfind(marker);
+        if (at != std::string::npos) used.insert(source.substr(at + marker.size()));
+    };
+    for (const auto& it : history::all()) keep(it.source);
+    // The library resumes episodes and films from their own files, long after
+    // the history may have dropped them (it keeps 100).
+    for (const auto& e : library::all())
     {
-        size_t at = it.source.rfind(marker);
-        if (at != std::string::npos)
-            used.insert(it.source.substr(at + marker.size()));
+        keep(e.source);
+        for (const auto& kv : e.episodes) keep(kv.second.source);
     }
 
     int removed = 0;

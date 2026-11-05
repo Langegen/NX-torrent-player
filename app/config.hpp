@@ -92,13 +92,12 @@ struct Config
     // theme::current()), so this is not validated here.
     std::string accent = "purple";
 
-    // The UI language, as an i18n::langIds() id: "en" (what the app is written
-    // in, and the default) or "fr". Deliberately not the console's language --
-    // the app ships English strings and only a translation of them, so guessing
-    // from the system would hand a half-French UI to someone who never asked
-    // for one. Read at startup only (see i18n::load()): the strings are taken
-    // when a view is built, and the header, tab bar and browser are built once.
-    std::string language = "en";
+    // The UI language, as an i18n::langIds() id: "auto" (the console's own
+    // language when we have a table for it, English otherwise -- the default),
+    // "en", "fr" or "ru". Read at startup only (see i18n::load()): the strings
+    // are taken when a view is built, and the header, tab bar and browser are
+    // built once.
+    std::string language = "auto";
 
     // "dark", "light" or "system" (the console's own setting). Dark is what the
     // app has always been. Read at startup only: borealis does not support
@@ -121,6 +120,11 @@ struct Config
     // trade is that nothing is persisted and seeking far back re-downloads, and
     // it needs a full-RAM launch. Applies to the next video.
     bool ramStream = true;
+
+    // How far ahead playback buffers: 0 standard, 1 large, 2 maximum (see
+    // bufferPreset()). Bigger rides out a slow swarm or wifi drop at the cost
+    // of RAM and a longer wait before the first frame. Applies to the next video.
+    int bufferMode = 0;
 
     // Jackett server configuration
     std::string jackettUrl = "";
@@ -146,9 +150,29 @@ struct Config
     std::string tmdbApiUrl = "";
     std::string tmdbImageUrl = "";
     std::string tmdbProxyUrl = "";
+    // The built-in TMDB proxy. Unless the user flipped it in Options
+    // (tmdbProxyUserSet), it follows the UI language: on for Russian, where
+    // TMDB is often unreachable directly. Only a user's choice is saved.
     bool tmdbProxyEnabled = false;
     bool tmdbProxyUserSet = false;
 };
+
+// The numbers behind Config::bufferMode.
+struct BufferPreset
+{
+    int demuxerMaxMiB;     // mpv demuxer-max-bytes
+    int readaheadSecs;     // mpv demuxer-readahead-secs
+    int cacheSecs;         // mpv cache-secs
+    double startSecs;      // buffered before the first frame
+    int streamWindowMiB;   // engine read-ahead window (torrentfs)
+};
+// The preset for the current setting, already capped to what this launch can
+// afford (an applet launch has far less RAM than a full one).
+BufferPreset bufferPreset();
+const std::vector<std::string>& bufferLabels();
+
+// The UI language with "auto" resolved: "en", "fr" or "ru".
+std::string effectiveUiLang(const std::string& setting);
 
 // The live settings. Mutate, then call save().
 Config& get();

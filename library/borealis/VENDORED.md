@@ -35,9 +35,14 @@ peer sends 16 KB blocks, we send 17-byte requests). With the defaults the pool
 ran dry at ~20 sockets and `socket()` returned ENOBUFS ("No buffer space
 available"), capping concurrent peers regardless of swarm size.
 
-The max sizes are left at stock, so the memory footprint matches unpatched
-borealis: only the per-socket initial buffers are cut. Growing the pool instead
-starved the nvtegra video decoder, which then fell back to software H.264.
+The pool is `sb_efficiency * (tcp_tx_max + tcp_rx_max + udp_tx + udp_rx)`.
+Upload is a trickle, so the tx max drops to 64 KB and the rx max rises to
+512 KB (a receive window of 256 KB capped one peer at ~2.5 MB/s at 100 ms RTT);
+UDP is 16/32 KB. The pool stays ~5 MB, about the ~4.5 MB of the stock sizes.
+Growing the pool itself is what starved the nvtegra video decoder, which then
+fell back to software H.264 — watch for that if these numbers go up (1 MB rx
+max would make the pool ~9 MB). `num_bsd_sessions` is 16 (was 12): the
+engine's blocking sockets (announces, metadata workers, DHT, UPnP) plus curl.
 
 The patch is marked with a `LOCAL PATCH` comment in the source.
 
@@ -135,6 +140,15 @@ and before the video context swaps the buffers: the one moment a finished frame
 can be read back. Only the PC build's scripted UI check (`app/autotest.cpp`,
 `NX_AUTOTEST=script`) sets it, to take screenshots; nothing is set on the
 console. Marked `LOCAL PATCH` in both files.
+
+### 8. `library/lib/views/dropdown.cpp` — full-width dropdown
+
+The dropdown's XML pins its root at `width="1280"`, borealis' stock logical
+width. The app lays out wider (1600 docked by default), so the dropdown covered
+only the left of the screen, and with 232 px of side padding the list was a
+narrow column that cut long names short (audio tracks, subtitles). The
+constructor now sizes the root to `Application::contentWidth` and sets the list's
+side padding to 8% of it. Marked `NX-torrent-player patch`.
 
 ## Updating
 

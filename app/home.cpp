@@ -457,7 +457,9 @@ class HomeRoot : public brls::Box
         for (const auto& it : history::all())
         {
             if (n >= 12) break;
-            if (!history::hasValidResume(it) || libSources.count(it.source)) continue;
+            // A catalog title's file is its library entry above.
+            if (!history::hasValidResume(it) || libSources.count(it.source) || it.tmdbId > 0)
+                continue;
             double prog = it.durationSec > 0 ? it.positionSec / it.durationSec : -1.0;
             history::Item copy = it;
             auto* card = ui::wideCard(it.title, "", "", it.posterPath, prog, alive,

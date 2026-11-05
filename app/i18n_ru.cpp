@@ -714,6 +714,19 @@ const Pair kRu[] = {
     { "Restart", "Перезапустить" },
     { "Close and reopen the app to use the new version.",
       "Закройте и снова откройте приложение, чтобы запустить новую версию." },
+    { "Buffer size", "Размер буфера" },
+    { "Standard", "Стандартный" },
+    { "Large", "Большой" },
+    { "Maximum", "Максимальный" },
+    { "How far ahead the video is loaded. Larger rides out a slow swarm or a weak wifi, "
+      "but uses more memory and takes longer to start. Applies to the next video.",
+      "Насколько далеко вперёд загружается видео. Больший буфер переживает медленную раздачу "
+      "или слабый Wi-Fi, но занимает больше памяти и дольше стартует. Применяется к "
+      "следующему видео." },
+    { " from ", " с " },
+    { "Releases", "Раздачи" },
+    { "Films and series", "Фильмы и сериалы" },
+    { "Other files", "Другие файлы" },
 };
 
 const size_t kRuCount = sizeof(kRu) / sizeof(kRu[0]);
