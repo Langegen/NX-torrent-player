@@ -101,8 +101,10 @@ void skipSpaces(const std::string& s, size_t& i)
         i++;
 }
 
-// "1-8", "1–8" (an en dash), "1 - 8": the end of a range after a number.
-int readRangeEnd(const std::string& s, size_t& i)
+// "1-8", "1–8" (an en dash), "1 - 8": the end of a range after a number
+// `from`, at most `maxv`. Not a range: "S01E05 - 720p" (a letter right after
+// the number -- a resolution, a codec), and an end below its start.
+int readRangeEnd(const std::string& s, size_t& i, int from, int maxv)
 {
     size_t j = i;
     while (j < s.size() && s[j] == ' ') j++;
@@ -115,7 +117,10 @@ int readRangeEnd(const std::string& s, size_t& i)
     while (j < s.size() && s[j] == ' ') j++;
     if (j < s.size() && (s[j] == 'e' || s[j] == 's')) j++;  // "E01-E08", "S01-S03"
     int n = readNum(s, j);
-    if (n >= 0) i = j;
+    if (n < 0) return -1;
+    if (j < s.size() && std::isalpha((unsigned char)s[j])) return -1;  // 720p, 264
+    if (n < from || n > maxv) return -1;
+    i = j;
     return n;
 }
 
@@ -171,12 +176,12 @@ void readScope(const std::string& low, Info& in)
             j++;
             int e = readNum(low, j);
             in.episode = in.episodeTo = e;
-            int to = readRangeEnd(low, j);
+            int to = readRangeEnd(low, j, e, 999);
             if (to >= 0) in.episodeTo = to;
         }
         else
         {
-            int to = readRangeEnd(low, j);
+            int to = readRangeEnd(low, j, s, 99);
             if (to >= 0) in.seasonTo = to;
         }
     }
@@ -214,7 +219,7 @@ void readScope(const std::string& low, Info& in)
             if (s < 0) s = numberBefore(low, k);
             if (s < 0) continue;
             in.season = in.seasonTo = s;
-            int to = readRangeEnd(low, j);
+            int to = readRangeEnd(low, j, s, 99);
             if (to >= 0) in.seasonTo = to;
         }
     }
@@ -234,7 +239,7 @@ void readScope(const std::string& low, Info& in)
             if (e < 0) e = numberBefore(low, k);
             if (e < 0) continue;
             in.episode = in.episodeTo = e;
-            int to = readRangeEnd(low, j);
+            int to = readRangeEnd(low, j, e, 999);
             if (to >= 0) in.episodeTo = to;
             // "из 8" / "of 8": the whole season when the range reaches it.
             size_t of = low.find("\xD0\xB8\xD0\xB7 ", j);  // "из "

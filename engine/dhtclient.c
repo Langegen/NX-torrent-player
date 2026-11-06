@@ -198,7 +198,9 @@ static const char *BOOTSTRAP[] = {
 };
 #define BOOTSTRAP_PORT "6881"
 
-#define DHT_MAX_TARGETS 4
+// Two engines can hold the same hash for a moment (the next episode of a
+// pack opens before the previous one closes), beside a magnet lookup or two.
+#define DHT_MAX_TARGETS 8
 
 typedef struct {
     bool active;
@@ -371,30 +373,9 @@ static void bg_on_event(void *closure, int event,
     (void)closure;
     if (event != DHT_EVENT_VALUES || !info_hash || data_len < 6) return;
 
-    dht_target *target = NULL;
-    mutexLock(&s_bg_mtx);
-    for (int i = 0; i < DHT_MAX_TARGETS; i++) {
-        if (s_targets[i].active &&
-            memcmp(s_targets[i].info_hash, info_hash, 20) == 0) {
-            target = &s_targets[i];
-            break;
-        }
-    }
-    dht_peer_cb cb = target ? target->cb : NULL;
-    void *ctx = target ? target->ctx : NULL;
-    if (cb) s_cb_inflight++;   // dht_background_remove waits for this to drain
-    mutexUnlock(&s_bg_mtx);
-    if (!cb) return;
-
-    int n = (int)(data_len / 6);
-    if (n <= 0) {
-        mutexLock(&s_bg_mtx);
-        s_cb_inflight--;
-        mutexUnlock(&s_bg_mtx);
-        return;
-    }
     peer_addr peers[128];
     int np = 0;
+    int n = (int)(data_len / 6);
     const uint8_t *b = data;
     for (int i = 0; i < n && np < 128; i++) {
         const uint8_t *e = b + i * 6;
@@ -402,13 +383,33 @@ static void bg_on_event(void *closure, int event,
         peers[np].port = (uint16_t)((e[4] << 8) | e[5]);   // host byte order
         if (peers[np].port) np++;
     }
-    if (np > 0) {
-        mutexLock(&s_bg_mtx);
-        if (target->active) target->delivered += np;
-        s_last_peers_found += np;
-        mutexUnlock(&s_bg_mtx);
-        cb(ctx, peers, np);
+    if (np <= 0) return;
+
+    // Every target holding this hash gets them (an engine and a magnet
+    // lookup, or two engines across an episode switch) -- not just the
+    // first, which left the other without DHT peers.
+    dht_peer_cb cbs[DHT_MAX_TARGETS];
+    void *ctxs[DHT_MAX_TARGETS];
+    int ncb = 0;
+    mutexLock(&s_bg_mtx);
+    for (int i = 0; i < DHT_MAX_TARGETS; i++) {
+        dht_target *tg = &s_targets[i];
+        if (!tg->active || !tg->cb || memcmp(tg->info_hash, info_hash, 20) != 0)
+            continue;
+        tg->delivered += np;
+        cbs[ncb] = tg->cb;
+        ctxs[ncb] = tg->ctx;
+        ncb++;
     }
+    if (ncb > 0) {
+        s_last_peers_found += np;
+        s_cb_inflight++;   // the removers wait for this to drain
+    }
+    mutexUnlock(&s_bg_mtx);
+    if (ncb == 0) return;
+
+    for (int i = 0; i < ncb; i++) cbs[i](ctxs[i], peers, np);
+
     mutexLock(&s_bg_mtx);
     s_cb_inflight--;
     mutexUnlock(&s_bg_mtx);
@@ -600,16 +601,29 @@ static void dht_bg_main(void *arg) {
             // dial us back (needs the listener/UPnP forwarding).
             int my_port = torrent_announce_port();
             u64 search_iv = (u64)(s_bg_hungry ? 5 : 15) * freq;
+            // Pick the due hashes (once each) under the lock, search without it: jech's
+            // dht_search answers from local storage synchronously, through
+            // bg_on_event, which takes s_bg_mtx itself (not recursive -- any
+            // node announcing our hash to us used to wedge this thread, and
+            // the netloop and torrentfs_close behind it).
+            unsigned char due[DHT_MAX_TARGETS][20];
+            int ndue = 0;
             mutexLock(&s_bg_mtx);
             for (int i = 0; i < DHT_MAX_TARGETS; i++) {
                 dht_target *tg = &s_targets[i];
                 if (!tg->active) continue;
                 if (now - tg->last_search > search_iv) {
                     tg->last_search = now;
-                    dht_search(tg->info_hash, my_port, AF_INET, bg_on_event, tg);
+                    bool dup = false;
+                    for (int k = 0; k < ndue && !dup; k++)
+                        dup = memcmp(due[k], tg->info_hash, 20) == 0;
+                    if (!dup) memcpy(due[ndue++], tg->info_hash, 20);
                 }
             }
             mutexUnlock(&s_bg_mtx);
+            // bg_on_event matches by hash and ignores the closure.
+            for (int i = 0; i < ndue; i++)
+                dht_search(due[i], my_port, AF_INET, bg_on_event, NULL);
 
             // Random-id walk: fills buckets across the whole id space.
             // anacrolix refreshes buckets until they are full; a sparse
@@ -820,6 +834,13 @@ int dht_find_peers(const uint8_t info_hash[20], int target_peers, int budget_ms,
     tg->active = false;
     tg->cb = NULL;
     tg->ctx = NULL;
+    // As in dht_background_remove: a callback that already copied cb/ctx
+    // runs outside the lock, and the caller frees ctx when we return.
+    while (s_cb_inflight > 0) {
+        mutexUnlock(&s_bg_mtx);
+        svcSleepThread(1000000ULL);   // 1 ms
+        mutexLock(&s_bg_mtx);
+    }
     mutexUnlock(&s_bg_mtx);
 
     dlog("DHT fin: %d peers", delivered);
@@ -837,12 +858,14 @@ void dht_background_add(const uint8_t info_hash[20],
                         dht_peer_cb cb, void *ctx) {
     dht_bg_start();
 
+    // Keyed by (hash, ctx): another owner of the same hash keeps its own
+    // entry. Taking it over -- as this did -- let that owner's removal end
+    // ours (the previous episode's engine closing under the next one's).
     mutexLock(&s_bg_mtx);
     for (int i = 0; i < DHT_MAX_TARGETS; i++) {
-        if (s_targets[i].active &&
+        if (s_targets[i].active && s_targets[i].ctx == ctx &&
             memcmp(s_targets[i].info_hash, info_hash, 20) == 0) {
             s_targets[i].cb = cb;
-            s_targets[i].ctx = ctx;
             mutexUnlock(&s_bg_mtx);
             return;
         }
@@ -862,11 +885,11 @@ void dht_background_add(const uint8_t info_hash[20],
     mutexUnlock(&s_bg_mtx);
 }
 
-void dht_background_remove(const uint8_t info_hash[20]) {
+void dht_background_remove(const uint8_t info_hash[20], void *ctx) {
     if (!s_bg_init) return;
     mutexLock(&s_bg_mtx);
     for (int i = 0; i < DHT_MAX_TARGETS; i++) {
-        if (s_targets[i].active &&
+        if (s_targets[i].active && s_targets[i].ctx == ctx &&
             memcmp(s_targets[i].info_hash, info_hash, 20) == 0) {
             s_targets[i].active = false;
             s_targets[i].cb = NULL;

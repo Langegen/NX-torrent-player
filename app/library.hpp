@@ -99,6 +99,9 @@ int merge(std::vector<Entry>& into, const std::vector<Entry>& incoming);
 
 void load();
 uint32_t generation();  // bumps on every change, for screens to refresh
+// Writes now, on this thread, whatever a background save has not written yet.
+// For app exit: borealis drops brls::async tasks still queued when it stops.
+void flush();
 
 bool find(const std::string& key, Entry& out);
 std::vector<Entry> all();

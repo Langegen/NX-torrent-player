@@ -753,19 +753,21 @@ brls::View* networkPane()
         }
         tmdbTest->setState(brls::ButtonState::DISABLED);
         tmdbTest->setText(tr("Testing..."));
-        // A cleared cache makes it a real request rather than a stored answer.
-        tmdb::clearCache();
-        tmdb::fetchRowAsync(tmdb::Row::Trending, [tmdbTest, live = tmdbTest->alive](
-                                                     tmdb::ListResult r) {
-            if (*live)
-            {
-                tmdbTest->setState(brls::ButtonState::ENABLED);
-                tmdbTest->setText(tr("Test connection"));
-            }
-            if (r.ok && !r.items.empty())
-                note(tr("Connection successful!"));
-            else
-                note(tr("Connection failed: ") + (r.error.empty() ? tr("empty answer") : r.error));
+        // A cleared cache makes it a real request rather than a stored answer:
+        // the request goes out once the clearing is done.
+        tmdb::clearCache([tmdbTest, live = tmdbTest->alive]() {
+            tmdb::fetchRowAsync(tmdb::Row::Trending, [tmdbTest, live](tmdb::ListResult r) {
+                if (*live)
+                {
+                    tmdbTest->setState(brls::ButtonState::ENABLED);
+                    tmdbTest->setText(tr("Test connection"));
+                }
+                if (r.ok && !r.items.empty())
+                    note(tr("Connection successful!"));
+                else
+                    note(tr("Connection failed: ") +
+                         (r.error.empty() ? tr("empty answer") : r.error));
+            });
         });
         return true;
     });

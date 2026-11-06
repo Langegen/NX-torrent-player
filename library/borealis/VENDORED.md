@@ -150,6 +150,18 @@ narrow column that cut long names short (audio tracks, subtitles). The
 constructor now sizes the root to `Application::contentWidth` and sets the list's
 side padding to 8% of it. Marked `NX-torrent-player patch`.
 
+### 9. `library/lib/core/thread.cpp` — exceptions in `brls::async` tasks
+
+`task_loop` runs each queued task inside `try`/`catch` and logs what it catches.
+Upstream lets an exception from a task (a `bad_alloc` parsing a large answer)
+reach `std::terminate`, which closes the app; the sync side
+(`performSyncTasks`) was already guarded. Marked `LOCAL PATCH`.
+
+The same file: `task_loop` waits on a condition variable between batches,
+woken by `Threading::async()` and `Threading::stop()`, instead of a fixed
+`retro_sleep(500)` that delayed every `brls::async` task by up to half a
+second. Marked `LOCAL PATCH`.
+
 ## Updating
 
 Re-cloning upstream **drops the patch** — re-apply it, and check this file's

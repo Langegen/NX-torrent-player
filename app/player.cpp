@@ -52,6 +52,21 @@ extern "C" {
 }
 
 #include "i18n.hpp"
+#include "workers.hpp"
+
+#include <mutex>
+
+// An engine open in flight. `t` is set by the open task when it finishes and
+// taken by whoever gets there first: the UI callback (normal case) or the
+// destructor (Back pressed meanwhile). With `gone` set, the task closes what
+// it opened itself -- also on app exit, where no brls::sync runs any more.
+struct MpvView::EngineOpen
+{
+    std::mutex m;
+    bool gone          = false;
+    torrentfs* t       = nullptr;
+    volatile bool cancel = false;  // torrentfs_open_file_cancel polls it
+};
 
 // See setMagnetResolvedHook (player.hpp): fired with the played magnet and its
 // resolved name so the Local tab can save a name it did not have yet.
@@ -190,19 +205,22 @@ class PlayPauseButton : public brls::Box
 };
 } // namespace
 
-// Pops `n` activities back-to-back. A free function, not a member: the first pop
-// destroys the player view, so `this` cannot drive the rest. Each pop chains the
-// next from its completion callback, so they run in order without animation.
-void popActivities(int n)
+// The OS's "a video is playing" flag, counted per live player: switching
+// episodes builds the next player before the previous one's destructor runs,
+// and a plain true/false pair turned the flag off under the new episode.
+void keepAwake(int delta)
 {
-    if (n <= 0) return;
-    brls::Application::popActivity(brls::TransitionAnimation::NONE,
-                                   [n]() { popActivities(n - 1); });
+    static int players = 0;  // UI thread only
+    int before = players;
+    players += delta;
+    if (players < 0) players = 0;
+    if ((before > 0) != (players > 0)) appletSetMediaPlaybackState(players > 0);
 }
 
-// The same, with a final step. Each pop completes asynchronously, so whatever
-// comes next has to hang off the last one's callback rather than run straight
-// after the call.
+// Pops `n` activities back-to-back, then runs `then`. A free function, not a
+// member: the first pop destroys the player view, so `this` cannot drive the
+// rest. Each pop completes asynchronously, so the next one (and `then`) hangs
+// off the last one's callback rather than running straight after the call.
 void popActivitiesThen(int n, std::function<void()> then)
 {
     if (n <= 0)
@@ -213,6 +231,29 @@ void popActivitiesThen(int n, std::function<void()> then)
     brls::Application::popActivity(brls::TransitionAnimation::NONE, [n, then]() {
         popActivitiesThen(n - 1, then);
     });
+}
+
+// Leaves the player whose activity is `player`, then pops `n - 1` more and
+// runs `then`. Whatever sits above the player goes first: the settings panel
+// is translucent, so the player keeps drawing (and reaching the end of the
+// file) under it, and a count that assumed the player on top closed only the
+// panel -- or pushed the next episode over a still-running player.
+void popPlayerThen(brls::Activity* player, int n, std::function<void()> then)
+{
+    auto stack = brls::Application::getActivitiesStack();
+    int above  = -1;
+    for (int i = (int)stack.size() - 1; i >= 0; i--)
+        if (stack[i] == player)
+        {
+            above = (int)stack.size() - 1 - i;
+            break;
+        }
+    if (above < 0)
+    {
+        brls::Logger::warning("[player] already closed, nothing to pop");
+        return;
+    }
+    popActivitiesThen(above + n, then);
 }
 
 } // namespace
@@ -318,7 +359,7 @@ MpvView::MpvView(const std::string& source, const PlayerArt& art,
     // Tell the OS a video is playing, so it does not dim the screen or sleep
     // during a long film -- there is no controller input while watching, which
     // is exactly what the idle timer counts. Cleared in the destructor.
-    appletSetMediaPlaybackState(true);
+    keepAwake(+1);
 
     this->setGrow(1.0f);
     this->setBackgroundColor(nvgRGB(0, 0, 0));
@@ -375,8 +416,11 @@ void MpvView::startEngine(const std::string& source, int fileIndex)
     if (direct)
     {
         if (statusLabel) statusLabel->setText(tr("Connecting..."));
-        if (!startMpv() && statusLabel)
-            statusLabel->setText(tr("Player initialisation failed"));
+        if (!startMpv())
+        {
+            openFailed = true;   // keep the reason on screen
+            if (statusLabel) statusLabel->setText(tr("Player initialisation failed"));
+        }
         return;
     }
 
@@ -388,7 +432,10 @@ void MpvView::startEngine(const std::string& source, int fileIndex)
         if (statusLabel) statusLabel->setText(tr("Waiting for TorrServer..."));
         auto liveFlag = this->alive;
         std::string base = torrserver::base();
-        brls::async([this, liveFlag, source, fileIndex, base]() {
+        // On the worker pool, not brls::async's single thread: the resolve
+        // can wait up to two minutes, and library/history saves queue there.
+        // http::abortAll (app exit) ends it.
+        workers::run([this, liveFlag, source, fileIndex, base]() {
             std::string url, err;
             std::string link = torrServerLink(source, err);
             bool ok = !link.empty() &&
@@ -407,8 +454,11 @@ void MpvView::startEngine(const std::string& source, int fileIndex)
                 playUrl = url;
                 direct  = true;
                 if (statusLabel) statusLabel->setText(tr("Connecting..."));
-                if (!startMpv() && statusLabel)
-                    statusLabel->setText(tr("Player initialisation failed"));
+                if (!startMpv())
+                {
+                    openFailed = true;   // keep the reason on screen
+                    if (statusLabel) statusLabel->setText(tr("Player initialisation failed"));
+                }
                 // The torrent's other files, for the episode list.
                 fetchTorrServerPlaylist(link);
             });
@@ -424,19 +474,43 @@ void MpvView::startEngine(const std::string& source, int fileIndex)
                                                  : "engine open (.torrent)");
 
     auto liveFlag = this->alive;
-    brls::async([this, liveFlag, source, fileIndex]() {
+    auto job      = std::make_shared<EngineOpen>();
+    engineOpen    = job;
+    // Latched into the engine at open; read from config here, on the UI thread.
+    int ramStream     = config::get().ramStream ? 1 : 0;
+    int64_t streamWin = (int64_t)config::bufferPreset().streamWindowMiB * 1024 * 1024;
+    // On the worker pool: a magnet open is tens of seconds, and on
+    // brls::async it held up every save and the next player's open behind it.
+    workers::run([this, liveFlag, job, source, fileIndex, ramStream, streamWin]() {
         char err[256] = { 0 };
-        // Latched into the engine at open; pick it up from config for this video.
-        torrentfs_set_ram_stream(config::get().ramStream ? 1 : 0);
-        torrentfs_set_stream_window((int64_t)config::bufferPreset().streamWindowMiB *
-                                    1024 * 1024);
-        torrentfs* t = torrentfs_open_file(source.c_str(), APPDATA_CACHE,
-                                           fileIndex, err, sizeof(err));
+        torrentfs_set_ram_stream(ramStream);
+        torrentfs_set_stream_window(streamWin);
+        // Cancellable: Back (the destructor) stops a magnet's metadata fetch
+        // instead of letting it run to its deadline.
+        torrentfs* t = torrentfs_open_file_cancel(source.c_str(), APPDATA_CACHE,
+                                                  fileIndex, &job->cancel, err,
+                                                  sizeof(err));
         std::string e = err;
+        bool orphan;
+        {
+            std::lock_guard<std::mutex> g(job->m);
+            orphan = job->gone;
+            if (!orphan) job->t = t;
+        }
+        if (orphan)
+        {
+            // The view is gone (or going): nobody else will close it.
+            if (t) torrentfs_close(t);
+            return;
+        }
 
-        brls::sync([this, liveFlag, t, e, source]() {
-            // B may have been pressed while we waited: `this` is gone and the
-            // engine we just opened would leak.
+        brls::sync([this, liveFlag, job, e, source]() {
+            torrentfs* t;
+            {
+                std::lock_guard<std::mutex> g(job->m);
+                t      = job->t;   // null if the destructor took it
+                job->t = nullptr;
+            }
             if (!*liveFlag)
             {
                 if (t) torrentfs_close(t);
@@ -446,6 +520,7 @@ void MpvView::startEngine(const std::string& source, int fileIndex)
             {
                 brls::Logger::error("torrentfs_open failed: {}", e);
                 if (statusLabel) statusLabel->setText(std::string(tr("Failed: ")) + tr(e.c_str()));
+                openFailed = true;   // keep the reason on screen
                 return;
             }
             tfs = t;
@@ -470,8 +545,11 @@ void MpvView::startEngine(const std::string& source, int fileIndex)
                 }
                 setPlaylistFiles(files);
             }
-            if (!startMpv() && statusLabel)
-                statusLabel->setText(tr("Player initialisation failed"));
+            if (!startMpv())
+            {
+                openFailed = true;   // keep the reason on screen
+                if (statusLabel) statusLabel->setText(tr("Player initialisation failed"));
+            }
         });
     });
 }
@@ -610,8 +688,11 @@ bool MpvView::startMpv()
     }
     brls::Logger::info("mpv render context created OK");
 
-    // Capture mpv's internal log so we can see vo/render/hwdec state.
-    mpv_request_log_messages(mpv, "v");
+    // Capture mpv's internal log so we can see vo/render/hwdec state -- in
+    // full only with the log file on: at "v" mpv formats a few hundred lines
+    // a minute, each drained and turned into strings here every frame, to be
+    // dropped by the logger anyway. Warnings and errors always.
+    mpv_request_log_messages(mpv, config::get().logging ? "v" : "warn");
 
     // Resume where the Stremio account left off: mpv seeks there right after
     // the open, and the engine's playhead (stream.c seek_cb) follows, so the
@@ -646,7 +727,7 @@ bool MpvView::startMpv()
         if (url.rfind("https://", 0) == 0)
         {
             httpsrc_set_proxy(proxy.c_str());
-            stream_register_http(mpv);
+            stream_register_http(mpv, &httpAbort);
             url = "nx" + url;
         }
         else if (proxy.rfind("http://", 0) == 0)
@@ -659,6 +740,7 @@ bool MpvView::startMpv()
             brls::Logger::warning("[player] a socks proxy cannot carry an http:// "
                                   "stream; connecting directly");
         }
+        mpvUrl = url;
         const char* cmd[] = { "loadfile", url.c_str(), nullptr };
         mpv_command(mpv, cmd);
         brls::Logger::info("loadfile direct stream from {}", urlHost(playUrl));
@@ -804,6 +886,8 @@ bool MpvView::command(Cmd c)
                 return true;
             }
         }
+        else
+            unlockPresses = 0;  // in a row: any other button starts over
         flashLock();
         return true;
     }
@@ -1084,6 +1168,9 @@ void MpvView::commitSeek()
     const char* cmd[] = { "seek", t, "absolute", nullptr };
     mpv_command_async(mpv, 0, cmd);
     obsPos = seekTarget;  // the bar shows the landing at once (obsPos is async)
+    // And it is where playback is now: the samplers only take a position
+    // above 0, so a seek back to the start used to save the old one.
+    lastPosSec = seekTarget;
     brls::Logger::info("[player] seek -> {}s", (int)seekTarget);
     // A scrub that paused the picture to aim resumes it; the D-pad steps never
     // touched the play state, so it stays whatever the user had.
@@ -1581,8 +1668,8 @@ void MpvView::goToEpisode(int dir)
         int pops   = watch.nextPop;
         brls::Logger::info("[player] previous episode -> S{}E{} (pop {})", season, episode,
                            pops);
-        brls::sync([pops, item, season, episode]() {
-            popActivitiesThen(pops, [item, season, episode]() {
+        brls::sync([act = getParentActivity(), pops, item, season, episode]() {
+            popPlayerThen(act, pops, [item, season, episode]() {
                 openNextEpisode(item, season, episode);
             });
         });
@@ -1593,8 +1680,8 @@ void MpvView::goToEpisode(int dir)
     PlayerArt showArt   = art;
     int pops            = watch.endPop;
     brls::Logger::info("[player] previous episode -> {} (pop {})", prev, pops);
-    brls::sync([pops, authKey, series, prev, showArt]() {
-        popActivitiesThen(pops, [authKey, series, prev, showArt]() {
+    brls::sync([act = getParentActivity(), pops, authKey, series, prev, showArt]() {
+        popPlayerThen(act, pops, [authKey, series, prev, showArt]() {
             openEpisodeById(authKey, series, prev, showArt);
         });
     });
@@ -1625,8 +1712,8 @@ void MpvView::goToNextEpisode()
         content::Item item = watch.content;
         int season = watch.season, episode = watch.episode + 1;
         brls::Logger::info("[player] next episode -> S{}E{} (pop {})", season, episode, pops);
-        brls::sync([pops, item, season, episode]() {
-            popActivitiesThen(pops, [item, season, episode]() {
+        brls::sync([act = getParentActivity(), pops, item, season, episode]() {
+            popPlayerThen(act, pops, [item, season, episode]() {
                 openNextEpisode(item, season, episode);
             });
         });
@@ -1636,8 +1723,8 @@ void MpvView::goToNextEpisode()
     brls::Logger::info("[player] next episode -> {} (pop {})", next, pops);
     // Deferred: we are inside draw()'s update pass (or a tap handler), and
     // popping -- which frees this view -- mid-draw is not safe.
-    brls::sync([pops, authKey, series, next, showArt]() {
-        popActivitiesThen(pops, [authKey, series, next, showArt]() {
+    brls::sync([act = getParentActivity(), pops, authKey, series, next, showArt]() {
+        popPlayerThen(act, pops, [authKey, series, next, showArt]() {
             openEpisodeById(authKey, series, next, showArt);
         });
     });
@@ -1778,6 +1865,20 @@ void MpvView::playPlaylistItem(int i)
                          std::to_string(e);
         w.displayTitle = title;
     }
+    else
+    {
+        // Not an episode we can name (an extra, a sample, a file of a film's
+        // torrent): it plays as a plain file, tracked by source and file
+        // index in the history. Keeping the previous episode's identity
+        // wrote this file's position over that episode's progress, in the
+        // library and on the Stremio account, and offered to resume it here.
+        w.itemId.clear();
+        w.videoId.clear();
+        w.type.clear();
+        w.content = content::Item();
+        w.season  = 0;
+        w.episode = 0;
+    }
 
     switching     = true;  // the EOF handler must not pop under the swap
     nextCardShown = false;
@@ -1787,8 +1888,8 @@ void MpvView::playPlaylistItem(int i)
     std::string type = currentSourceType;
     int idx          = f.fileIndex;
     brls::Logger::info("[player] episode list -> file {} ({})", idx, f.label);
-    brls::sync([src, a, title, idx, w, type]() {
-        popActivitiesThen(1, [src, a, title, idx, w, type]() {
+    brls::sync([act = getParentActivity(), src, a, title, idx, w, type]() {
+        popPlayerThen(act, 1, [src, a, title, idx, w, type]() {
             startPlaybackPrompt(src, a, title, idx, w, type);
         });
     });
@@ -2143,8 +2244,9 @@ void MpvView::openEpisodesPanel()
         else
         {
             history::Item h;
-            if (history::find(currentSource, p.fileIndex, "", h) ||
-                history::find(currentSource, p.fileIndex, watch.videoId, h))
+            // By source and file only: matching the playing episode's
+            // videoId too gave every unplayed file its progress.
+            if (history::find(currentSource, p.fileIndex, "", h))
             {
                 if (h.completed)
                     d = tr("Watched");
@@ -2438,8 +2540,9 @@ MpvView::~MpvView()
 {
     brls::Logger::info("[teardown] ~MpvView enter");
 
-    // Playback is ending: let the OS dim/sleep on idle again.
-    appletSetMediaPlaybackState(false);
+    // Playback is ending: let the OS dim/sleep on idle again -- unless the
+    // next episode's player, built before this one is destroyed, is up.
+    keepAwake(-1);
 
     // Last chance to tell Stremio where playback stopped. Uses the position
     // sampled during playback (see logStats) -- mpv is about to be destroyed,
@@ -2451,6 +2554,18 @@ MpvView::~MpvView()
     // Tell any in-flight startEngine() that we are gone, so it closes the engine
     // it opened instead of writing into a destroyed view.
     *alive = false;
+    if (engineOpen)
+    {
+        torrentfs* orphan;
+        {
+            std::lock_guard<std::mutex> g(engineOpen->m);
+            engineOpen->gone   = true;
+            engineOpen->cancel = true;   // a magnet stops fetching metadata
+            orphan             = engineOpen->t;  // opened, callback not run yet
+            engineOpen->t      = nullptr;
+        }
+        if (orphan) torrentfs_close(orphan);
+    }
 
     // Cancel first so the mpv demuxer's parked read returns (~20 ms); mpv's
     // shutdown touches GL, so it MUST stay on this (UI/GL) thread -- doing it on
@@ -2462,6 +2577,9 @@ MpvView::~MpvView()
         engine_unregister_torrent(tfs);
         torrentfs_cancel(tfs);
     }
+    // An nxhttps:// open still connecting: mpv_terminate_destroy would wait
+    // it out on this (UI) thread.
+    httpAbort = true;
     if (renderCtx)
         mpv_render_context_free(renderCtx);
     if (mpv)
@@ -2553,6 +2671,41 @@ void MpvView::pumpEvents()
                     openFailed = true;
                     break;
                 }
+                // The stream died mid-file: a link that stopped answering
+                // reaches mpv as the end of the file (or an error), and it
+                // used to count as watched to the end -- marked finished,
+                // the next episode started. Near the end it is the end;
+                // anywhere else, reconnect where it stopped, a few times.
+                if (ef && fileLoaded && !ended && !switching &&
+                    (ef->reason == MPV_END_FILE_REASON_EOF ||
+                     ef->reason == MPV_END_FILE_REASON_ERROR))
+                {
+                    double dur  = obsDur > 0 ? obsDur : lastDurSec;
+                    double pos  = obsPos > 0 ? obsPos : lastPosSec;
+                    bool nearEnd = dur <= 0 || pos >= dur - 15.0;
+                    if (!nearEnd && direct && !mpvUrl.empty() && streamRetries < 3)
+                    {
+                        streamRetries++;
+                        brls::Logger::warning(
+                            "[mpv event] stream ended at {:.0f}/{:.0f}s -> reconnect {}",
+                            pos, dur, streamRetries);
+                        flashPill(tr("Connection lost, reconnecting..."), 3000);
+                        std::string start = std::to_string((long long)pos);
+                        mpv_set_property_string(mpv, "start", start.c_str());
+                        const char* cmd[] = { "loadfile", mpvUrl.c_str(), nullptr };
+                        mpv_command_async(mpv, 0, cmd);
+                        break;
+                    }
+                    if (!nearEnd)
+                    {
+                        brls::Logger::error(
+                            "[mpv event] stream ended at {:.0f}/{:.0f}s, giving up", pos,
+                            dur);
+                        flashPill(tr("Playback stopped: the connection was lost"), 600000);
+                        openFailed = true;  // B leaves at once; not marked watched
+                        break;
+                    }
+                }
                 if (ef && ef->reason == MPV_END_FILE_REASON_EOF && !ended && !switching)
                 {
                     // An episode with one after it goes on to it, as Lampa
@@ -2573,7 +2726,9 @@ void MpvView::pumpEvents()
                     brls::Logger::info("[mpv event] EOF -> pop {}", pops);
                     // Deferred: we are inside draw()'s pumpEvents, and popping
                     // (which frees this view) mid-draw is unsafe.
-                    brls::sync([pops]() { popActivities(pops); });
+                    brls::sync([act = getParentActivity(), pops]() {
+                        popPlayerThen(act, pops, nullptr);
+                    });
                 }
                 break;
             }

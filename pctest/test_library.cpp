@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <string>
 
+#include "fsutil.hpp"
 #include "library.hpp"
 
 #define CHECK(cond)                                                          \
@@ -161,6 +162,48 @@ static void test_keys()
     std::printf("      PASSED\n");
 }
 
+// fsutil: what config, library and history are saved and loaded through.
+static void test_files()
+{
+    std::printf("[5/5] Saves: atomic, and a cut file falls back to the last good one...\n");
+    const std::string p = "fsutil_test.json";
+    std::remove(p.c_str());
+    std::remove((p + ".tmp").c_str());
+    std::remove((p + ".bak").c_str());
+    auto complete = [](const std::string& b) { return fsutil::looksComplete(b); };
+
+    CHECK(fsutil::writeAtomic(p, "{\"v\":1}\n"));
+    CHECK(fsutil::writeAtomic(p, "{\"v\":2}\n"));
+    std::string body;
+    CHECK(fsutil::readFirst(p, body, complete) && body == "{\"v\":2}\n");
+
+    // The saved file cut short (a write FAT lost): the version before.
+    if (FILE* f = std::fopen(p.c_str(), "wb"))
+    {
+        std::fputs("{\"v\":", f);
+        std::fclose(f);
+    }
+    CHECK(fsutil::readFirst(p, body, complete) && body == "{\"v\":1}\n");
+
+    // A save cut between its renames: no file, a whole .tmp.
+    std::remove(p.c_str());
+    if (FILE* f = std::fopen((p + ".tmp").c_str(), "wb"))
+    {
+        std::fputs("{\"v\":3}", f);
+        std::fclose(f);
+    }
+    CHECK(fsutil::readFirst(p, body, complete) && body == "{\"v\":3}");
+
+    CHECK(fsutil::looksComplete("{}  \r\n"));
+    CHECK(!fsutil::looksComplete(""));
+    CHECK(!fsutil::looksComplete("{\"a\":[1,2"));
+
+    std::remove(p.c_str());
+    std::remove((p + ".tmp").c_str());
+    std::remove((p + ".bak").c_str());
+    std::printf("      PASSED\n");
+}
+
 int main()
 {
     std::printf("=========================================\n");
@@ -170,6 +213,7 @@ int main()
     test_next();
     test_merge();
     test_keys();
+    test_files();
     std::printf("\nALL TESTS PASSED\n");
     return 0;
 }

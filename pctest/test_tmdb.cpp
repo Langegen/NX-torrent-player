@@ -5,6 +5,7 @@
 // own, people in a multi search, a series' specials season.
 
 #include <cctype>
+#include <climits>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
@@ -107,6 +108,20 @@ static void test_json_helpers()
     CHECK(json::str(t2, "a") == "x{\"y\":[1]}");
     CHECK(json::str(t2, "c").empty());
     CHECK(json::str(t2, "e") == "f");
+
+    // escape(): control characters too, and str() reads it all back.
+    std::string raw = std::string("tab\there \"q\" back\\slash\x01 nl\n");
+    std::string esc = json::escape(raw);
+    CHECK(esc.find('\t') == std::string::npos && esc.find('\x01') == std::string::npos);
+    CHECK(json::str("{\"k\":\"" + esc + "\"}", "k") == raw.substr(0, raw.find('\x01')) +
+                                                          "\x01 nl\n");
+    // A lone surrogate half and \u0000 become U+FFFD, not broken UTF-8 / a NUL.
+    CHECK(json::str(R"J({"k":"a\ud800b"})J", "k") == "a\xEF\xBF\xBD" "b");
+    CHECK(json::str(R"J({"k":"a\u0000b"})J", "k") == "a\xEF\xBF\xBD" "b");
+    CHECK(json::str(R"J({"k":"😀"})J", "k") == "\xF0\x9F\x98\x80");
+    // A number too long for 64 bits saturates instead of overflowing.
+    CHECK(json::integer(R"J({"n":123456789012345678901234567890})J", "n", 0) == LLONG_MAX);
+    CHECK(json::integer(R"J({"n":-42})J", "n", 0) == -42);
     std::printf("      PASSED\n");
 }
 

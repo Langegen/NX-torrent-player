@@ -38,7 +38,9 @@ void dhtclient_get_last_lookup(int *peers_found, int *good_nodes, int *dubious_n
 // background process itself keeps running across add/remove (one warm
 // routing table for the whole engine session) and stops with dht_stop().
 void dht_background_add(const uint8_t info_hash[20], dht_peer_cb cb, void *ctx);
-void dht_background_remove(const uint8_t info_hash[20]);
+// Removes the target `dht_background_add` registered with this hash AND ctx;
+// another owner of the same hash keeps receiving.
+void dht_background_remove(const uint8_t info_hash[20], void *ctx);
 
 // Initialise the shared background DHT's serialisation mutex. Call once at
 // engine start (single-threaded), before any lookup can touch it; on libnx a

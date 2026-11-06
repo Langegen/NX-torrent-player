@@ -16,6 +16,29 @@
 #include <switch.h>
 #endif
 
+// xorshift64: plenty for transaction ids, and no shared state.
+static uint32_t tx_rand(uint64_t *s) {
+    uint64_t x = *s ? *s : 0x2545F4914F6CDD1DULL;
+    x ^= x << 13;
+    x ^= x >> 7;
+    x ^= x << 17;
+    *s = x;
+    return (uint32_t)(x >> 32);
+}
+
+// A fresh seed per announce: the clock at its finest, salted with a stack
+// address (announces run on several threads at once).
+static uint64_t tx_seed(const void *salt) {
+#ifdef __SWITCH__
+    uint64_t t = armGetSystemTick();
+#else
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    uint64_t t = (uint64_t)tv.tv_sec * 1000000u + (uint64_t)tv.tv_usec;
+#endif
+    return t ^ ((uint64_t)(uintptr_t)salt << 20) ^ 0x9E3779B97F4A7C15ULL;
+}
+
 // BEP 15 magic protocol id used to initiate a connection.
 #define UDP_PROTOCOL_ID 0x41727101980ULL
 
@@ -150,11 +173,15 @@ int udp_announce(const char *url, const uint8_t info_hash[20],
     }
     freeaddrinfo(res);
 
-    srand((unsigned)time(NULL) ^ (unsigned)(uintptr_t)&sock);
+    // Transaction ids from a generator of our own, seeded from the tick
+    // counter: srand(time) here re-seeded the process-wide rand() on every
+    // announce -- ids an off-path host could predict (and inject peers
+    // with), and the DHT's own rand() sequence reset under it.
+    uint64_t rng = tx_seed(&sock);
 
     // --- Step 1: connect, to obtain a short-lived connection_id ---
     uint8_t creq[16];
-    uint32_t ctxid = (uint32_t)rand();
+    uint32_t ctxid = tx_rand(&rng);
     put64(creq, UDP_PROTOCOL_ID);
     put32(creq + 8, ACTION_CONNECT);
     put32(creq + 12, ctxid);
@@ -172,7 +199,7 @@ int udp_announce(const char *url, const uint8_t info_hash[20],
 
     // --- Step 2: announce ---
     uint8_t areq[98];
-    uint32_t atxid = (uint32_t)rand();
+    uint32_t atxid = tx_rand(&rng);
     put64(areq + 0, connection_id);
     put32(areq + 8, ACTION_ANNOUNCE);
     put32(areq + 12, atxid);
@@ -183,7 +210,7 @@ int udp_announce(const char *url, const uint8_t info_hash[20],
     put64(areq + 72, 0);                     // uploaded
     put32(areq + 80, first ? 2 : 0);         // event: started or none
     put32(areq + 84, 0);                     // IP (0 = use source)
-    put32(areq + 88, (uint32_t)rand());      // key
+    put32(areq + 88, tx_rand(&rng));      // key
     put32(areq + 92, (uint32_t)max_peers);   // num_want
     areq[96] = (uint8_t)(port >> 8);
     areq[97] = (uint8_t)(port & 0xff);

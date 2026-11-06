@@ -128,6 +128,35 @@ The entry point is `int main()` in `app/main.cpp`.
 - **Space Grotesk (the primary UI font) has no Cyrillic**: in Russian the app
   turns it off before `Application::init()` (`SwitchFontLoader::useBundledFont`,
   a local borealis patch) so the UI is the system font throughout.
+- **Two players (and engines) can be alive at once**: borealis runs a
+  `popActivity` callback *before* deleting the popped activity, so the next
+  episode's `MpvView` is built before the previous one's destructor. Anything
+  process-wide a player touches must be counted or keyed, not toggled: the
+  keep-awake flag (`keepAwake`), the engine's cache file (a slot per live
+  engine in `torrentfs.c`), DHT targets (keyed by hash *and* owner).
+- **Leave the player through `popPlayerThen`**: the settings panel is a
+  translucent activity, so the player keeps drawing — and reaching the end of
+  the file — under it. Counting pops from the top of the stack closed only the
+  panel.
+- **A screen under another activity must not free its children**: the focus
+  stack holds a raw pointer to the view that opened the screen above. Late
+  results wait until `ui::isOnTop(this)` (Home's Continue row, Stremio
+  catalogs, the sources list). A rebuilt row gets a fresh `alive` token so
+  artwork landing for an old card is dropped.
+- **Long work goes to `workers::run`, not `brls::async`**: borealis has one
+  task thread, and the library/history saves queue on it. An engine open, a
+  magnet resolve, the update download all run on the pool and take a cancel
+  flag; `torrent_meta_abort_all()` and `http::abortAll()` end them as the app
+  quits (`getExitEvent`), and `library::flush()` writes the save borealis
+  drops from its queue (`getExitDoneEvent`).
+- **Saved files go through `fsutil::writeAtomic` / `readFirst`**
+  (`app/fsutil.hpp`): .tmp + rename with every write checked, the previous
+  version kept as .bak, and a reader that falls back to them when a file is
+  missing or cut short. Writing a data file in place lost it to a power cut.
+- `http::get` succeeds on any HTTP answer: pass `status` (or use the Stremio
+  `getJson`) and treat non-2xx as a failure before caching anything.
+- `http::get`/`postJson` reuse one curl handle per thread (kept connections);
+  `http::shutdown()` closes them in `main()` once every thread is joined.
 
 ## Debugging on device
 

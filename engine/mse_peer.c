@@ -212,25 +212,18 @@ int mse_peer_feed(mse_peer *m, const uint8_t *in, size_t in_len,
     }
 
     if (m->phase == 1) {
-        // Resync on the encrypted VC: the VC is 8 zero bytes under keyB, so
-        // its ciphertext is a fixed 8-byte keystream prefix. A responder with
-        // padB == 0 puts it at offset 0; with padB > 0 the offset shifts by
-        // padB_len, so we scan every plausible offset and verify each by
-        // decrypting the candidate with a COPY of the RC4 state (the live
-        // stream only advances on a confirmed match). The scan must keep the
-        // trailing 7 bytes buffered: a VC split across two feeds would
-        // otherwise be missed.
+        // Resync on the encrypted VC. padB is sent in the clear, and B's RC4
+        // stream starts at the VC itself, so the VC's ciphertext is always
+        // the first 8 keystream bytes (m->vc) -- at whatever offset padB's
+        // length puts it. Only the VC's 8 bytes advance the live stream.
+        // (The scan used to expect keystream[pos..pos+8) at offset pos and
+        // skip pos + 8: right only for padB == 0, so nearly every encrypted
+        // handshake failed.) The trailing 7 bytes stay buffered: a VC split
+        // across two feeds would otherwise be missed.
         size_t pos = 0;
-        size_t limit = in_len >= 8 ? in_len - 8 : 0;
-        if (limit > 512) limit = 512;   // padB is at most 512 bytes
-        uint8_t zeros[8] = {0};
-        while (pos <= limit) {
-            mse_rc4 probe = m->recv_rc4;
-            mse_rc4_skip(&probe, pos);
-            uint8_t expect[8];
-            mse_rc4_crypt(&probe, zeros, expect, 8);
-            if (memcmp(in + pos, expect, 8) == 0) {
-                mse_rc4_skip(&m->recv_rc4, pos + 8);  // padB + VC
+        while (pos + 8 <= in_len) {
+            if (memcmp(in + pos, m->vc, 8) == 0) {
+                mse_rc4_skip(&m->recv_rc4, 8);
                 m->sel_have = 0;
                 m->pad_skip = 0;
                 m->phase = 2;
@@ -238,8 +231,11 @@ int mse_peer_feed(mse_peer *m, const uint8_t *in, size_t in_len,
                 return MSE_CONT;
             }
             pos++;
+            if (m->vc_scanned + pos > 512) return MSE_FAIL;  // padB is <= 512
         }
-        *consumed = in_len > 7 ? in_len - 7 : 0;
+        size_t keep = in_len > 7 ? in_len - 7 : 0;
+        m->vc_scanned += keep;
+        *consumed = keep;
         return MSE_CONT;
     }
 

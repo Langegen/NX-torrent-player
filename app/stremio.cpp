@@ -34,6 +34,7 @@
 
 #include "appdata.hpp"
 #include "browse.hpp"
+#include "fsutil.hpp"
 #include "config.hpp"
 #include "http.hpp"
 #include "json.hpp"
@@ -201,6 +202,11 @@ std::string oneLine(std::string s, size_t max = 120)
 std::string webpToPng(const std::string& in)
 {
     int w = 0, h = 0;
+    // The header first: a poster is at most a few thousand pixels a side,
+    // and a hostile file declaring 16k x 16k would be a 1 GB allocation.
+    if (!WebPGetInfo((const uint8_t*)in.data(), in.size(), &w, &h) || w <= 0 || h <= 0 ||
+        w > 4096 || h > 4096)
+        return "";
     uint8_t* rgba = WebPDecodeRGBA((const uint8_t*)in.data(), in.size(), &w, &h);
     if (!rgba) return "";
 
@@ -340,13 +346,26 @@ static bool g_libFetched = false;
 
 LocalWatch lastWatch() { return g_lastWatch; }
 
+// An addon's JSON: http::get succeeds on any answer, and an addon's 500 page
+// was read (and cached for the session) as an empty result -- "No episodes
+// found", no genres, no streams. Anything but 2xx is an error here.
+static bool getJson(const std::string& url, std::string& resp, std::string& err)
+{
+    long status = 0;
+    if (!http::get(url, resp, err, nullptr, 25, &status)) return false;
+    if (status != 0 && (status < 200 || status >= 300))
+    {
+        err = "HTTP " + std::to_string(status);
+        resp.clear();
+        return false;
+    }
+    return true;
+}
+
 bool saveAuthKey(const std::string& key)
 {
-    FILE* f = std::fopen(kKeyPath, "w");
-    if (!f) return false;
-    std::fwrite(key.data(), 1, key.size(), f);
-    std::fclose(f);
-    return true;
+    // Atomic: rewritten in place, a cut write signed the user out.
+    return fsutil::writeAtomic(kKeyPath, key);
 }
 
 std::string loadAuthKey()
@@ -370,11 +389,7 @@ void clearAuthKey()
 
 bool saveEmail(const std::string& email)
 {
-    FILE* f = std::fopen(kEmailPath, "w");
-    if (!f) return false;
-    std::fwrite(email.data(), 1, email.size(), f);
-    std::fclose(f);
-    return true;
+    return fsutil::writeAtomic(kEmailPath, email);
 }
 
 std::string loadEmail()
@@ -614,6 +629,7 @@ void fetchLibraryAsync(const std::string& authKey,
 {
     brls::async([authKey, done]() {
         LibraryResult r;
+        std::shared_ptr<std::set<std::string>> ids;  // the account's ids, if read
         std::string body = "{\"authKey\":\"" + json::escape(authKey) +
                            "\",\"collection\":\"libraryItem\",\"all\":true}";
         std::string resp, err;
@@ -682,13 +698,14 @@ void fetchLibraryAsync(const std::string& authKey,
                 // holds, whether or not it survived the filters above -- a
                 // "temp" (auto-added by watching) item IS in the library as far
                 // as the +/- button is concerned; only "removed" is not.
-                g_libIds.clear();
-                g_libFetched = true;
+                // Built here, published on the UI thread below: g_libIds is
+                // read and edited there (inLibrary, the +/- button).
+                ids = std::make_shared<std::set<std::string>>();
                 for (const auto& o : objs)
                 {
                     std::string id = json::str(o, "_id");
                     if (!id.empty() && !json::boolean(o, "removed", false))
-                        g_libIds.insert(id);
+                        ids->insert(id);
                 }
 
                 // Most recently viewed first: watching bumps _mtime, and the ISO
@@ -707,7 +724,14 @@ void fetchLibraryAsync(const std::string& authKey,
                     nTemp);
             }
         }
-        brls::sync([done, r]() { done(r); });
+        brls::sync([done, r, ids]() {
+            if (ids)
+            {
+                g_libIds     = std::move(*ids);
+                g_libFetched = true;
+            }
+            done(r);
+        });
     });
 }
 
@@ -1487,7 +1511,7 @@ void fetchMetaAsync(const std::string& addonBase, const std::string& type,
         std::string url =
             addonBase + "/meta/" + http::urlEncode(type) + "/" + http::urlEncode(id) + ".json";
         std::string resp, err;
-        if (!http::get(url, resp, err))
+        if (!getJson(url, resp, err))
         {
             r.error = err;
         }
@@ -1554,7 +1578,7 @@ void fetchStreamsAsync(const std::string& addonBase, const std::string& type,
         std::string url = addonBase + "/stream/" + http::urlEncode(type) + "/" +
                           http::urlEncode(id) + ".json";
         std::string resp, err;
-        if (!http::get(url, resp, err))
+        if (!getJson(url, resp, err))
         {
             r.error = err;
         }
@@ -1642,7 +1666,10 @@ void fetchSubtitlesAsync(const std::string& authKey, const std::string& type,
             return;
         }
 
-        workers::run([list, type, videoId, done]() {
+        // Read here, on the UI thread: Options may be assigning it meanwhile.
+        std::string want      = config::preferredSubLang();
+        std::string wantLabel = config::langLabelFor(want);
+        workers::run([list, type, videoId, done, want, wantLabel]() {
             SubtitlesResult r;
             // One addon at a time rather than in parallel. These run while the
             // engine is streaming, and the console's socket pool is what the
@@ -1654,7 +1681,7 @@ void fetchSubtitlesAsync(const std::string& authKey, const std::string& type,
                 std::string url = a.base + "/subtitles/" + http::urlEncode(type) +
                                   "/" + http::urlEncode(videoId) + ".json";
                 std::string resp, err;
-                if (!http::get(url, resp, err))
+                if (!getJson(url, resp, err))
                 {
                     brls::Logger::warning("[stremio] subtitles from {} failed: {}",
                                           a.name, err);
@@ -1685,8 +1712,6 @@ void fetchSubtitlesAsync(const std::string& authKey, const std::string& type,
 
             // The preferred language first -- stable, so each language keeps the
             // order its addon sent (which is roughly best-match first).
-            std::string want = config::preferredSubLang();
-            std::string wantLabel = config::langLabelFor(want);
             std::stable_sort(r.subs.begin(), r.subs.end(),
                              [&](const Subtitle& a, const Subtitle& b) {
                                  bool pa = config::langLabelFor(a.lang) == wantLabel;
@@ -1713,14 +1738,41 @@ void downloadSubtitleAsync(const Subtitle& sub,
         return;
     }
 
+    // A second request for a file still downloading waits for that one
+    // (two taps wrote the same file at once). UI thread only.
+    static std::map<std::string, std::vector<std::function<void(std::string)>>> inFlight;
+    auto it = inFlight.find(path);
+    if (it != inFlight.end())
+    {
+        it->second.push_back(done);
+        return;
+    }
+    inFlight[path].push_back(done);
+
     std::string url = sub.url;
-    workers::run([url, path, done]() {
+    workers::run([url, path]() {
+        // Into .part: the cache counts any file at `path` as a hit, so a
+        // download cut short there was served, truncated, from then on.
+        std::string part = path + ".part";
         std::string err;
-        bool ok = http::download(url, path, err);
+        bool ok = http::download(url, part, err);
+        if (ok)
+        {
+            std::remove(path.c_str());
+            ok = std::rename(part.c_str(), path.c_str()) == 0;
+            if (!ok) err = "cannot rename";
+        }
         if (!ok)
+        {
+            std::remove(part.c_str());
             brls::Logger::warning("[stremio] subtitle download failed: {}", err);
+        }
         std::string out = ok ? path : std::string();
-        brls::sync([done, out]() { done(out); });
+        brls::sync([path, out]() {
+            auto waiting = std::move(inFlight[path]);
+            inFlight.erase(path);
+            for (auto& cb : waiting) cb(out);
+        });
     });
 }
 
@@ -1768,7 +1820,8 @@ void fetchCatalogGenresAsync(const std::string& addonBase,
     workers::run([addonBase, type, catalogId, key, done]() {
         std::vector<std::string> genres;
         std::string resp, err;
-        if (!http::get(addonBase + "/manifest.json", resp, err))
+        bool fetched = getJson(addonBase + "/manifest.json", resp, err);
+        if (!fetched)
         {
             brls::Logger::warning("[stremio] manifest {} failed: {}", addonBase,
                                   err);
@@ -1791,9 +1844,10 @@ void fetchCatalogGenresAsync(const std::string& addonBase,
                                genres.size());
         }
         // Cached even when empty: a catalog with no genres must not be asked
-        // again every time its section is opened.
-        brls::sync([key, genres, done]() {
-            genreCache[key] = genres;
+        // again every time its section is opened. A failed request is not
+        // an answer, though: the next visit asks again.
+        brls::sync([key, genres, done, fetched]() {
+            if (fetched) genreCache[key] = genres;
             done(genres);
         });
     });
@@ -1814,7 +1868,7 @@ void fetchCatalogAsync(const std::string& addonBase, const std::string& type,
         LibraryResult r;
         std::string url = catalogUrl(addonBase, type, catalogId, query);
         std::string resp, err;
-        if (!http::get(url, resp, err))
+        if (!getJson(url, resp, err))
         {
             r.error = err;
         }
@@ -1855,7 +1909,7 @@ void fetchSearchAsync(const std::string& query,
             std::string url = std::string("https://v3-cinemeta.strem.io/catalog/") +
                               type + "/top/search=" + http::urlEncode(query) + ".json";
             std::string resp, err;
-            if (!http::get(url, resp, err)) continue;  // one type may fail; keep the other
+            if (!getJson(url, resp, err)) continue;  // one type may fail; keep the other
             for (const auto& o : json::objects(resp, "metas"))
             {
                 LibItem it;
@@ -2327,6 +2381,8 @@ void StremioTab::draw(NVGcontext* vg, float x, float y, float width, float heigh
                    std::chrono::steady_clock::now().time_since_epoch())
                    .count();
 
+    renderWhenOnTop();
+
     // Analog stick flick cycles the view too (Left/Right buttons are actions,
     // but the stick is an axis borealis does not turn into button presses here).
     // Only while focus is in the list, one cycle per flick, and deferred to a
@@ -2742,10 +2798,26 @@ void StremioTab::loadCatalog(const char* type,
             }
             cache  = r.items;
             loaded = true;
+            if (!ui::isOnTop(this))
+            {
+                renderPending = true;   // renderView() shows it from the cache
+                return;
+            }
             showItems(cache, header,
                       t == "series" ? tr("No popular shows")
                                     : tr("No popular movies"));
         });
+}
+
+// Called from draw(): the rebuild itself runs from sync, off the draw pass
+// (rebuilding the tree mid-draw crashes).
+void StremioTab::renderWhenOnTop()
+{
+    if (!renderPending || !ui::isOnTop(this)) return;
+    renderPending = false;
+    brls::sync([this, live = alive, want = view]() {
+        if (*live && view == want && ui::isOnTop(this)) renderView();
+    });
 }
 
 // The heading over the current view's strip. Plain words, unlike the header
@@ -2788,7 +2860,11 @@ void StremioTab::loadFeatured(const char* type)
             cache = r.items;
             // Only if the user is still on the view that asked for it: the
             // render folds the new section in.
-            if (view == want) renderView();
+            if (view != want) return;
+            if (ui::isOnTop(this))
+                renderView();
+            else
+                renderPending = true;
         });
 }
 

@@ -27,6 +27,7 @@ struct httpsrc {
     char *direct;        // where the redirects led (NULL = same as url)
     int64_t size;
     volatile bool cancelled;
+    const volatile bool *abort;   // the owner's flag (httpsrc_open_abortable)
 
     uint8_t *buf;        // the buffered chunk
     int64_t buf_pos;     // its offset in the resource
@@ -70,10 +71,14 @@ static size_t header_cb(char *p, size_t sz, size_t nm, void *ud) {
     return n;
 }
 
+static bool is_cancelled(const httpsrc *s) {
+    return s->cancelled || (s->abort && *s->abort);
+}
+
 static int progress_cb(void *ud, curl_off_t dt, curl_off_t dn, curl_off_t ut,
                        curl_off_t un) {
     (void)dt; (void)dn; (void)ut; (void)un;
-    return ((httpsrc *)ud)->cancelled ? 1 : 0;
+    return is_cancelled((httpsrc *)ud) ? 1 : 0;
 }
 
 static void setup(httpsrc *s) {
@@ -120,7 +125,7 @@ static long fetch(httpsrc *s, const char *url, int64_t pos, int64_t len) {
     long code = 0;
     curl_easy_getinfo(s->curl, CURLINFO_RESPONSE_CODE, &code);
 
-    if (s->cancelled) { snprintf(s->err, sizeof(s->err), "cancelled"); return -1; }
+    if (is_cancelled(s)) { snprintf(s->err, sizeof(s->err), "cancelled"); return -1; }
     // The write error we caused ourselves on an over-long body is not one.
     if (rc == CURLE_WRITE_ERROR && s->got == s->want) rc = CURLE_OK;
     if (rc != CURLE_OK) {
@@ -139,8 +144,14 @@ static long fetch(httpsrc *s, const char *url, int64_t pos, int64_t len) {
 }
 
 httpsrc *httpsrc_open(const char *url, char *err, size_t errlen) {
+    return httpsrc_open_abortable(url, NULL, err, errlen);
+}
+
+httpsrc *httpsrc_open_abortable(const char *url, const volatile bool *abort,
+                                char *err, size_t errlen) {
     httpsrc *s = calloc(1, sizeof(*s));
     if (!s) { set_err(err, errlen, "out of memory"); return NULL; }
+    s->abort = abort;
     s->url = strdup(url);
     s->buf = malloc(CHUNK);
     s->curl = curl_easy_init();
@@ -181,14 +192,14 @@ httpsrc *httpsrc_open(const char *url, char *err, size_t errlen) {
 int64_t httpsrc_size(const httpsrc *s) { return s->size; }
 
 int64_t httpsrc_read(httpsrc *s, int64_t pos, void *out, int64_t n) {
-    if (s->cancelled) return -1;
+    if (is_cancelled(s)) return -1;
     if (pos < 0) return -1;
     if (pos >= s->size) return 0;
 
     if (!(pos >= s->buf_pos && pos < s->buf_pos + s->buf_len)) {
         int64_t len = s->size - pos < CHUNK ? s->size - pos : CHUNK;
         long code = -1;
-        for (int attempt = 0; attempt < RETRIES && !s->cancelled; attempt++) {
+        for (int attempt = 0; attempt < RETRIES && !is_cancelled(s); attempt++) {
             // After a failure, go back through the original URL: a CDN link
             // from the redirect may have expired.
             const char *u = (s->direct && attempt == 0) ? s->direct : s->url;

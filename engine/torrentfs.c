@@ -461,6 +461,7 @@ struct torrentfs {
     // FAT32-chunked cache (see v2 for the append-only rationale).
     int chunks[CACHE_MAX_CHUNKS];
     char cache_base[192];
+    int cache_slot;            // cache_slot_take(); -1 = untracked name
     Mutex cache_lock;
     int32_t *piece_slot;       // piece index -> cache slot, -1 = not stored
     int64_t next_slot;
@@ -779,12 +780,44 @@ static bool cache_piece_read(torrentfs *t, int64_t idx, int64_t within,
         memcpy(buf, src + within, len);
         return true;
     }
+    // A slot is assigned before the piece is written and kept if the write
+    // fails (the re-download reuses it), so the slot alone does not mean the
+    // bytes are there: cache_read_upto runs on into the next pieces and would
+    // hand mpv whatever FAT left in that gap.
+    if (__atomic_load_n(&t->status[idx], __ATOMIC_ACQUIRE) != PIECE_DONE)
+        return false;
     int ci;
     int64_t co;
     if (!piece_loc(t, idx, false, &ci, &co)) return false;
     int f = cache_chunk(t, ci);
     if (f < 0) return false;
     return fd_xfer(f, co + within, buf, len, false);
+}
+
+// Two engines can be alive at once (the next episode's player opens before
+// the previous one's destructor closes its engine; an abandoned magnet open
+// finishes in the background). Each open deletes and rewrites its chunks, so
+// they must not share a name: every live engine holds a slot of its own.
+// Slot 0 keeps the plain name, so the usual single engine reuses (and cleans)
+// the same files as before.
+#define CACHE_SLOTS 8
+static Mutex s_cache_slot_mtx;
+static uint32_t s_cache_slots;
+
+static int cache_slot_take(void) {
+    mutexLock(&s_cache_slot_mtx);
+    int k = -1;
+    for (int i = 0; i < CACHE_SLOTS; i++)
+        if (!(s_cache_slots & (1u << i))) { k = i; s_cache_slots |= 1u << i; break; }
+    mutexUnlock(&s_cache_slot_mtx);
+    return k;
+}
+
+static void cache_slot_give(int k) {
+    if (k < 0) return;
+    mutexLock(&s_cache_slot_mtx);
+    s_cache_slots &= ~(1u << k);
+    mutexUnlock(&s_cache_slot_mtx);
 }
 
 static void cache_delete_all(torrentfs *t) {
@@ -903,6 +936,10 @@ static size_t cache_read_upto(torrentfs *t, int64_t off, void *buf, size_t len) 
 // slot's 4-bit generation, so a slot reused by another address is not blamed.
 #define PEER_FROM_SLOT_MASK 0x7FF
 static inline int16_t peer_from_tag(const torrentfs *t, int pidx) {
+    // An incoming session has no pool slot (pidx -1): nothing to blame. The
+    // tag used to read peer_gen[-1] and decode as slot 2047, banning whoever
+    // sat there.
+    if (pidx < 0 || pidx >= TFS_MAX_PEERS) return -1;
     return (int16_t)((pidx & PEER_FROM_SLOT_MASK) | ((t->peer_gen[pidx] & 0xF) << 11));
 }
 
@@ -1203,6 +1240,10 @@ static void add_peers_src(torrentfs *t, const peer_addr *peers, int n, int src) 
         t->peer_src[slot]      = (uint8_t)src;
         t->peer_best_kbps[slot] = 0.0f;
         t->peer_rot[slot]      = 0;
+        // Per-address flags too: a new address must not inherit the evicted
+        // one's "TCP failed, try uTP" or "plaintext only".
+        t->peer_utp_retry[slot] = 0;
+        t->peer_mse_off[slot]   = 0;
         added++;
     }
     mutexUnlock(&t->lock);
@@ -1651,16 +1692,16 @@ static void sess_close(torrentfs *t, sess *s, bool failed) {
     // attempt (uTP can traverse NAT where TCP SYN is dropped). uTP sessions
     // (nb.utp != NULL) never re-flag, so a peer cannot loop.
     bool was_tcp = (s->nb.utp == NULL);
+    // peer_nb_free zeroes nb: read what the MSE bookkeeping below needs first.
+    bool mse_want   = s->nb.mse_want;
+    bool mse_failed = s->nb.mse_failed;
+    bool mse_active = s->nb.mse_active;
     if (s->connecting) {
-        // still a raw socket; peer_nb was never attached
-        if (s->nb.sock >= 0) close(s->nb.sock);
-        s->nb.sock = -1;
-        // a uTP dial in flight also occupies a utp_nb session slot; without
-        // this the 128-slot table leaks and all further uTP dials fail
-        if (s->nb.utp) {
-            utp_nb_close((utp_nb_sess *)s->nb.utp);
-            s->nb.utp = NULL;
-        }
+        // A TCP dial is still a raw socket (no buffers yet); a uTP dial
+        // already has its rx/tx/bitfield and a utp_nb slot. peer_nb_free
+        // handles both: closing only the socket leaked ~516 KB per failed
+        // uTP dial, and the utp_nb table with it.
+        peer_nb_free(&s->nb);
         if (t->st_connecting > 0) t->st_connecting--;
     } else {
         if (s->nb.handshaked && t->st_live > 0) t->st_live--;
@@ -1677,7 +1718,7 @@ static void sess_close(torrentfs *t, sess *s, bool failed) {
     release_peer(t, s->pidx, failed, had_conn, kind);
     // A plaintext handshake that actually connected is proof the peer does
     // not need MSE; remember it so later dials skip the (wasted) attempt.
-    if (had_conn && !s->nb.mse_want && s->pidx >= 0) {
+    if (had_conn && !mse_want && s->pidx >= 0) {
         mutexLock(&t->lock);
         t->peer_mse_off[s->pidx] = 1;
         mutexUnlock(&t->lock);
@@ -1687,8 +1728,8 @@ static void sess_close(torrentfs *t, sess *s, bool failed) {
     // retry immediately -- this is a protocol mismatch, not a network
     // failure, so it must not count into the backoff. A peer that closes
     // the stream before the MSE handshake finished counts as refused too.
-    if (failed && !had_conn && s->nb.mse_want &&
-        (s->nb.mse_failed || !s->nb.mse_active)) {
+    if (failed && !had_conn && mse_want && s->pidx >= 0 &&
+        (mse_failed || !mse_active)) {
         mutexLock(&t->lock);
         t->peer_mse_off[s->pidx] = 1;
         t->peer_fails[s->pidx]   = 0;
@@ -1884,6 +1925,8 @@ static void sess_connected(torrentfs *t, sess *s, u64 now) {
     // same torrent: MSE off = 66 KB/s, MSE on = 39 KB/s. Peers that require
     // encryption decline us; that is their call. Re-enable by setting
     // mse_want = !peer_mse_off[...] here and in sess_dial_utp_at.
+    // NB: that A/B ran with a VC resync that only worked for padB == 0 (most
+    // responders pad), fixed since in mse_peer.c -- worth measuring again.
     s->nb.mse_want = 0;
     mutexUnlock(&t->lock);
     peer_nb_send_handshake(&s->nb, t->meta.info_hash, t->peer_id);
@@ -3018,8 +3061,14 @@ static void sess_msg(torrentfs *t, sess *s, int sid, uint8_t id, uint8_t *pl,
             aq_req_dec(a, b);
             a->have_cnt++;
             // A non-strict reader streams partial pieces block by block.
-            if ((int64_t)idx == t->read_blocked_piece && !t->strict_verify)
+            // Under the lock: the reader checks piece_ready and then waits
+            // under it, so a wake between the two is not lost (it slept out
+            // its 20 ms timeout instead).
+            if ((int64_t)idx == t->read_blocked_piece && !t->strict_verify) {
+                mutexLock(&t->lock);
                 condvarWakeAll(&t->piece_cv);
+                mutexUnlock(&t->lock);
+            }
 
             t->st_blocks_have++;
             t->last_progress_tick = now;
@@ -3638,6 +3687,7 @@ static void rotate_out(torrentfs *t, sess *s, u64 now, const char *why) {
     engine_log(ENGINE_LOG_INFO, "[rotate] sess %d out (%s): cap=%.0fKB/s slow=%d live=%d",
                (int)(s - t->S), why, cap / 1024.0, slow ? 1 : 0, t->st_live);
     s->fail_kind = PEER_FAIL_CHOKE_ROTATE;
+    bool was_choked = s->nb.choked;   // sess_close zeroes nb
     sess_close(t, s, true);
     if (pidx >= 0 && slow) {
         mutexLock(&t->lock);
@@ -3646,7 +3696,7 @@ static void rotate_out(torrentfs *t, sess *s, u64 now, const char *why) {
         mutexUnlock(&t->lock);
     }
     t->st_rotated++;
-    if (s->nb.choked) t->st_rotated_choked++;
+    if (was_choked) t->st_rotated_choked++;
 }
 
 // Turnover, once per upkeep tick (netloop).
@@ -4410,7 +4460,15 @@ torrentfs *torrentfs_open_file_cancel(const char *source, const char *cache_path
     else
         aq_ok = false;
 
-    snprintf(t->cache_base, sizeof(t->cache_base), "%s", cache_path);
+    t->cache_slot = cache_slot_take();
+    if (t->cache_slot == 0)
+        snprintf(t->cache_base, sizeof(t->cache_base), "%s", cache_path);
+    else if (t->cache_slot > 0)
+        snprintf(t->cache_base, sizeof(t->cache_base), "%s.s%d", cache_path,
+                 t->cache_slot);
+    else   // all slots busy: a unique, untracked name (deleted on close)
+        snprintf(t->cache_base, sizeof(t->cache_base), "%s.t%llx", cache_path,
+                 (unsigned long long)armGetSystemTick());
     tsnx_ensure_parent_dirs(t->cache_base);
     mutexInit(&t->cache_lock);
     mutexInit(&t->lock);
@@ -4507,7 +4565,7 @@ void torrentfs_close(torrentfs *tfs) {
     tfs->stop = true;
 
     // Stop the background DHT before freeing the torrent context it delivers to.
-    dht_background_remove(tfs->meta.info_hash);
+    dht_background_remove(tfs->meta.info_hash, tfs);
 
     if (tfs->discovery_started) {
         threadWaitForExit(&tfs->discovery);
@@ -4537,6 +4595,7 @@ void torrentfs_close(torrentfs *tfs) {
         if (tfs->chunks[i] >= 0) { close(tfs->chunks[i]); tfs->chunks[i] = -1; }
     if (!tfs->ram_mode)     // RAM mode never creates cache files
         cache_delete_all(tfs);  // per-playback scratch, not a library
+    cache_slot_give(tfs->cache_slot);   // the name is free for the next open
     for (int i = 0; i < AQ_MAX; i++) {
         free(tfs->aq[i].buf);
         free(tfs->aq[i].have);
@@ -4767,6 +4826,12 @@ bool torrentfs_select_file(torrentfs *tfs, int file_index) {
             while (__atomic_load_n(&tfs->select_gen, __ATOMIC_ACQUIRE) == gen0 && !tfs->stop)
                 svcSleepThread(2000000ULL);
         }
+    } else if (tfs->netloop_started) {
+        // Stopping: the netloop may still be finishing an iteration (or its
+        // final sess_close loop) and writing into aq[].buf, which apply would
+        // free under it. A torrent being closed has no use for the switch.
+        tfs->cancel_reader = false;
+        return false;
     } else {
         torrentfs_apply_select_file(tfs, file_index);
     }
@@ -4844,6 +4909,13 @@ static bool piece_ready(torrentfs *t, int64_t idx, int b0) {
 }
 
 int64_t torrentfs_read(torrentfs *tfs, int64_t offset, char *buf, int64_t nbytes) {
+    return torrentfs_read_cancel(tfs, offset, buf, nbytes, NULL);
+}
+
+int64_t torrentfs_read_cancel(torrentfs *tfs, int64_t offset, char *buf,
+                              int64_t nbytes, const volatile bool *cancel) {
+    int empty_reads = 0;   // in a row, of the same piece (see below)
+#define READ_CANCELLED() (tfs->stop || tfs->cancel_reader || (cancel && *cancel))
 again:
     tsnx_engine_wd_tick(6);
     hb_beat(tfs, HB_READER);
@@ -4868,11 +4940,11 @@ again:
     u64 last_wd = wait_start;
     int64_t last_recv = tfs->st_bytes_recv;
     u64 last_recv_tick = wait_start;
-    while (!tfs->stop && !tfs->cancel_reader && !piece_ready(tfs, first, b0)) {
+    while (!READ_CANCELLED() && !piece_ready(tfs, first, b0)) {
         // Woken when the piece verifies (or, non-strict, a block lands); the
         // 20 ms cap keeps the stall/heartbeat bookkeeping below running.
         mutexLock(&tfs->lock);
-        if (!tfs->stop && !tfs->cancel_reader && !piece_ready(tfs, first, b0))
+        if (!READ_CANCELLED() && !piece_ready(tfs, first, b0))
             condvarWaitTimeout(&tfs->piece_cv, &tfs->lock, 20000000ULL);
         mutexUnlock(&tfs->lock);
         u64 now = armGetSystemTick();
@@ -4918,7 +4990,7 @@ again:
         }
     }
     tfs->read_blocked_piece = -1;
-    if (tfs->stop || tfs->cancel_reader) return -1;
+    if (READ_CANCELLED()) return -1;
     double waited = (double)(armGetSystemTick() - wait_start) / tfs->freq;
     if (waited > 5.0) {
         engine_log(ENGINE_LOG_WARN,
@@ -4943,13 +5015,32 @@ again:
         // The block was there a moment ago (evicted from the RAM window in
         // between, or a failed hash put it back to NEEDED): wait for it again.
         // Returning 0 here would be EOF to mpv.
-        if (!tfs->stop && !tfs->cancel_reader) {
+        if (!READ_CANCELLED()) {
+            // SD mode: a DONE piece whose bytes cannot be read back (its chunk
+            // will not open, a short read) stays DONE forever, and this loop
+            // with it -- the picture freezes for good. After ~1 s of that,
+            // fetch it again (the re-download reuses its cache slot).
+            if (!tfs->ram_mode && ++empty_reads >= 50) {
+                empty_reads = 0;
+                mutexLock(&tfs->lock);
+                if (tfs->status[first] == PIECE_DONE) {
+                    tfs->status[first] = PIECE_NEEDED;
+                    if (tfs->pieces_done > 0) tfs->pieces_done--;
+                    tfs->st_cache_wr_fail++;
+                    set_err(tfs, "cache read failed, piece %lld", (long long)first);
+                    engine_log(ENGINE_LOG_WARN,
+                               "[read] piece %lld unreadable from the SD cache, refetching",
+                               (long long)first);
+                }
+                mutexUnlock(&tfs->lock);
+            }
             svcSleepThread(20000000ULL);
             goto again;
         }
         return -1;
     }
     return (int64_t)got;
+#undef READ_CANCELLED
 }
 
 void torrentfs_cancel(torrentfs *tfs) {

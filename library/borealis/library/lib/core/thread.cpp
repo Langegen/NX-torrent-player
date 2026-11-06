@@ -19,6 +19,8 @@
 #include <borealis/core/logger.hpp>
 #include <borealis/core/thread.hpp>
 #include <exception>
+#include <chrono>
+#include <condition_variable>
 
 #ifdef BOREALIS_USE_STD_THREAD
 #include <thread>
@@ -70,10 +72,18 @@ void Threading::sync(const std::function<void()>& func)
     m_sync_functions.push_back(func);
 }
 
+// LOCAL PATCH: task_loop slept a fixed 500 ms between batches, so every
+// brls::async task waited up to half a second before it even started. It now
+// waits on this, woken by async() and stop().
+static std::condition_variable s_async_cv;
+
 void Threading::async(const std::function<void()>& task)
 {
-    std::lock_guard<std::mutex> guard(m_async_mutex);
-    m_async_tasks.push_back(task);
+    {
+        std::lock_guard<std::mutex> guard(m_async_mutex);
+        m_async_tasks.push_back(task);
+    }
+    s_async_cv.notify_one();
 }
 
 size_t Threading::delay(long milliseconds, const std::function<void()>& func)
@@ -175,7 +185,11 @@ void Threading::start()
 
 void Threading::stop()
 {
-    task_loop_active = false;
+    {
+        std::lock_guard<std::mutex> guard(m_async_mutex);
+        task_loop_active = false;
+    }
+    s_async_cv.notify_all();
 
 #ifdef BOREALIS_USE_STD_THREAD
     task_loop_thread->join();
@@ -201,10 +215,27 @@ void* Threading::task_loop(void* a)
 
         for (auto task : m_tasks_copy)
         {
-            task();
+            // LOCAL PATCH: an exception out of a task (bad_alloc parsing a
+            // large answer, say) used to reach std::terminate and kill the
+            // app. performSyncTasks already guards the sync side this way.
+            try
+            {
+                task();
+            }
+            catch (std::exception& e)
+            {
+                brls::Logger::error("error: async task: {}", e.what());
+            }
+            catch (...)
+            {
+                brls::Logger::error("error: async task: unknown exception");
+            }
         }
 
-        retro_sleep(500);
+        // LOCAL PATCH: wait for the next task (or stop), not a fixed 500 ms.
+        std::unique_lock<std::mutex> lk(m_async_mutex);
+        s_async_cv.wait_for(lk, std::chrono::milliseconds(500),
+                            [] { return !m_async_tasks.empty() || !task_loop_active; });
     }
     return NULL;
 }

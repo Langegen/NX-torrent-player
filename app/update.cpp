@@ -14,6 +14,7 @@
 #include "http.hpp"
 #include "json.hpp"
 #include "i18n.hpp"
+#include "workers.hpp"
 
 #ifndef APP_VERSION
 #define APP_VERSION "0.0.0"
@@ -36,6 +37,28 @@ std::string selfNro;  // set by init(), "" if we could not tell
 std::string pendingPath()
 {
     return selfNro.empty() ? "" : selfNro + ".new";
+}
+
+// A whole .nro, not a truncated download or an error page served with 200:
+// "NRO0" at 0x10, and the file at least as long as the header's own size
+// field (0x18; the assets -- icon, nacp, romfs -- follow it). `expect` is the
+// release's asset size when the API gave one.
+bool validNro(const std::string& path, int64_t expect)
+{
+    FILE* f = std::fopen(path.c_str(), "rb");
+    if (!f) return false;
+    unsigned char h[0x20];
+    bool ok = std::fread(h, 1, sizeof(h), f) == sizeof(h) &&
+              std::memcmp(h + 0x10, "NRO0", 4) == 0;
+    int64_t len = -1;
+    if (ok && std::fseek(f, 0, SEEK_END) == 0) len = (int64_t)std::ftell(f);
+    std::fclose(f);
+    if (!ok || len < 0) return false;
+    uint32_t hdrSize = (uint32_t)h[0x18] | ((uint32_t)h[0x19] << 8) |
+                       ((uint32_t)h[0x1A] << 16) | ((uint32_t)h[0x1B] << 24);
+    if (hdrSize < 0x80 || len < (int64_t)hdrSize) return false;
+    if (expect > 0 && len != expect) return false;
+    return true;
 }
 
 // "v1.2.3" / "1.2" / "1.2.3-beta" -> {1,2,3}. Anything unparsable reads as 0,
@@ -90,13 +113,11 @@ bool hasPending()
 {
     std::string p = pendingPath();
     if (p.empty()) return false;
-    // The file, not a flag: a download that survived a crash is still good, and
-    // gets applied on the next clean exit.
-    if (FILE* f = std::fopen(p.c_str(), "rb"))
-    {
-        std::fclose(f);
-        return true;
-    }
+    // The file, not a flag. Downloads land in .part and are renamed here only
+    // once complete, but check it anyway: installing a broken .nro leaves the
+    // user with an app that no longer starts.
+    if (validNro(p, 0)) return true;
+    std::remove(p.c_str());  // missing or broken: nothing to apply
     return false;
 }
 
@@ -292,13 +313,20 @@ void downloadAsync(const Release& r, std::function<void(float)> progress,
         return;
     }
 
-    brls::async([url, dest, progress, done]() {
+    int64_t expect = r.size;
+    // Tens of MB: on the worker pool, not brls::async's one thread, where
+    // the library and history saves would wait for the whole download.
+    workers::run([url, dest, expect, progress, done]() {
         // The callback runs on this thread, per curl chunk. Marshal to the UI
         // thread, but only when the whole percent changes -- a sync() per chunk
         // would queue thousands of no-op UI updates.
         auto last = std::make_shared<int>(-1);
         std::string err;
-        bool ok = http::download(url, dest, err,
+        // Into .part first: a power cut or a HOME close mid-download must not
+        // leave a .new behind, which the next clean exit would install.
+        std::string part = dest + ".part";
+        std::remove(dest.c_str());
+        bool ok = http::download(url, part, err,
                                  [progress, last](int64_t now, int64_t total) {
                                      float f = total > 0 ? (float)now / total : -1.0f;
                                      int pct = total > 0 ? (int)(f * 100) : -1;
@@ -309,6 +337,17 @@ void downloadAsync(const Release& r, std::function<void(float)> progress,
                                      }
                                      return true;
                                  });
+        if (ok && !validNro(part, expect))
+        {
+            ok  = false;
+            err = "the download is not a complete .nro";
+        }
+        if (ok && std::rename(part.c_str(), dest.c_str()) != 0)
+        {
+            ok  = false;
+            err = std::string("cannot rename: ") + std::strerror(errno);
+        }
+        if (!ok) std::remove(part.c_str());
         std::string e = ok ? "" : err;
         if (!ok) brls::Logger::error("[update] download failed: {}", err);
         brls::sync([done, e]() { done(e); });

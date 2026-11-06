@@ -8,6 +8,8 @@
 
 #include "json.hpp"
 
+#include "fsutil.hpp"
+
 #ifndef LIBRARY_NO_UI
 #include <borealis.hpp>
 #include "appdata.hpp"
@@ -289,46 +291,39 @@ uint32_t g_gen = 0;
 
 int64_t now() { return (int64_t)std::time(nullptr); }
 
-bool readFile(const std::string& path, std::string& out)
-{
-    FILE* f = std::fopen(path.c_str(), "rb");
-    if (!f) return false;
-    char buf[8192];
-    size_t n;
-    out.clear();
-    while ((n = std::fread(buf, 1, sizeof(buf), f)) > 0) out.append(buf, n);
-    std::fclose(f);
-    return true;
-}
+using fsutil::readFile;
 
 bool writeFile(const std::string& path, const std::string& data)
 {
-    std::string tmp = path + ".tmp";
-    FILE* f = std::fopen(tmp.c_str(), "wb");
-    if (!f) return false;
-    bool ok = std::fwrite(data.data(), 1, data.size(), f) == data.size();
-    ok = std::fclose(f) == 0 && ok;
-    if (!ok) return false;
-    std::remove(path.c_str());
-    return std::rename(tmp.c_str(), path.c_str()) == 0;
+    return fsutil::writeAtomic(path, data);
 }
 
 // Off the UI thread: the player records every 15 s, and an SD write in the
 // frame is a stutter. Snapshot under the lock, write without it.
+std::mutex g_writeLock;      // two saves never interleave on disk
+uint32_t g_writtenGen = 0;  // the generation on disk (under g_writeLock)
+
+// Writes `data` (generation `gen`) unless something newer is already there.
+void writeGen(const std::string& data, uint32_t gen)
+{
+    std::lock_guard<std::mutex> g(g_writeLock);
+    if ((int32_t)(gen - g_writtenGen) <= 0) return;
+    if (writeFile(APPDATA_LIBRARY, data))
+        g_writtenGen = gen;
+    else
+        brls::Logger::warning("[library] could not write {}", APPDATA_LIBRARY);
+}
+
 void saveAsync()
 {
     std::string data;
+    uint32_t gen;
     {
         std::lock_guard<std::mutex> g(g_lock);
         data = toJson(g_entries);
-        g_gen++;
+        gen  = ++g_gen;
     }
-    brls::async([data]() {
-        static std::mutex writeLock;  // two saves never interleave on disk
-        std::lock_guard<std::mutex> g(writeLock);
-        if (!writeFile(APPDATA_LIBRARY, data))
-            brls::Logger::warning("[library] could not write {}", APPDATA_LIBRARY);
-    });
+    brls::async([data, gen]() { writeGen(data, gen); });
 }
 
 Entry& ensure(const content::Item& item)
@@ -355,11 +350,31 @@ Entry& ensure(const content::Item& item)
 void load()
 {
     std::string body;
-    bool ok = readFile(APPDATA_LIBRARY, body) ||
-              readFile(std::string(APPDATA_LIBRARY) + ".tmp", body);  // a cut-off save
+    // A file cut short (a write FAT lost) is passed over for the .tmp of a
+    // save cut between its renames, or the version before the last save --
+    // otherwise the partial list would be the next save's whole library.
+    bool ok = fsutil::readFirst(APPDATA_LIBRARY, body, [](const std::string& b) {
+        return fsutil::looksComplete(b);
+    });
     std::lock_guard<std::mutex> g(g_lock);
     g_entries = ok ? fromJson(body) : std::vector<Entry>();
     brls::Logger::info("[library] {} titles", g_entries.size());
+}
+
+void flush()
+{
+    std::string data;
+    uint32_t gen;
+    {
+        std::lock_guard<std::mutex> g(g_lock);
+        gen = g_gen;
+        {
+            std::lock_guard<std::mutex> w(g_writeLock);
+            if (gen == g_writtenGen) return;  // nothing pending
+        }
+        data = toJson(g_entries);
+    }
+    writeGen(data, gen);
 }
 
 uint32_t generation()

@@ -159,6 +159,10 @@ class ShadeBox : public brls::Box
     float stop;
 };
 
+// `path` into `img`: at once when its texture is cached, otherwise decoded on
+// a worker and uploaded here. `alive` false (the view gone) drops it.
+void loadImageAsync(brls::Image* img, const std::string& path, std::shared_ptr<bool> alive);
+
 // Fills `img` once the artwork for `id` lands (thumbnail size, or full size
 // with `hq`). `alive` guards a fetch that lands after the view is gone.
 // `localPath`, when set, is used as is (history keeps posters on the SD card).
@@ -209,5 +213,11 @@ brls::Button* actionButton(const std::string& text, bool primary,
 // Switches a pill between the accent (selected) and the plain fill: season
 // chips, filters, the Home / Movies / Shows switch.
 void setPillActive(brls::Button* b, bool active, bool onImage = false);
+
+// True when `v`'s activity is the top one. A screen with another activity
+// (player, dialog, detail screen) above it must not free its children: the
+// focus stack keeps a raw pointer to whichever one opened the screen above,
+// and hands the focus back to it when that screen closes.
+bool isOnTop(brls::View* v);
 
 } // namespace ui

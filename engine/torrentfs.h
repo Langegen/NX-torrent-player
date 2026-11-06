@@ -47,6 +47,10 @@ int64_t torrentfs_size(const torrentfs *tfs);
 // returns as many contiguously-available bytes as possible (a short read).
 // Returns bytes read, 0 at EOF, or -1 if cancelled/error.
 int64_t torrentfs_read(torrentfs *tfs, int64_t offset, char *buf, int64_t nbytes);
+// The same, also returning -1 once *cancel turns true (within ~20 ms): one
+// reader's cancel, unlike torrentfs_cancel_reader which fails every reader.
+int64_t torrentfs_read_cancel(torrentfs *tfs, int64_t offset, char *buf,
+                              int64_t nbytes, const volatile bool *cancel);
 
 // Move the download priority window without reading (used by seek).
 void torrentfs_set_playhead(torrentfs *tfs, int64_t offset);

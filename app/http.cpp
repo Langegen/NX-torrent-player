@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <atomic>
 #include <mutex>
+#include <vector>
 #include <strings.h>  // strncasecmp
 
 #include <borealis.hpp>
@@ -18,10 +19,50 @@
 namespace http
 {
 
+// Answers held in memory (JSON, an image) are capped: an addon or a proxy
+// streaming an endless body would otherwise take the console's RAM with it.
+// Returning short makes curl fail the transfer (CURLE_WRITE_ERROR).
+static constexpr size_t kMaxBody = 32u * 1024 * 1024;
+
 static size_t writeCb(char* ptr, size_t size, size_t nmemb, void* userdata)
 {
-    ((std::string*)userdata)->append(ptr, size * nmemb);
-    return size * nmemb;
+    auto* s  = (std::string*)userdata;
+    size_t n = size * nmemb;
+    if (s->size() + n > kMaxBody) return 0;
+    s->append(ptr, n);
+    return n;
+}
+
+// One easy handle per thread, reset and reused for get() and postJson(): curl
+// keeps its open connections and TLS sessions on the handle, so the posters of
+// a screen (one host) share a connection instead of paying a TLS handshake --
+// and a parse of the CA bundle -- each, which on the console is the slow part.
+// Every handle made is listed, for shutdown().
+static std::mutex g_handlesLock;
+static std::vector<CURL*> g_handles;
+static thread_local CURL* t_handle = nullptr;
+
+static CURL* threadHandle()
+{
+    if (t_handle)
+    {
+        curl_easy_reset(t_handle);  // options only: the caches stay
+        return t_handle;
+    }
+    t_handle = curl_easy_init();
+    if (t_handle)
+    {
+        std::lock_guard<std::mutex> g(g_handlesLock);
+        g_handles.push_back(t_handle);
+    }
+    return t_handle;
+}
+
+void shutdown()
+{
+    std::lock_guard<std::mutex> g(g_handlesLock);
+    for (CURL* h : g_handles) curl_easy_cleanup(h);
+    g_handles.clear();
 }
 
 // Set by abortAll() as the app quits: every transfer in flight stops at its
@@ -41,6 +82,11 @@ static void stoppable(CURL* curl)
 {
     curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
     curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, stopCb);
+    // Every request goes through here, so the common limits do too: curl's
+    // own connect timeout is 300 s, and without NOSIGNAL a resolver timeout
+    // would use signals, which the worker threads cannot take.
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 15L);
+    curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
 }
 
 // Copied from config by applyProxy(): requests run on worker threads, which
@@ -123,7 +169,7 @@ static std::string tlsAwareErr(CURLcode rc, const char* errbuf)
 bool postJson(const char* url, const std::string& body, std::string& resp,
               std::string& err)
 {
-    CURL* curl = curl_easy_init();
+    CURL* curl = threadHandle();  // reused: see threadHandle
     if (!curl)
     {
         err = "cannot initialise the network";
@@ -149,7 +195,12 @@ bool postJson(const char* url, const std::string& body, std::string& resp,
 
     CURLcode rc = curl_easy_perform(curl);
     curl_slist_free_all(hdrs);
-    curl_easy_cleanup(curl);
+    // The handle stays with this thread (threadHandle): leave it nothing
+    // that dies with this call (curl may report into the error buffer while
+    // it closes an old connection later on).
+    curl_easy_setopt(curl, CURLOPT_ERRORBUFFER, nullptr);
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, nullptr);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, nullptr);
 
     if (rc != CURLE_OK)
     {
@@ -167,7 +218,7 @@ bool get(const std::string& url, std::string& resp, std::string& err,
          const char* accept, long timeoutSec, long* status)
 {
     if (status) *status = 0;
-    CURL* curl = curl_easy_init();
+    CURL* curl = threadHandle();  // reused: see threadHandle
     if (!curl)
     {
         err = "cannot initialise the network";
@@ -193,7 +244,12 @@ bool get(const std::string& url, std::string& resp, std::string& err,
     CURLcode rc = curl_easy_perform(curl);
     if (status) curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, status);
     if (hdrs) curl_slist_free_all(hdrs);
-    curl_easy_cleanup(curl);
+    // The handle stays with this thread (threadHandle): leave it nothing
+    // that dies with this call (curl may report into the error buffer while
+    // it closes an old connection later on).
+    curl_easy_setopt(curl, CURLOPT_ERRORBUFFER, nullptr);
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, nullptr);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, nullptr);
     if (rc != CURLE_OK)
     {
         err = tlsAwareErr(rc, errbuf);
@@ -265,6 +321,7 @@ bool download(const std::string& url, const std::string& path, std::string& err,
     // MB over hotel wifi. LOW_SPEED_* kills it when it actually stalls instead.
     curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, 1024L);
     curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, 30L);
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 15L);  // curl's default is 300 s
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);  // GitHub redirects to a CDN
     verifyTls(curl, url);  // this one lands an executable nro on the SD card
     stoppable(curl);
@@ -276,12 +333,20 @@ bool download(const std::string& url, const std::string& path, std::string& err,
     long code   = 0;
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &code);
     curl_easy_cleanup(curl);
-    std::fclose(ctx.f);
+    // fclose flushes stdio's buffer: on a full SD card that is where the
+    // write fails, after every fwrite has "succeeded".
+    bool closed = std::fclose(ctx.f) == 0;
 
     if (rc != CURLE_OK)
     {
         std::remove(path.c_str());
         err = ctx.aborted ? "cancelled" : tlsAwareErr(rc, errbuf);
+        return false;
+    }
+    if (!closed)
+    {
+        std::remove(path.c_str());
+        err = "cannot write " + path;
         return false;
     }
     // A 404 is a perfectly successful transfer of an error page, and would land
@@ -318,8 +383,12 @@ bool downloadTorrent(const std::string& url, const std::string& path,
 {
     magnet.clear();
 
+    // Into .part, renamed over `path` only when complete: the cached .torrent
+    // a history entry or Continue points at must survive a failed refetch
+    // (Jackett offline, a magnet redirect, a cut transfer).
+    const std::string part = path + ".part";
     DlCtx ctx;
-    ctx.f = std::fopen(path.c_str(), "wb");
+    ctx.f = std::fopen(part.c_str(), "wb");
     if (!ctx.f)
     {
         err = "cannot write " + path;
@@ -330,7 +399,7 @@ bool downloadTorrent(const std::string& url, const std::string& path,
     if (!curl)
     {
         std::fclose(ctx.f);
-        std::remove(path.c_str());
+        std::remove(part.c_str());
         err = "cannot initialise the network";
         return false;
     }
@@ -345,6 +414,7 @@ bool downloadTorrent(const std::string& url, const std::string& path,
     curl_easy_setopt(curl, CURLOPT_HEADERDATA, &location);
     curl_easy_setopt(curl, CURLOPT_ERRORBUFFER, errbuf);
     curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L);
+    curl_easy_setopt(curl, CURLOPT_MAXFILESIZE, (long)(64 * 1024 * 1024));
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
     curl_easy_setopt(curl, CURLOPT_MAXREDIRS, 8L);
     // Only plain web redirects are followed; a magnet: one stops the transfer
@@ -357,24 +427,31 @@ bool downloadTorrent(const std::string& url, const std::string& path,
     long code   = 0;
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &code);
     curl_easy_cleanup(curl);
-    std::fclose(ctx.f);
+    bool closed = std::fclose(ctx.f) == 0;
 
     if (location.compare(0, 7, "magnet:") == 0 && (rc != CURLE_OK || (code >= 300 && code < 400)))
     {
-        std::remove(path.c_str());
+        std::remove(part.c_str());
         magnet = location;
         return true;
     }
     if (rc != CURLE_OK)
     {
-        std::remove(path.c_str());
+        std::remove(part.c_str());
         err = tlsAwareErr(rc, errbuf);
         return false;
     }
     if (code >= 400)
     {
-        std::remove(path.c_str());
+        std::remove(part.c_str());
         err = "HTTP " + std::to_string(code);
+        return false;
+    }
+    std::remove(path.c_str());  // FAT cannot rename over a file
+    if (!closed || std::rename(part.c_str(), path.c_str()) != 0)
+    {
+        std::remove(part.c_str());
+        err = "cannot write " + path;
         return false;
     }
     return true;

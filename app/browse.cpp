@@ -1202,8 +1202,17 @@ void bindLibraryToggle(brls::View* host, const std::string& authKey,
             // The footer follows immediately -- inLibrary has already flipped,
             // the write goes on in the background -- and only moves back if the
             // account refuses it.
+            // The answer comes after two round trips: B may have closed the
+            // screen by then. `v` is touched only while it is still the
+            // focus or one of its ancestors -- the focused chain is alive.
             auto repaint = [v, hint, id = item.id]() {
-                v->updateActionHint(brls::BUTTON_X, hint(id));
+                for (brls::View* f = brls::Application::getCurrentFocus(); f;
+                     f = f->getParent())
+                    if (f == v)
+                    {
+                        v->updateActionHint(brls::BUTTON_X, hint(id));
+                        break;
+                    }
                 brls::Application::getGlobalHintsUpdateEvent()->fire();
             };
             stremio::setLibraryMemberAsync(
