@@ -985,7 +985,10 @@ typedef struct {
 static size_t curl_write_cb(void *ptr, size_t size, size_t nmemb, void *userdata) {
     membuf *m = userdata;
     size_t add = size * nmemb;
-    if (m->len + add > 4 * 1024 * 1024) return 0;  // sanity cap
+    // An announce reply is a few KB (200 peers, even non-compact, ~15 KB).
+    // The cap also bounds the bencode tree a hostile tracker can make us
+    // build (TLS to trackers is unverified): 4 MB parsed to ~80 MB of nodes.
+    if (m->len + add > 512 * 1024) return 0;
     char *grown = realloc(m->data, m->len + add + 1);
     if (!grown) return 0;
     m->data = grown;

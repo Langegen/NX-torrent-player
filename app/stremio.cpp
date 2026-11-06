@@ -202,6 +202,11 @@ std::string oneLine(std::string s, size_t max = 120)
 std::string webpToPng(const std::string& in)
 {
     int w = 0, h = 0;
+    // The header first: a poster is at most a few thousand pixels a side,
+    // and a hostile file declaring 16k x 16k would be a 1 GB allocation.
+    if (!WebPGetInfo((const uint8_t*)in.data(), in.size(), &w, &h) || w <= 0 || h <= 0 ||
+        w > 4096 || h > 4096)
+        return "";
     uint8_t* rgba = WebPDecodeRGBA((const uint8_t*)in.data(), in.size(), &w, &h);
     if (!rgba) return "";
 
@@ -1661,7 +1666,10 @@ void fetchSubtitlesAsync(const std::string& authKey, const std::string& type,
             return;
         }
 
-        workers::run([list, type, videoId, done]() {
+        // Read here, on the UI thread: Options may be assigning it meanwhile.
+        std::string want      = config::preferredSubLang();
+        std::string wantLabel = config::langLabelFor(want);
+        workers::run([list, type, videoId, done, want, wantLabel]() {
             SubtitlesResult r;
             // One addon at a time rather than in parallel. These run while the
             // engine is streaming, and the console's socket pool is what the
@@ -1704,8 +1712,6 @@ void fetchSubtitlesAsync(const std::string& authKey, const std::string& type,
 
             // The preferred language first -- stable, so each language keeps the
             // order its addon sent (which is roughly best-match first).
-            std::string want = config::preferredSubLang();
-            std::string wantLabel = config::langLabelFor(want);
             std::stable_sort(r.subs.begin(), r.subs.end(),
                              [&](const Subtitle& a, const Subtitle& b) {
                                  bool pa = config::langLabelFor(a.lang) == wantLabel;
