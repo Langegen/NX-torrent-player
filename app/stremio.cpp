@@ -614,6 +614,7 @@ void fetchLibraryAsync(const std::string& authKey,
 {
     brls::async([authKey, done]() {
         LibraryResult r;
+        std::shared_ptr<std::set<std::string>> ids;  // the account's ids, if read
         std::string body = "{\"authKey\":\"" + json::escape(authKey) +
                            "\",\"collection\":\"libraryItem\",\"all\":true}";
         std::string resp, err;
@@ -682,13 +683,14 @@ void fetchLibraryAsync(const std::string& authKey,
                 // holds, whether or not it survived the filters above -- a
                 // "temp" (auto-added by watching) item IS in the library as far
                 // as the +/- button is concerned; only "removed" is not.
-                g_libIds.clear();
-                g_libFetched = true;
+                // Built here, published on the UI thread below: g_libIds is
+                // read and edited there (inLibrary, the +/- button).
+                ids = std::make_shared<std::set<std::string>>();
                 for (const auto& o : objs)
                 {
                     std::string id = json::str(o, "_id");
                     if (!id.empty() && !json::boolean(o, "removed", false))
-                        g_libIds.insert(id);
+                        ids->insert(id);
                 }
 
                 // Most recently viewed first: watching bumps _mtime, and the ISO
@@ -707,7 +709,14 @@ void fetchLibraryAsync(const std::string& authKey,
                     nTemp);
             }
         }
-        brls::sync([done, r]() { done(r); });
+        brls::sync([done, r, ids]() {
+            if (ids)
+            {
+                g_libIds     = std::move(*ids);
+                g_libFetched = true;
+            }
+            done(r);
+        });
     });
 }
 
@@ -2327,6 +2336,8 @@ void StremioTab::draw(NVGcontext* vg, float x, float y, float width, float heigh
                    std::chrono::steady_clock::now().time_since_epoch())
                    .count();
 
+    renderWhenOnTop();
+
     // Analog stick flick cycles the view too (Left/Right buttons are actions,
     // but the stick is an axis borealis does not turn into button presses here).
     // Only while focus is in the list, one cycle per flick, and deferred to a
@@ -2742,10 +2753,26 @@ void StremioTab::loadCatalog(const char* type,
             }
             cache  = r.items;
             loaded = true;
+            if (!ui::isOnTop(this))
+            {
+                renderPending = true;   // renderView() shows it from the cache
+                return;
+            }
             showItems(cache, header,
                       t == "series" ? tr("No popular shows")
                                     : tr("No popular movies"));
         });
+}
+
+// Called from draw(): the rebuild itself runs from sync, off the draw pass
+// (rebuilding the tree mid-draw crashes).
+void StremioTab::renderWhenOnTop()
+{
+    if (!renderPending || !ui::isOnTop(this)) return;
+    renderPending = false;
+    brls::sync([this, live = alive, want = view]() {
+        if (*live && view == want && ui::isOnTop(this)) renderView();
+    });
 }
 
 // The heading over the current view's strip. Plain words, unlike the header
@@ -2788,7 +2815,11 @@ void StremioTab::loadFeatured(const char* type)
             cache = r.items;
             // Only if the user is still on the view that asked for it: the
             // render folds the new section in.
-            if (view == want) renderView();
+            if (view != want) return;
+            if (ui::isOnTop(this))
+                renderView();
+            else
+                renderPending = true;
         });
 }
 

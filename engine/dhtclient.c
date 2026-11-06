@@ -600,16 +600,26 @@ static void dht_bg_main(void *arg) {
             // dial us back (needs the listener/UPnP forwarding).
             int my_port = torrent_announce_port();
             u64 search_iv = (u64)(s_bg_hungry ? 5 : 15) * freq;
+            // Pick the due hashes under the lock, search without it: jech's
+            // dht_search answers from local storage synchronously, through
+            // bg_on_event, which takes s_bg_mtx itself (not recursive -- any
+            // node announcing our hash to us used to wedge this thread, and
+            // the netloop and torrentfs_close behind it).
+            unsigned char due[DHT_MAX_TARGETS][20];
+            int ndue = 0;
             mutexLock(&s_bg_mtx);
             for (int i = 0; i < DHT_MAX_TARGETS; i++) {
                 dht_target *tg = &s_targets[i];
                 if (!tg->active) continue;
                 if (now - tg->last_search > search_iv) {
                     tg->last_search = now;
-                    dht_search(tg->info_hash, my_port, AF_INET, bg_on_event, tg);
+                    memcpy(due[ndue++], tg->info_hash, 20);
                 }
             }
             mutexUnlock(&s_bg_mtx);
+            // bg_on_event matches by hash and ignores the closure.
+            for (int i = 0; i < ndue; i++)
+                dht_search(due[i], my_port, AF_INET, bg_on_event, NULL);
 
             // Random-id walk: fills buckets across the whole id space.
             // anacrolix refreshes buckets until they are full; a sparse
@@ -820,6 +830,13 @@ int dht_find_peers(const uint8_t info_hash[20], int target_peers, int budget_ms,
     tg->active = false;
     tg->cb = NULL;
     tg->ctx = NULL;
+    // As in dht_background_remove: a callback that already copied cb/ctx
+    // runs outside the lock, and the caller frees ctx when we return.
+    while (s_cb_inflight > 0) {
+        mutexUnlock(&s_bg_mtx);
+        svcSleepThread(1000000ULL);   // 1 ms
+        mutexLock(&s_bg_mtx);
+    }
     mutexUnlock(&s_bg_mtx);
 
     dlog("DHT fin: %d peers", delivered);

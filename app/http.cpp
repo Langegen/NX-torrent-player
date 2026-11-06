@@ -265,6 +265,7 @@ bool download(const std::string& url, const std::string& path, std::string& err,
     // MB over hotel wifi. LOW_SPEED_* kills it when it actually stalls instead.
     curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, 1024L);
     curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, 30L);
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 15L);  // curl's default is 300 s
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);  // GitHub redirects to a CDN
     verifyTls(curl, url);  // this one lands an executable nro on the SD card
     stoppable(curl);
@@ -276,12 +277,20 @@ bool download(const std::string& url, const std::string& path, std::string& err,
     long code   = 0;
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &code);
     curl_easy_cleanup(curl);
-    std::fclose(ctx.f);
+    // fclose flushes stdio's buffer: on a full SD card that is where the
+    // write fails, after every fwrite has "succeeded".
+    bool closed = std::fclose(ctx.f) == 0;
 
     if (rc != CURLE_OK)
     {
         std::remove(path.c_str());
         err = ctx.aborted ? "cancelled" : tlsAwareErr(rc, errbuf);
+        return false;
+    }
+    if (!closed)
+    {
+        std::remove(path.c_str());
+        err = "cannot write " + path;
         return false;
     }
     // A 404 is a perfectly successful transfer of an error page, and would land

@@ -336,4 +336,11 @@ void setPillActive(brls::Button* b, bool active, bool onImage)
     }
 }
 
+bool isOnTop(brls::View* v)
+{
+    if (!v) return false;
+    auto stack = brls::Application::getActivitiesStack();
+    return !stack.empty() && stack.back() == v->getParentActivity();
+}
+
 } // namespace ui

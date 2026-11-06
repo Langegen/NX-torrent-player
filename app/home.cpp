@@ -156,8 +156,10 @@ class HomeRoot : public brls::Box
     void draw(NVGcontext* vg, float x, float y, float w, float h, brls::Style style,
               brls::FrameContext* ctx) override
     {
+        // Only while on top: under a dialog or the player, a Continue card may
+        // be the one the focus goes back to when that closes (see ui::isOnTop).
         uint32_t gen = library::generation() * 7919u + history::generation();
-        if (gen != seenGen)
+        if (gen != seenGen && (!continueRow || ui::isOnTop(this)))
         {
             seenGen = gen;
             if (continueRow) fillContinue();
@@ -406,15 +408,30 @@ class HomeRoot : public brls::Box
     }
 
     // Moves the focus off the Continue row before it is rebuilt (a freed
-    // focused view crashes borealis): the hero, else the first poster row.
-    void parkFocus()
+    // focused view crashes borealis): the hero, else the first poster row,
+    // else -- TMDB down or still loading, so neither exists -- this screen
+    // itself with the highlight hidden. True in that last case: the caller
+    // hands the focus on once the row is rebuilt.
+    bool parkFocus()
     {
-        if (!focusInside(continueRow)) return;
+        if (!focusInside(continueRow)) return false;
         if (heroWatch)
+        {
             brls::Application::giveFocus(heroWatch);
-        else if (firstRow && !firstRow->getChildren().empty() &&
-                 firstRow->getChildren()[0]->isFocusable())
+            return false;
+        }
+        if (firstRow && !firstRow->getChildren().empty() &&
+            firstRow->getChildren()[0]->isFocusable())
+        {
             brls::Application::giveFocus(firstRow->getChildren()[0]);
+            return false;
+        }
+        // giveFocus() on a non-focusable view is a no-op, which would leave
+        // the focus on the card about to be freed.
+        this->setFocusable(true);
+        this->setHideHighlight(true);
+        brls::Application::giveFocus(this);
+        return true;
     }
 
     // The library's titles first (one press back into the film, or on to the
@@ -422,7 +439,19 @@ class HomeRoot : public brls::Box
     // (a local .torrent, a magnet).
     void fillContinue()
     {
-        parkFocus();
+        bool parkedHere = parkFocus();
+        fillContinueRow();
+        if (parkedHere && !continueRow->getChildren().empty())
+        {
+            brls::Application::giveFocus(continueRow->getChildren()[0]);
+            this->setFocusable(false);
+        }
+        // Otherwise nothing is left to focus: it stays parked here (B still
+        // goes back to the tab bar).
+    }
+
+    void fillContinueRow()
+    {
         continueRow->clearViews();
 
         std::set<std::string> libSources;

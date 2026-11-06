@@ -210,4 +210,10 @@ brls::Button* actionButton(const std::string& text, bool primary,
 // chips, filters, the Home / Movies / Shows switch.
 void setPillActive(brls::Button* b, bool active, bool onImage = false);
 
+// True when `v`'s activity is the top one. A screen with another activity
+// (player, dialog, detail screen) above it must not free its children: the
+// focus stack keeps a raw pointer to whichever one opened the screen above,
+// and hands the focus back to it when that screen closes.
+bool isOnTop(brls::View* v);
+
 } // namespace ui

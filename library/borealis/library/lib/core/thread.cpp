@@ -201,7 +201,21 @@ void* Threading::task_loop(void* a)
 
         for (auto task : m_tasks_copy)
         {
-            task();
+            // LOCAL PATCH: an exception out of a task (bad_alloc parsing a
+            // large answer, say) used to reach std::terminate and kill the
+            // app. performSyncTasks already guards the sync side this way.
+            try
+            {
+                task();
+            }
+            catch (std::exception& e)
+            {
+                brls::Logger::error("error: async task: {}", e.what());
+            }
+            catch (...)
+            {
+                brls::Logger::error("error: async task: unknown exception");
+            }
         }
 
         retro_sleep(500);

@@ -633,13 +633,15 @@ static uint8_t *meta_pipe_run(meta_pipe *mp, const volatile bool *cancel) {
     mp->producers = 2;
     mutexUnlock(&mp->lock);
     void (*prod_fn[2])(void *) = { pipe_announce_main, pipe_dht_main };
+    // threadClose only on a thread that was created: after a failed
+    // threadCreate the Thread is uninitialised stack memory.
     for (int i = 0; i < 2; i++) {
-        if (threadCreate(&prod[i], prod_fn[i], mp, NULL, 0x10000,
-                         TSNX_THREAD_ARGS(TSNX_CORE_NET, TSNX_PRIO_NET_BG)) == 0 &&
-            threadStart(&prod[i]) == 0) {
+        bool created = threadCreate(&prod[i], prod_fn[i], mp, NULL, 0x10000,
+                         TSNX_THREAD_ARGS(TSNX_CORE_NET, TSNX_PRIO_NET_BG)) == 0;
+        if (created && threadStart(&prod[i]) == 0) {
             prod_started[i] = true;
         } else {
-            threadClose(&prod[i]);
+            if (created) threadClose(&prod[i]);
             pipe_producer_done(mp);
         }
     }
@@ -655,12 +657,12 @@ static uint8_t *meta_pipe_run(meta_pipe *mp, const volatile bool *cancel) {
     mp->workers = META_WORKERS;
     mutexUnlock(&mp->lock);
     for (int i = 0; i < META_WORKERS; i++) {
-        if (threadCreate(&work[nwork], pipe_worker, mp, NULL, 0x10000,
-                         TSNX_THREAD_ARGS(TSNX_CORE_NET, TSNX_PRIO_NET_BG)) == 0 &&
-            threadStart(&work[nwork]) == 0) {
+        bool created = threadCreate(&work[nwork], pipe_worker, mp, NULL, 0x10000,
+                         TSNX_THREAD_ARGS(TSNX_CORE_NET, TSNX_PRIO_NET_BG)) == 0;
+        if (created && threadStart(&work[nwork]) == 0) {
             nwork++;
         } else {
-            threadClose(&work[nwork]);
+            if (created) threadClose(&work[nwork]);
             mutexLock(&mp->lock);
             mp->workers--;
             mutexUnlock(&mp->lock);

@@ -490,6 +490,11 @@ class StremioTab : public brls::Box
     // failing addon costs one request rather than one per visit.
     std::vector<stremio::LibItem> featMovies, featSeries;
     bool featMoviesAsked = false, featSeriesAsked = false;
+    // A catalog landed while a detail screen (or a dialog) was above us: the
+    // card that opened it sits on the focus stack, so the rebuild waits until
+    // we are on top again (draw()).
+    bool renderPending = false;
+    void renderWhenOnTop();
 
     std::string email;
     std::string password;
