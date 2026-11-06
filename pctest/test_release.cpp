@@ -180,6 +180,18 @@ static void test_edges()
     CHECK(b.season == -1 && b.episode == -1 && b.height == 1080);
     auto c = release::parse("S1E1");
     CHECK(c.season == 1 && c.episode == 1);
+    // A resolution after a dash is not the end of a range.
+    auto d = release::parse("Show S01E05 - 720p");
+    CHECK(d.season == 1 && d.seasonTo == 1 && d.episode == 5 && d.episodeTo == 5);
+    auto e = release::parse("Show S02 - 480p WEB-DL");
+    CHECK(e.season == 2 && e.seasonTo == 2);
+    auto f = release::parse("Show S03E10-E08");   // ends before it starts
+    CHECK(f.episode == 10 && f.episodeTo == 10);
+    // Real ranges still are.
+    auto g = release::parse("Show S01E01-E08 1080p");
+    CHECK(g.episode == 1 && g.episodeTo == 8);
+    auto h = release::parse("Show S01-S03 720p");
+    CHECK(h.season == 1 && h.seasonTo == 3);
     std::printf("      PASSED\n");
 }
 

@@ -1925,6 +1925,8 @@ static void sess_connected(torrentfs *t, sess *s, u64 now) {
     // same torrent: MSE off = 66 KB/s, MSE on = 39 KB/s. Peers that require
     // encryption decline us; that is their call. Re-enable by setting
     // mse_want = !peer_mse_off[...] here and in sess_dial_utp_at.
+    // NB: that A/B ran with a VC resync that only worked for padB == 0 (most
+    // responders pad), fixed since in mse_peer.c -- worth measuring again.
     s->nb.mse_want = 0;
     mutexUnlock(&t->lock);
     peer_nb_send_handshake(&s->nb, t->meta.info_hash, t->peer_id);
@@ -4563,7 +4565,7 @@ void torrentfs_close(torrentfs *tfs) {
     tfs->stop = true;
 
     // Stop the background DHT before freeing the torrent context it delivers to.
-    dht_background_remove(tfs->meta.info_hash);
+    dht_background_remove(tfs->meta.info_hash, tfs);
 
     if (tfs->discovery_started) {
         threadWaitForExit(&tfs->discovery);

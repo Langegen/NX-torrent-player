@@ -25,6 +25,7 @@
 #define SSDP_MSEND     3        // M-SEARCH transmissions
 #define SSDP_WAIT_MS   500      // per transmission, recv timeout
 #define HTTP_TIMEOUT_SECS 4
+#define UPNP_LEASE_SECS   3600   // renewed every half of it while we run
 
 static Thread        s_thread;
 static bool          s_started = false;
@@ -215,32 +216,26 @@ static char *http_get(const char *url) {
     return m.data;
 }
 
-// SOAP AddPortMapping POST; returns 1 on success.
-static int soap_add_mapping(const char *control_url, const char *svc_type,
-                            const char *local_ip, int internal_port) {
-    char body[1024];
+// One SOAP action against the IGD; returns 1 on HTTP 200. `args` is the
+// action's argument elements. `abortable`: give up when s_stop is set -- not
+// for the DeletePortMapping sent because we are stopping.
+static int soap_call(const char *control_url, const char *svc_type,
+                     const char *action, const char *args, long timeout_secs,
+                     bool abortable) {
+    char body[1536];
     snprintf(body, sizeof(body),
              "<?xml version=\"1.0\"?>"
              "<s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\" "
              "s:encodingStyle=\"http://schemas.xmlsoap.org/soap/encoding/\">"
-             "<s:Body><u:AddPortMapping xmlns:u=\"%s\">"
-             "<NewRemoteHost></NewRemoteHost>"
-             "<NewExternalPort>%d</NewExternalPort>"
-             "<NewProtocol>TCP</NewProtocol>"
-             "<NewInternalPort>%d</NewInternalPort>"
-             "<NewInternalClient>%s</NewInternalClient>"
-             "<NewEnabled>1</NewEnabled>"
-             "<NewPortMappingDescription>TorrentShopNX</NewPortMappingDescription>"
-             "<NewLeaseDuration>0</NewLeaseDuration>"
-             "</u:AddPortMapping></s:Body></s:Envelope>",
-             svc_type, internal_port, internal_port, local_ip);
+             "<s:Body><u:%s xmlns:u=\"%s\">%s</u:%s></s:Body></s:Envelope>",
+             action, svc_type, args, action);
 
     membuf m = {0};
     CURL *c = curl_easy_init();
     if (!c) return 0;
 
     char soapaction[192];
-    snprintf(soapaction, sizeof(soapaction), "\"%s#AddPortMapping\"", svc_type);
+    snprintf(soapaction, sizeof(soapaction), "\"%s#%s\"", svc_type, action);
 
     struct curl_slist *hdrs = NULL;
     hdrs = curl_slist_append(hdrs, "Content-Type: text/xml; charset=\"utf-8\"");
@@ -254,10 +249,12 @@ static int soap_add_mapping(const char *control_url, const char *svc_type,
     curl_easy_setopt(c, CURLOPT_HTTPHEADER, hdrs);
     curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, curl_write_cb);
     curl_easy_setopt(c, CURLOPT_WRITEDATA, &m);
-    curl_easy_setopt(c, CURLOPT_TIMEOUT, (long)HTTP_TIMEOUT_SECS);
+    curl_easy_setopt(c, CURLOPT_TIMEOUT, timeout_secs);
     curl_easy_setopt(c, CURLOPT_NOSIGNAL, 1L);
-    curl_easy_setopt(c, CURLOPT_NOPROGRESS, 0L);
-    curl_easy_setopt(c, CURLOPT_XFERINFOFUNCTION, upnp_curl_progress_cb);
+    if (abortable) {
+        curl_easy_setopt(c, CURLOPT_NOPROGRESS, 0L);
+        curl_easy_setopt(c, CURLOPT_XFERINFOFUNCTION, upnp_curl_progress_cb);
+    }
     curl_easy_setopt(c, CURLOPT_SSL_VERIFYPEER, 0L);
     curl_easy_setopt(c, CURLOPT_SSL_VERIFYHOST, 0L);
 
@@ -270,6 +267,36 @@ static int soap_add_mapping(const char *control_url, const char *svc_type,
     int ok = (rc == CURLE_OK && code == 200);
     free(m.data);
     return ok;
+}
+
+// AddPortMapping for `port` (TCP, same port both sides) with a lease in
+// seconds; 0 = until the router reboots.
+static int soap_add_mapping(const char *control_url, const char *svc_type,
+                            const char *local_ip, int port, int lease_secs) {
+    char args[640];
+    snprintf(args, sizeof(args),
+             "<NewRemoteHost></NewRemoteHost>"
+             "<NewExternalPort>%d</NewExternalPort>"
+             "<NewProtocol>TCP</NewProtocol>"
+             "<NewInternalPort>%d</NewInternalPort>"
+             "<NewInternalClient>%s</NewInternalClient>"
+             "<NewEnabled>1</NewEnabled>"
+             "<NewPortMappingDescription>TorrentShopNX</NewPortMappingDescription>"
+             "<NewLeaseDuration>%d</NewLeaseDuration>",
+             port, port, local_ip, lease_secs);
+    return soap_call(control_url, svc_type, "AddPortMapping", args,
+                     HTTP_TIMEOUT_SECS, true);
+}
+
+static int soap_delete_mapping(const char *control_url, const char *svc_type, int port) {
+    char args[256];
+    snprintf(args, sizeof(args),
+             "<NewRemoteHost></NewRemoteHost>"
+             "<NewExternalPort>%d</NewExternalPort>"
+             "<NewProtocol>TCP</NewProtocol>",
+             port);
+    // Short: it runs as the app quits.
+    return soap_call(control_url, svc_type, "DeletePortMapping", args, 2, false);
 }
 
 // Our LAN IP, as seen by the IGD: connect a UDP socket towards the IGD host
@@ -400,13 +427,39 @@ static void upnp_main(void *arg) {
 
     engine_log(ENGINE_LOG_INFO, "[upnp] AddPortMapping %s:%d TCP -> %s:%d",
                local_ip, port, local_ip, port);
-    if (soap_add_mapping(curl_full, svc, local_ip, port)) {
-        torrent_set_announce_port(port);
-        engine_log(ENGINE_LOG_INFO,
-                   "[upnp] port %d mapped: peers can dial in now", port);
-    } else {
-        engine_log(ENGINE_LOG_WARN, "[upnp] AddPortMapping failed");
+    // A lease that expires, renewed while we run and deleted when we stop:
+    // the permanent one (lease 0) this used to ask for stayed open on the
+    // router, pointing at the console, long after the app was gone. Some
+    // routers only take permanent leases (error 725): those get one, and
+    // the delete on the way out.
+    int lease = UPNP_LEASE_SECS;
+    int mapped = soap_add_mapping(curl_full, svc, local_ip, port, lease);
+    if (!mapped && !s_stop) {
+        lease = 0;
+        mapped = soap_add_mapping(curl_full, svc, local_ip, port, 0);
     }
+    if (!mapped) {
+        engine_log(ENGINE_LOG_WARN, "[upnp] AddPortMapping failed");
+        return;
+    }
+    torrent_set_announce_port(port);
+    engine_log(ENGINE_LOG_INFO, "[upnp] port %d mapped (lease %ds): peers can dial in now",
+               port, lease);
+
+    // Stay until upnp_stop: renew a finite lease halfway through it.
+    u64 freq = armGetSystemTickFreq();
+    u64 renew_at = armGetSystemTick() + (u64)(lease / 2) * freq;
+    while (!s_stop) {
+        svcSleepThread(100000000ULL);   // 100 ms slices: stop is prompt
+        tsnx_engine_wd_tick(3);
+        if (lease > 0 && armGetSystemTick() >= renew_at) {
+            if (!soap_add_mapping(curl_full, svc, local_ip, port, lease) && !s_stop)
+                engine_log(ENGINE_LOG_WARN, "[upnp] lease renewal failed");
+            renew_at = armGetSystemTick() + (u64)(lease / 2) * freq;
+        }
+    }
+    if (soap_delete_mapping(curl_full, svc, port))
+        engine_log(ENGINE_LOG_INFO, "[upnp] port %d mapping removed", port);
 }
 
 int upnp_start(int internal_port) {

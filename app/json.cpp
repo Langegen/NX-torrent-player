@@ -1,5 +1,6 @@
 #include "json.hpp"
 
+#include <climits>
 #include <cstdlib>
 #include <cstring>
 
@@ -95,6 +96,10 @@ std::string str(const std::string& body, const char* key, size_t from)
                                 i += 6;
                             }
                         }
+                        // A half of a pair left alone (or \u0000) is not text:
+                        // as UTF-8 it is invalid bytes, and a NUL cuts the
+                        // string short in every C API it reaches.
+                        if ((cp >= 0xD800 && cp <= 0xDFFF) || cp == 0) cp = 0xFFFD;
 
                         // Encode as UTF-8; the UI's text stack expects it.
                         if (cp < 0x80)
@@ -165,8 +170,31 @@ std::string escape(const std::string& s)
     std::string out;
     for (char c : s)
     {
-        if (c == '"' || c == '\\') out += '\\';
-        out += c;
+        unsigned char u = (unsigned char)c;
+        if (c == '"' || c == '\\')
+        {
+            out += '\\';
+            out += c;
+        }
+        else if (u < 0x20)
+        {
+            // Control characters must be escaped: a raw one (a tab in a
+            // title) made the whole document invalid, and the server
+            // rejected it.
+            static const char* hexd = "0123456789abcdef";
+            switch (c)
+            {
+                case '\n': out += "\\n"; break;
+                case '\r': out += "\\r"; break;
+                case '\t': out += "\\t"; break;
+                default:
+                    out += "\\u00";
+                    out += hexd[u >> 4];
+                    out += hexd[u & 0xF];
+            }
+        }
+        else
+            out += c;
     }
     return out;
 }
@@ -194,7 +222,14 @@ long long integer(const std::string& body, const char* key, long long dflt)
             if (v >= body.size() || body[v] < '0' || body[v] > '9') return dflt;
             long long n = 0;
             while (v < body.size() && body[v] >= '0' && body[v] <= '9')
-                n = n * 10 + (body[v++] - '0');
+            {
+                int d = body[v++] - '0';
+                // Saturate instead of overflowing (undefined behaviour).
+                if (n > (LLONG_MAX - d) / 10)
+                    n = LLONG_MAX;
+                else
+                    n = n * 10 + d;
+            }
             return neg ? -n : n;
         }
         from = k + 1;

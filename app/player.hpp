@@ -521,6 +521,10 @@ class MpvView : public brls::Box
 
     bool ready         = false;  // mpv has presented the first video frame
     bool fileLoaded    = false;  // mpv opened the stream (header downloaded)
+    // A direct stream's URL as given to mpv, and how many times it has been
+    // reopened after dying mid-file (MPV_EVENT_END_FILE).
+    std::string mpvUrl;
+    int streamRetries  = 0;
     bool overlayHidden = false;  // loading screen has been taken down
     bool ended         = false;  // reached EOF; the auto-close is scheduled
     // Leaving for another episode (previous / next / the list): the player is

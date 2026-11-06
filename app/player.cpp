@@ -737,6 +737,7 @@ bool MpvView::startMpv()
             brls::Logger::warning("[player] a socks proxy cannot carry an http:// "
                                   "stream; connecting directly");
         }
+        mpvUrl = url;
         const char* cmd[] = { "loadfile", url.c_str(), nullptr };
         mpv_command(mpv, cmd);
         brls::Logger::info("loadfile direct stream from {}", urlHost(playUrl));
@@ -882,6 +883,8 @@ bool MpvView::command(Cmd c)
                 return true;
             }
         }
+        else
+            unlockPresses = 0;  // in a row: any other button starts over
         flashLock();
         return true;
     }
@@ -1162,6 +1165,9 @@ void MpvView::commitSeek()
     const char* cmd[] = { "seek", t, "absolute", nullptr };
     mpv_command_async(mpv, 0, cmd);
     obsPos = seekTarget;  // the bar shows the landing at once (obsPos is async)
+    // And it is where playback is now: the samplers only take a position
+    // above 0, so a seek back to the start used to save the old one.
+    lastPosSec = seekTarget;
     brls::Logger::info("[player] seek -> {}s", (int)seekTarget);
     // A scrub that paused the picture to aim resumes it; the D-pad steps never
     // touched the play state, so it stays whatever the user had.
@@ -1856,6 +1862,20 @@ void MpvView::playPlaylistItem(int i)
                          std::to_string(e);
         w.displayTitle = title;
     }
+    else
+    {
+        // Not an episode we can name (an extra, a sample, a file of a film's
+        // torrent): it plays as a plain file, tracked by source and file
+        // index in the history. Keeping the previous episode's identity
+        // wrote this file's position over that episode's progress, in the
+        // library and on the Stremio account, and offered to resume it here.
+        w.itemId.clear();
+        w.videoId.clear();
+        w.type.clear();
+        w.content = content::Item();
+        w.season  = 0;
+        w.episode = 0;
+    }
 
     switching     = true;  // the EOF handler must not pop under the swap
     nextCardShown = false;
@@ -2221,8 +2241,9 @@ void MpvView::openEpisodesPanel()
         else
         {
             history::Item h;
-            if (history::find(currentSource, p.fileIndex, "", h) ||
-                history::find(currentSource, p.fileIndex, watch.videoId, h))
+            // By source and file only: matching the playing episode's
+            // videoId too gave every unplayed file its progress.
+            if (history::find(currentSource, p.fileIndex, "", h))
             {
                 if (h.completed)
                     d = tr("Watched");
@@ -2646,6 +2667,41 @@ void MpvView::pumpEvents()
                     if (statsLabel) statsLabel->setText("");
                     openFailed = true;
                     break;
+                }
+                // The stream died mid-file: a link that stopped answering
+                // reaches mpv as the end of the file (or an error), and it
+                // used to count as watched to the end -- marked finished,
+                // the next episode started. Near the end it is the end;
+                // anywhere else, reconnect where it stopped, a few times.
+                if (ef && fileLoaded && !ended && !switching &&
+                    (ef->reason == MPV_END_FILE_REASON_EOF ||
+                     ef->reason == MPV_END_FILE_REASON_ERROR))
+                {
+                    double dur  = obsDur > 0 ? obsDur : lastDurSec;
+                    double pos  = obsPos > 0 ? obsPos : lastPosSec;
+                    bool nearEnd = dur <= 0 || pos >= dur - 15.0;
+                    if (!nearEnd && direct && !mpvUrl.empty() && streamRetries < 3)
+                    {
+                        streamRetries++;
+                        brls::Logger::warning(
+                            "[mpv event] stream ended at {:.0f}/{:.0f}s -> reconnect {}",
+                            pos, dur, streamRetries);
+                        flashPill(tr("Connection lost, reconnecting..."), 3000);
+                        std::string start = std::to_string((long long)pos);
+                        mpv_set_property_string(mpv, "start", start.c_str());
+                        const char* cmd[] = { "loadfile", mpvUrl.c_str(), nullptr };
+                        mpv_command_async(mpv, 0, cmd);
+                        break;
+                    }
+                    if (!nearEnd)
+                    {
+                        brls::Logger::error(
+                            "[mpv event] stream ended at {:.0f}/{:.0f}s, giving up", pos,
+                            dur);
+                        flashPill(tr("Playback stopped: the connection was lost"), 600000);
+                        openFailed = true;  // B leaves at once; not marked watched
+                        break;
+                    }
                 }
                 if (ef && ef->reason == MPV_END_FILE_REASON_EOF && !ended && !switching)
                 {
