@@ -62,9 +62,13 @@ typedef struct {
 // Framed reads need to survive short reads, so bytes accumulate here until a
 // whole message is present. Sized well past the largest message (4-byte length
 // prefix + one 16 KiB block): every recv() on Switch is a bsd IPC, so a small
-// buffer turns a fast peer's socket drain into a storm of small IPCs. 64 KiB
-// cuts the per-session recv IPC count ~4x versus one-message buffering; at 48
-// sessions that is 6 MB total.
+// buffer turns a fast peer's socket drain into a storm of small IPCs.
+// A session starts at PEER_RX_INIT and doubles, up to PEER_RX_CAP, each time a
+// recv fills what is left of it: a fast peer gets the large buffer (fewer
+// IPCs), the slow majority keeps 64 KiB. Every session used to take the full
+// 512 KiB, ~20 MB at 40 sessions. PEER_RX_CAP also bounds a message (a
+// bitfield of a torrent with millions of pieces).
+#define PEER_RX_INIT (64 * 1024)
 #define PEER_RX_CAP (512 * 1024)
 
 typedef struct {
@@ -72,6 +76,7 @@ typedef struct {
     void *utp;          // non-blocking µTP session, or NULL for TCP
 
     uint8_t *rx;        // accumulated inbound bytes (partial messages included)
+    size_t rx_cap;      // its size: PEER_RX_INIT .. PEER_RX_CAP
     size_t rx_off;      // bytes at the front already handed out to the caller
     size_t rx_len;      // total bytes held, rx_off included
     bool rx_more;       // last pump stopped on a full buffer: more may be waiting

@@ -157,6 +157,11 @@ Upstream lets an exception from a task (a `bad_alloc` parsing a large answer)
 reach `std::terminate`, which closes the app; the sync side
 (`performSyncTasks`) was already guarded. Marked `LOCAL PATCH`.
 
+The same file: `task_loop` waits on a condition variable between batches,
+woken by `Threading::async()` and `Threading::stop()`, instead of a fixed
+`retro_sleep(500)` that delayed every `brls::async` task by up to half a
+second. Marked `LOCAL PATCH`.
+
 ## Updating
 
 Re-cloning upstream **drops the patch** — re-apply it, and check this file's

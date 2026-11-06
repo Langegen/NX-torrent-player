@@ -16,9 +16,11 @@
 #include <sys/stat.h>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <set>
 #include <vector>
 
+#include <borealis/core/cache_helper.hpp>  // TextureCache
 #include <borealis/views/applet_frame.hpp>
 #include <borealis/views/button.hpp>
 #ifdef __SWITCH__
@@ -74,6 +76,8 @@ extern "C" {
 
 namespace
 {
+// Textures borealis may keep after no view uses them (see main()).
+constexpr size_t kUnusedTextures = 48;
 
 #ifdef __SWITCH__
 // --- Async log sink ---------------------------------------------------------
@@ -412,18 +416,35 @@ std::string magnetHash(const std::string& magnet)
 // scanMagnets to label a row with the size it recorded.
 int64_t magnetCachedTotal(const std::string& hash);
 
+// The whole magnet file-list cache (APPDATA_MAGNET_FILES), read once and kept
+// until the file changes: the Local tab asked for it once per magnet row, and
+// read it whole every time. Any thread (the name resolves write it).
+bool readMagnetFiles(std::string& body)
+{
+    static std::mutex lock;
+    static std::string cached;
+    static off_t cachedSize    = -1;
+    static time_t cachedMtime  = 0;
+    struct stat st;
+    if (stat(APPDATA_MAGNET_FILES, &st) != 0) return false;
+    std::lock_guard<std::mutex> g(lock);
+    if (st.st_size != cachedSize || st.st_mtime != cachedMtime)
+    {
+        if (!fsutil::readFile(APPDATA_MAGNET_FILES, cached)) return false;
+        cachedSize  = st.st_size;
+        cachedMtime = st.st_mtime;
+    }
+    body = cached;
+    return true;
+}
+
 // Whether a magnet's file list has been resolved and cached (APPDATA_MAGNET_FILES
 // holds a line for its hash, even if that line is the "no video" marker).
 bool magnetFilesCached(const std::string& hash)
 {
     if (hash.empty()) return false;
-    FILE* f = std::fopen(APPDATA_MAGNET_FILES, "rb");
-    if (!f) return false;
     std::string body;
-    char buf[512];
-    size_t n;
-    while ((n = std::fread(buf, 1, sizeof(buf), f)) > 0) body.append(buf, n);
-    std::fclose(f);
+    if (!readMagnetFiles(body)) return false;
     // A whole-line prefix "<hash>\t" -- at the start or right after a newline.
     std::string key = hash + "\t";
     if (body.compare(0, key.size(), key) == 0) return true;
@@ -638,13 +659,8 @@ void cacheMagnetFiles(const std::string& hash, const std::vector<VideoFile>& vid
 int64_t magnetCachedTotal(const std::string& hash)
 {
     if (hash.empty()) return 0;
-    FILE* f = std::fopen(APPDATA_MAGNET_FILES, "rb");
-    if (!f) return 0;
     std::string body;
-    char buf[512];
-    size_t n;
-    while ((n = std::fread(buf, 1, sizeof(buf), f)) > 0) body.append(buf, n);
-    std::fclose(f);
+    if (!readMagnetFiles(body)) return 0;
 
     std::string key = hash + "\t-2\t";
     size_t k        = body.find(key);
@@ -661,13 +677,8 @@ std::vector<VideoFile> magnetCachedFiles(const std::string& hash)
 {
     std::vector<VideoFile> out;
     if (hash.empty()) return out;
-    FILE* f = std::fopen(APPDATA_MAGNET_FILES, "rb");
-    if (!f) return out;
     std::string body;
-    char buf[512];
-    size_t n;
-    while ((n = std::fread(buf, 1, sizeof(buf), f)) > 0) body.append(buf, n);
-    std::fclose(f);
+    if (!readMagnetFiles(body)) return out;
 
     size_t i = 0;
     std::string key = hash + "\t";
@@ -2007,6 +2018,14 @@ int main(int argc, char* argv[])
     // 1080p, and the two modes have their own UI size; follow it.
     brls::Application::getWindowSizeChangedEvent()->subscribe(applyUiScale);
 
+    // borealis keeps up to 200 textures no view uses any more, and a card's
+    // backdrop alone is 3.6 MB of pixels (w1280): a browse through the
+    // catalog held hundreds of MB next to mpv. Textures in use are never
+    // dropped whatever this is (it only bounds the unused ones), and a card
+    // coming back re-decodes its file off the UI thread (ui::loadImageAsync).
+    brls::TextureCache::instance().cache =
+        brls::LRUCache<std::string, size_t>(kUnusedTextures, 0);
+
     brls::Application::pushActivity(new brls::Activity(buildBrowser()));
     // First run without Jackett: its setup on top, once.
     maybeOfferJackettSetup();
@@ -2043,6 +2062,9 @@ int main(int argc, char* argv[])
     // The network pool's threads, joined before main() returns (see
     // workers.hpp): a request still running past it would crash on the Switch.
     workers::stop();
+    // The connections http::get/postJson kept open, now that every thread
+    // that used them is joined (borealis' task thread in Application::exit).
+    http::shutdown();
 
     // The engine's DHT/listener/UPnP threads, for the same reason (and the DHT
     // saves its node cache for the next launch's warm start).

@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <atomic>
 #include <mutex>
+#include <vector>
 #include <strings.h>  // strncasecmp
 
 #include <borealis.hpp>
@@ -30,6 +31,38 @@ static size_t writeCb(char* ptr, size_t size, size_t nmemb, void* userdata)
     if (s->size() + n > kMaxBody) return 0;
     s->append(ptr, n);
     return n;
+}
+
+// One easy handle per thread, reset and reused for get() and postJson(): curl
+// keeps its open connections and TLS sessions on the handle, so the posters of
+// a screen (one host) share a connection instead of paying a TLS handshake --
+// and a parse of the CA bundle -- each, which on the console is the slow part.
+// Every handle made is listed, for shutdown().
+static std::mutex g_handlesLock;
+static std::vector<CURL*> g_handles;
+static thread_local CURL* t_handle = nullptr;
+
+static CURL* threadHandle()
+{
+    if (t_handle)
+    {
+        curl_easy_reset(t_handle);  // options only: the caches stay
+        return t_handle;
+    }
+    t_handle = curl_easy_init();
+    if (t_handle)
+    {
+        std::lock_guard<std::mutex> g(g_handlesLock);
+        g_handles.push_back(t_handle);
+    }
+    return t_handle;
+}
+
+void shutdown()
+{
+    std::lock_guard<std::mutex> g(g_handlesLock);
+    for (CURL* h : g_handles) curl_easy_cleanup(h);
+    g_handles.clear();
 }
 
 // Set by abortAll() as the app quits: every transfer in flight stops at its
@@ -136,7 +169,7 @@ static std::string tlsAwareErr(CURLcode rc, const char* errbuf)
 bool postJson(const char* url, const std::string& body, std::string& resp,
               std::string& err)
 {
-    CURL* curl = curl_easy_init();
+    CURL* curl = threadHandle();  // reused: see threadHandle
     if (!curl)
     {
         err = "cannot initialise the network";
@@ -162,7 +195,12 @@ bool postJson(const char* url, const std::string& body, std::string& resp,
 
     CURLcode rc = curl_easy_perform(curl);
     curl_slist_free_all(hdrs);
-    curl_easy_cleanup(curl);
+    // The handle stays with this thread (threadHandle): leave it nothing
+    // that dies with this call (curl may report into the error buffer while
+    // it closes an old connection later on).
+    curl_easy_setopt(curl, CURLOPT_ERRORBUFFER, nullptr);
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, nullptr);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, nullptr);
 
     if (rc != CURLE_OK)
     {
@@ -180,7 +218,7 @@ bool get(const std::string& url, std::string& resp, std::string& err,
          const char* accept, long timeoutSec, long* status)
 {
     if (status) *status = 0;
-    CURL* curl = curl_easy_init();
+    CURL* curl = threadHandle();  // reused: see threadHandle
     if (!curl)
     {
         err = "cannot initialise the network";
@@ -206,7 +244,12 @@ bool get(const std::string& url, std::string& resp, std::string& err,
     CURLcode rc = curl_easy_perform(curl);
     if (status) curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, status);
     if (hdrs) curl_slist_free_all(hdrs);
-    curl_easy_cleanup(curl);
+    // The handle stays with this thread (threadHandle): leave it nothing
+    // that dies with this call (curl may report into the error buffer while
+    // it closes an old connection later on).
+    curl_easy_setopt(curl, CURLOPT_ERRORBUFFER, nullptr);
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, nullptr);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, nullptr);
     if (rc != CURLE_OK)
     {
         err = tlsAwareErr(rc, errbuf);

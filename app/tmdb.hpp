@@ -172,6 +172,8 @@ void fetchSeasonAsync(int tvId, int season, std::function<void(SeasonResult)> do
 
 // Size of the response cache on the SD card, and emptying it.
 int64_t cacheBytes();
-void clearCache();
+// Deletes the cached answers, on a worker (a directory walk on the SD card);
+// `done`, if given, runs on the UI thread afterwards.
+void clearCache(std::function<void()> done = nullptr);
 
 } // namespace tmdb

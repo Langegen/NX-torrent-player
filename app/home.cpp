@@ -149,7 +149,11 @@ class HomeRoot : public brls::Box
         build();
     }
 
-    ~HomeRoot() override { *alive = false; }
+    ~HomeRoot() override
+    {
+        *alive         = false;
+        *continueAlive = false;
+    }
 
     // The library and the history change behind this tab (a film watched, an
     // episode finished): keep Continue current. Polled, as nothing signals it.
@@ -169,6 +173,9 @@ class HomeRoot : public brls::Box
 
   private:
     std::shared_ptr<bool> alive = std::make_shared<bool>(true);
+    // The Continue row's cards only: rebuilt (freed) while the screen lives,
+    // so artwork landing for an old card must not reach it.
+    std::shared_ptr<bool> continueAlive = std::make_shared<bool>(true);
     View view;
     brls::Box* list = nullptr;
     brls::Box* hero = nullptr;
@@ -452,6 +459,8 @@ class HomeRoot : public brls::Box
 
     void fillContinueRow()
     {
+        *continueAlive = false;
+        continueAlive  = std::make_shared<bool>(true);
         continueRow->clearViews();
 
         std::set<std::string> libSources;
@@ -472,7 +481,8 @@ class HomeRoot : public brls::Box
             auto* card = ui::wideCard(title, it.key() + "_bdw", art, "",
                                       next.kind == library::Next::Kind::Resume ? next.progress
                                                                                : -1.0,
-                                      alive, [copy]() { continueContent(copy); }, kWideW);
+                                      continueAlive, [copy]() { continueContent(copy); },
+                                      kWideW);
             std::string key = e.key();
             card->registerAction(tr("Remove"), brls::BUTTON_X, [key](brls::View*) {
                 library::dismissContinue(key);
@@ -491,7 +501,7 @@ class HomeRoot : public brls::Box
                 continue;
             double prog = it.durationSec > 0 ? it.positionSec / it.durationSec : -1.0;
             history::Item copy = it;
-            auto* card = ui::wideCard(it.title, "", "", it.posterPath, prog, alive,
+            auto* card = ui::wideCard(it.title, "", "", it.posterPath, prog, continueAlive,
                                       [copy]() {
                                           PlayerArt art;
                                           art.posterPath = copy.posterPath;

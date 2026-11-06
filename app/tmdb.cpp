@@ -672,19 +672,22 @@ int64_t cacheBytes()
     return total;
 }
 
-void clearCache()
+void clearCache(std::function<void()> done)
 {
-    if (DIR* d = opendir(APPDATA_TMDB))
-    {
-        struct dirent* e;
-        while ((e = readdir(d)))
+    workers::run([done]() {
+        if (DIR* d = opendir(APPDATA_TMDB))
         {
-            std::string name = e->d_name;
-            if (name == "." || name == "..") continue;
-            std::remove((std::string(APPDATA_TMDB) + "/" + name).c_str());
+            struct dirent* e;
+            while ((e = readdir(d)))
+            {
+                std::string name = e->d_name;
+                if (name == "." || name == "..") continue;
+                std::remove((std::string(APPDATA_TMDB) + "/" + name).c_str());
+            }
+            closedir(d);
         }
-        closedir(d);
-    }
+        if (done) brls::sync(done);
+    });
 }
 
 #endif  // TMDB_NO_UI

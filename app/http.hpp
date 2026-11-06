@@ -18,6 +18,11 @@ namespace http
 // Stops every transfer in flight, and any started after, as the app quits.
 void abortAll();
 
+// Closes the connections get() and postJson() keep open. Once, as the app
+// quits, after every thread that made requests has been joined: before
+// main() returns, which is when the console tears its sockets down.
+void shutdown();
+
 // GET `url` into `resp`. False on failure, with a readable reason in `err`.
 // `accept` is an optional full header line ("Accept: image/jpeg").
 // `timeoutSec` bounds the whole request (TorrServer answers only once it has

@@ -438,6 +438,18 @@ void peer_nb_apply_speed_opts(peer_nb *p) {
 // Slide any fully-consumed prefix out of the rx buffer. Doing this lazily (only
 // when we need room or run out of whole messages) is what lets peer_nb_next
 // hand back a pointer straight into rx instead of copying every payload.
+// Doubles the receive buffer (up to PEER_RX_CAP). False when it is already
+// there or the allocation fails -- the buffer is then left as it was.
+static bool nb_rx_grow(peer_nb *p) {
+    if (p->rx_cap >= PEER_RX_CAP) return false;
+    size_t cap = p->rx_cap * 2 > PEER_RX_CAP ? PEER_RX_CAP : p->rx_cap * 2;
+    uint8_t *r = realloc(p->rx, cap);
+    if (!r) return false;
+    p->rx = r;
+    p->rx_cap = cap;
+    return true;
+}
+
 static void nb_compact(peer_nb *p) {
     if (p->rx_off == 0) return;
     if (p->rx_len > p->rx_off)
@@ -453,7 +465,8 @@ int peer_nb_init(peer_nb *p, int sock, int64_t piece_count) {
     p->choked       = true;
     p->bitfield_len = (size_t)((piece_count + 7) / 8);
     p->tx_cap       = 4096;
-    p->rx           = malloc(PEER_RX_CAP);
+    p->rx_cap       = PEER_RX_INIT;
+    p->rx           = malloc(p->rx_cap);
     p->tx           = malloc(p->tx_cap);
     p->bitfield     = calloc(1, p->bitfield_len ? p->bitfield_len : 1);
     if (!p->rx || !p->tx || !p->bitfield) {
@@ -478,7 +491,8 @@ int peer_nb_init_utp(peer_nb *p, void *utp, int64_t piece_count) {
     p->choked       = true;
     p->bitfield_len = (size_t)((piece_count + 7) / 8);
     p->tx_cap       = 4096;
-    p->rx           = malloc(PEER_RX_CAP);
+    p->rx_cap       = PEER_RX_INIT;
+    p->rx           = malloc(p->rx_cap);
     p->tx           = malloc(p->tx_cap);
     p->bitfield     = calloc(1, p->bitfield_len ? p->bitfield_len : 1);
     if (!p->rx || !p->tx || !p->bitfield) {
@@ -515,26 +529,28 @@ ssize_t peer_nb_pump_rx(peer_nb *p) {
     ssize_t total = 0;
     p->rx_more = false;
     for (;;) {
-        if (p->rx_len >= PEER_RX_CAP) {
+        if (p->rx_len >= p->rx_cap) {
             nb_compact(p);
-            if (p->rx_len >= PEER_RX_CAP) {
+            // Still full: a message longer than the buffer (a big bitfield)
+            // needs room to complete; otherwise the caller drains first.
+            if (p->rx_len >= p->rx_cap && !nb_rx_grow(p)) {
                 p->rx_more = true;
                 return total;  // a whole message is buffered; caller must drain it
             }
         }
         ssize_t n;
         size_t old_len = p->rx_len;
-        size_t want = PEER_RX_CAP - p->rx_len;
+        size_t want = p->rx_cap - p->rx_len;
         if (p->utp) {
             n = utp_nb_read((utp_nb_sess *)p->utp,
-                            p->rx + p->rx_len, (int)(PEER_RX_CAP - p->rx_len));
+                            p->rx + p->rx_len, (int)(p->rx_cap - p->rx_len));
             if (n < 0) {
                 if (p->mse_want && !p->mse_active) p->mse_failed = true;
                 return -1;
             }
             if (n == 0) return total;
         } else {
-            n = recv(p->sock, p->rx + p->rx_len, PEER_RX_CAP - p->rx_len, 0);
+            n = recv(p->sock, p->rx + p->rx_len, p->rx_cap - p->rx_len, 0);
             if (n > 0) {
                 // fall through
             } else if (n == 0) {

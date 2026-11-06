@@ -688,8 +688,11 @@ bool MpvView::startMpv()
     }
     brls::Logger::info("mpv render context created OK");
 
-    // Capture mpv's internal log so we can see vo/render/hwdec state.
-    mpv_request_log_messages(mpv, "v");
+    // Capture mpv's internal log so we can see vo/render/hwdec state -- in
+    // full only with the log file on: at "v" mpv formats a few hundred lines
+    // a minute, each drained and turned into strings here every frame, to be
+    // dropped by the logger anyway. Warnings and errors always.
+    mpv_request_log_messages(mpv, config::get().logging ? "v" : "warn");
 
     // Resume where the Stremio account left off: mpv seeks there right after
     // the open, and the engine's playhead (stream.c seek_cb) follows, so the

@@ -3,6 +3,10 @@
 #include "i18n.hpp"
 #include "stremio.hpp"  // fetchPosterAsync / fetchHqArtAsync: the shared art cache
 #include "theme.hpp"
+#include "workers.hpp"
+
+#include <borealis/core/cache_helper.hpp>  // TextureCache
+#include <stb_image.h>
 
 #include <cmath>
 
@@ -83,18 +87,75 @@ brls::Box* titleBand(const std::string& title, float w, float h, float fontSize)
 }
 } // namespace
 
+namespace
+{
+// The texture TextureCache holds for `path`, or 0 -- without the lookup
+// counting as a reference (getCache does count one).
+int cachedTexture(const std::string& path)
+{
+    auto& cache = brls::TextureCache::instance();
+    int tex     = cache.getCache(path);
+    if (tex > 0) cache.removeCache(tex);
+    return tex;
+}
+} // namespace
+
+void loadImageAsync(brls::Image* img, const std::string& path, std::shared_ptr<bool> alive)
+{
+    if (!img || path.empty()) return;
+    if (cachedTexture(path) > 0)
+    {
+        img->setImageFromFile(path);  // a cache hit: no decoding
+        return;
+    }
+    workers::run(
+        [img, path, alive]() {
+            int w = 0, h = 0, n = 0;
+            unsigned char* rgba = stbi_load(path.c_str(), &w, &h, &n, 4);
+            brls::sync([img, path, alive, rgba, w, h]() {
+                if (!*alive || !rgba)
+                {
+                    if (rgba) stbi_image_free(rgba);
+                    return;
+                }
+                // Another card may have loaded the same file meanwhile.
+                if (cachedTexture(path) > 0)
+                {
+                    stbi_image_free(rgba);
+                    img->setImageFromFile(path);
+                    return;
+                }
+                // What Image::setImageFromFile does, minus the decoding: the
+                // previous cached texture loses this reference, and the new
+                // one is TextureCache's to free.
+                if (img->getTexture() > 0 && !img->getFreeTexture())
+                    brls::TextureCache::instance().removeCache(img->getTexture());
+                img->setFreeTexture(false);
+                int tex = nvgCreateImageRGBA(brls::Application::getNVGContext(), w, h, 0,
+                                             rgba);
+                stbi_image_free(rgba);
+                if (tex <= 0) return;
+                img->innerSetImage(tex);
+                brls::TextureCache::instance().addCache(path, tex);
+            });
+        },
+        workers::Priority::Low);
+}
+
 void attachArt(brls::Image* img, const std::string& id, const std::string& url,
                std::shared_ptr<bool> alive, bool hq, const std::string& localPath)
 {
     if (!localPath.empty())
     {
-        img->setImageFromFile(localPath);
+        loadImageAsync(img, localPath, alive);
         return;
     }
     if (id.empty() || url.empty()) return;
+    // The file is decoded off the UI thread: a screen of cards decoded a few
+    // dozen JPEGs (a w1280 backdrop is 3.6 MB of pixels) in a single frame.
     auto done = [img, alive](std::string path) {
         if (!*alive || path.empty()) return;
-        img->setImageFromFile(path);
+        loadImageAsync(img, path, alive);
     };
     if (hq)
         stremio::fetchHqArtAsync(id, url, done);

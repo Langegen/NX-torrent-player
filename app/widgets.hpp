@@ -159,6 +159,10 @@ class ShadeBox : public brls::Box
     float stop;
 };
 
+// `path` into `img`: at once when its texture is cached, otherwise decoded on
+// a worker and uploaded here. `alive` false (the view gone) drops it.
+void loadImageAsync(brls::Image* img, const std::string& path, std::shared_ptr<bool> alive);
+
 // Fills `img` once the artwork for `id` lands (thumbnail size, or full size
 // with `hq`). `alive` guards a fetch that lands after the view is gone.
 // `localPath`, when set, is used as is (history keeps posters on the SD card).
