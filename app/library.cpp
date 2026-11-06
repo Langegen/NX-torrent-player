@@ -315,20 +315,30 @@ bool writeFile(const std::string& path, const std::string& data)
 
 // Off the UI thread: the player records every 15 s, and an SD write in the
 // frame is a stutter. Snapshot under the lock, write without it.
+std::mutex g_writeLock;      // two saves never interleave on disk
+uint32_t g_writtenGen = 0;  // the generation on disk (under g_writeLock)
+
+// Writes `data` (generation `gen`) unless something newer is already there.
+void writeGen(const std::string& data, uint32_t gen)
+{
+    std::lock_guard<std::mutex> g(g_writeLock);
+    if ((int32_t)(gen - g_writtenGen) <= 0) return;
+    if (writeFile(APPDATA_LIBRARY, data))
+        g_writtenGen = gen;
+    else
+        brls::Logger::warning("[library] could not write {}", APPDATA_LIBRARY);
+}
+
 void saveAsync()
 {
     std::string data;
+    uint32_t gen;
     {
         std::lock_guard<std::mutex> g(g_lock);
         data = toJson(g_entries);
-        g_gen++;
+        gen  = ++g_gen;
     }
-    brls::async([data]() {
-        static std::mutex writeLock;  // two saves never interleave on disk
-        std::lock_guard<std::mutex> g(writeLock);
-        if (!writeFile(APPDATA_LIBRARY, data))
-            brls::Logger::warning("[library] could not write {}", APPDATA_LIBRARY);
-    });
+    brls::async([data, gen]() { writeGen(data, gen); });
 }
 
 Entry& ensure(const content::Item& item)
@@ -360,6 +370,22 @@ void load()
     std::lock_guard<std::mutex> g(g_lock);
     g_entries = ok ? fromJson(body) : std::vector<Entry>();
     brls::Logger::info("[library] {} titles", g_entries.size());
+}
+
+void flush()
+{
+    std::string data;
+    uint32_t gen;
+    {
+        std::lock_guard<std::mutex> g(g_lock);
+        gen = g_gen;
+        {
+            std::lock_guard<std::mutex> w(g_writeLock);
+            if (gen == g_writtenGen) return;  // nothing pending
+        }
+        data = toJson(g_entries);
+    }
+    writeGen(data, gen);
 }
 
 uint32_t generation()

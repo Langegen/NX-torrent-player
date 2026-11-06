@@ -13,11 +13,13 @@
 typedef struct {
     torrentfs *tfs;
     int64_t pos;
+    volatile bool cancelled;   // cancel_cb: this stream only
 } stream_ctx;
 
 static int64_t read_cb(void *cookie, char *buf, uint64_t nbytes) {
     stream_ctx *s = cookie;
-    int64_t n = torrentfs_read(s->tfs, s->pos, buf, (int64_t)nbytes);
+    int64_t n = torrentfs_read_cancel(s->tfs, s->pos, buf, (int64_t)nbytes,
+                                      &s->cancelled);
     if (n > 0) s->pos += n;
     return n;  // 0 = EOF, -1 = error/cancel
 }
@@ -39,6 +41,13 @@ static void close_cb(void *cookie) {
     free(cookie);  // the torrentfs itself is owned by main, not the stream
 }
 
+// mpv aborting this stream (stop, quit): a read parked on a missing piece
+// returns instead of waiting for it. Per stream, not torrentfs_cancel_reader,
+// which would fail the next stream's reads too.
+static void cancel_cb(void *cookie) {
+    ((stream_ctx *)cookie)->cancelled = true;
+}
+
 static int open_cb(void *user_data, char *uri, mpv_stream_cb_info *info) {
     (void)uri;
     stream_ctx *s = calloc(1, sizeof(*s));
@@ -51,6 +60,7 @@ static int open_cb(void *user_data, char *uri, mpv_stream_cb_info *info) {
     info->seek_fn = seek_cb;
     info->size_fn = size_cb;
     info->close_fn = close_cb;
+    info->cancel_fn = cancel_cb;
     return 0;
 }
 
@@ -97,7 +107,8 @@ static void http_cancel_cb(void *cookie) {
 }
 
 static int http_open_cb(void *user_data, char *uri, mpv_stream_cb_info *info) {
-    (void)user_data;
+    const volatile bool *abort = user_data;
+    stream_http_err[0] = 0;   // a previous open's reason is not this one's
     // "nxhttps://host/path" -> "https://host/path"
     static const char prefix[] = "nxhttps://";
     if (strncmp(uri, prefix, sizeof(prefix) - 1) != 0) return MPV_ERROR_LOADING_FAILED;
@@ -107,7 +118,7 @@ static int http_open_cb(void *user_data, char *uri, mpv_stream_cb_info *info) {
     snprintf(url, rest + sizeof("https://"), "https://%s", uri + sizeof(prefix) - 1);
 
     char err[160] = {0};
-    httpsrc *src = httpsrc_open(url, err, sizeof(err));
+    httpsrc *src = httpsrc_open_abortable(url, abort, err, sizeof(err));
     free(url);
     if (!src) {
         snprintf(stream_http_err, sizeof(stream_http_err), "%s", err);
@@ -128,7 +139,7 @@ static int http_open_cb(void *user_data, char *uri, mpv_stream_cb_info *info) {
 
 char stream_http_err[160];
 
-int stream_register_http(mpv_handle *mpv) {
+int stream_register_http(mpv_handle *mpv, const volatile bool *abort) {
     stream_http_err[0] = 0;
-    return mpv_stream_cb_add_ro(mpv, "nxhttps", NULL, http_open_cb);
+    return mpv_stream_cb_add_ro(mpv, "nxhttps", (void *)abort, http_open_cb);
 }

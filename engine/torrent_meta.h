@@ -127,6 +127,11 @@ int torrent_load_magnet_peers(torrent_meta *t, const char *magnet_uri,
                               peer_addr *out, int max, int *out_n,
                               char *err, size_t errlen);
 
+// Ends every magnet metadata fetch in progress, and any started after, as if
+// cancelled: for app exit, where a fetch still running holds up the join of
+// whatever thread it runs on (up to its 75 s deadline).
+void torrent_meta_abort_all(void);
+
 // Cancellable variant of torrent_load_magnet_peers.
 int torrent_load_magnet_peers_cancel(torrent_meta *t, const char *magnet_uri,
                                      peer_addr *out, int max, int *out_n,

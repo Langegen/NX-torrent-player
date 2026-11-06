@@ -3055,8 +3055,14 @@ static void sess_msg(torrentfs *t, sess *s, int sid, uint8_t id, uint8_t *pl,
             aq_req_dec(a, b);
             a->have_cnt++;
             // A non-strict reader streams partial pieces block by block.
-            if ((int64_t)idx == t->read_blocked_piece && !t->strict_verify)
+            // Under the lock: the reader checks piece_ready and then waits
+            // under it, so a wake between the two is not lost (it slept out
+            // its 20 ms timeout instead).
+            if ((int64_t)idx == t->read_blocked_piece && !t->strict_verify) {
+                mutexLock(&t->lock);
                 condvarWakeAll(&t->piece_cv);
+                mutexUnlock(&t->lock);
+            }
 
             t->st_blocks_have++;
             t->last_progress_tick = now;
@@ -4897,6 +4903,13 @@ static bool piece_ready(torrentfs *t, int64_t idx, int b0) {
 }
 
 int64_t torrentfs_read(torrentfs *tfs, int64_t offset, char *buf, int64_t nbytes) {
+    return torrentfs_read_cancel(tfs, offset, buf, nbytes, NULL);
+}
+
+int64_t torrentfs_read_cancel(torrentfs *tfs, int64_t offset, char *buf,
+                              int64_t nbytes, const volatile bool *cancel) {
+    int empty_reads = 0;   // in a row, of the same piece (see below)
+#define READ_CANCELLED() (tfs->stop || tfs->cancel_reader || (cancel && *cancel))
 again:
     tsnx_engine_wd_tick(6);
     hb_beat(tfs, HB_READER);
@@ -4921,11 +4934,11 @@ again:
     u64 last_wd = wait_start;
     int64_t last_recv = tfs->st_bytes_recv;
     u64 last_recv_tick = wait_start;
-    while (!tfs->stop && !tfs->cancel_reader && !piece_ready(tfs, first, b0)) {
+    while (!READ_CANCELLED() && !piece_ready(tfs, first, b0)) {
         // Woken when the piece verifies (or, non-strict, a block lands); the
         // 20 ms cap keeps the stall/heartbeat bookkeeping below running.
         mutexLock(&tfs->lock);
-        if (!tfs->stop && !tfs->cancel_reader && !piece_ready(tfs, first, b0))
+        if (!READ_CANCELLED() && !piece_ready(tfs, first, b0))
             condvarWaitTimeout(&tfs->piece_cv, &tfs->lock, 20000000ULL);
         mutexUnlock(&tfs->lock);
         u64 now = armGetSystemTick();
@@ -4971,7 +4984,7 @@ again:
         }
     }
     tfs->read_blocked_piece = -1;
-    if (tfs->stop || tfs->cancel_reader) return -1;
+    if (READ_CANCELLED()) return -1;
     double waited = (double)(armGetSystemTick() - wait_start) / tfs->freq;
     if (waited > 5.0) {
         engine_log(ENGINE_LOG_WARN,
@@ -4996,13 +5009,32 @@ again:
         // The block was there a moment ago (evicted from the RAM window in
         // between, or a failed hash put it back to NEEDED): wait for it again.
         // Returning 0 here would be EOF to mpv.
-        if (!tfs->stop && !tfs->cancel_reader) {
+        if (!READ_CANCELLED()) {
+            // SD mode: a DONE piece whose bytes cannot be read back (its chunk
+            // will not open, a short read) stays DONE forever, and this loop
+            // with it -- the picture freezes for good. After ~1 s of that,
+            // fetch it again (the re-download reuses its cache slot).
+            if (!tfs->ram_mode && ++empty_reads >= 50) {
+                empty_reads = 0;
+                mutexLock(&tfs->lock);
+                if (tfs->status[first] == PIECE_DONE) {
+                    tfs->status[first] = PIECE_NEEDED;
+                    if (tfs->pieces_done > 0) tfs->pieces_done--;
+                    tfs->st_cache_wr_fail++;
+                    set_err(tfs, "cache read failed, piece %lld", (long long)first);
+                    engine_log(ENGINE_LOG_WARN,
+                               "[read] piece %lld unreadable from the SD cache, refetching",
+                               (long long)first);
+                }
+                mutexUnlock(&tfs->lock);
+            }
             svcSleepThread(20000000ULL);
             goto again;
         }
         return -1;
     }
     return (int64_t)got;
+#undef READ_CANCELLED
 }
 
 void torrentfs_cancel(torrentfs *tfs) {

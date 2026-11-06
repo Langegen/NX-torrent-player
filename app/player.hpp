@@ -177,6 +177,11 @@ class MpvView : public brls::Box
     // (BEP 9) -- seconds of blocking work. It runs on a background thread, so
     // this guards against the result landing after the view is gone.
     std::shared_ptr<bool> alive = std::make_shared<bool>(true);
+    // The engine open in flight (player.cpp): its cancel flag, and the
+    // hand-off that makes exactly one of the open task, its UI callback and
+    // the destructor close an engine that opened after Back.
+    struct EngineOpen;
+    std::shared_ptr<EngineOpen> engineOpen;
     std::string pendingSource;
     void updateLoadingOverlay();
     // Seconds of video to buffer before the first frame: the Options preset at
@@ -410,6 +415,9 @@ class MpvView : public brls::Box
     bool pictureDirty = false;
 
     torrentfs* tfs = nullptr;
+    // Set by the destructor: abandons an nxhttps:// open in progress
+    // (stream_register_http). Outlives mpv, which is destroyed first.
+    volatile bool httpAbort = false;
     // The source is an http(s) URL played as is (a Stremio url stream, a
     // TorrServer link), not a torrent: there is no engine, tfs stays null and
     // mpv reads the URL -- https through our nxhttps:// stream (stream.c),

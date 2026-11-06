@@ -29,6 +29,12 @@ void httpsrc_set_proxy(const char *proxy);
 // Opens `url` (http:// or https://): one request to learn the size and that
 // the server honours ranges. NULL on failure, with a reason in err.
 httpsrc *httpsrc_open(const char *url, char *err, size_t errlen);
+// The same, abandoned (NULL, "cancelled") as soon as *abort turns true --
+// mpv has no cancel_fn for a stream until its open returns, and the open is
+// a connect plus a first chunk, up to tens of seconds on a bad link. *abort
+// is also polled by every later read, so it must outlive the httpsrc.
+httpsrc *httpsrc_open_abortable(const char *url, const volatile bool *abort,
+                                char *err, size_t errlen);
 
 // Total size in bytes.
 int64_t httpsrc_size(const httpsrc *s);

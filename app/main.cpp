@@ -1031,7 +1031,10 @@ void resolveMagnetNames(std::shared_ptr<bool> alive,
     if (onStart)
         onStart(magnet);  // its turn: show the spinner, drop "(waiting)"
 
-    brls::async([alive, todo, idx, magnet, onStart, onEach]() {
+    // On the worker pool: a dead magnet is up to 75 s of fetching, and on
+    // brls::async's single thread every save and the player's engine open
+    // queued behind it. torrent_meta_abort_all (app exit) ends it.
+    workers::run([alive, todo, idx, magnet, onStart, onEach]() {
         std::string name;
         int64_t total = 0;
         torrent_meta* m = (torrent_meta*)std::calloc(1, sizeof(torrent_meta));
@@ -2019,6 +2022,18 @@ int main(int argc, char* argv[])
         update::checkAsync([](update::Release r) {
             if (r.ok && r.installable()) update::promptInstall(r);
         });
+
+    // Application::exit(): exitEvent -> the activities are destroyed (the
+    // player's last progress save is queued on brls::async) -> the task thread
+    // is joined, dropping whatever is still queued -> exitDoneEvent.
+    // Abort the network first, so a long request on that thread (TorrServer,
+    // Stremio) does not hold the exit up; write the library last, so the
+    // dropped save is not lost.
+    brls::Application::getExitEvent()->subscribe([]() {
+        http::abortAll();
+        torrent_meta_abort_all();  // magnet fetches on the worker pool
+    });
+    brls::Application::getExitDoneEvent()->subscribe([]() { library::flush(); });
 
     // PC only: NX_AUTOTEST runs a scripted pass over the UI (app/autotest.hpp).
     bool scripted = autotest::init();

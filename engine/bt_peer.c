@@ -7,6 +7,8 @@
 #include <string.h>
 #include <unistd.h>
 
+#include <switch.h>   // armGetSystemTick (pctest/compat on PC)
+
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
@@ -25,6 +27,8 @@
 #define HANDSHAKE_LEN 68
 #define META_PIECE_LEN 16384
 #define META_CONNECT_SECS 2
+// One peer's whole metadata exchange: 8 MB at worst, usually tens of KB.
+#define META_FETCH_SECS 30
 #define MAX_META_SIZE (8 * 1024 * 1024)
 
 static void set_err(char *err, size_t errlen, const char *msg) {
@@ -92,10 +96,16 @@ static int connect_timeout(int sock, const struct sockaddr *sa, socklen_t salen,
 // Returns 0 on success, -1 on error/EOF, and -2 on a clean idle timeout — the
 // socket's SO_RCVTIMEO fired at a message boundary with nothing read yet. -2
 // lets the caller poll for shutdown without dropping a slow-but-alive peer.
+static bool conn_expired(const peer_conn *p) {
+    if (p->stop && *p->stop) return true;
+    return p->deadline && armGetSystemTick() > p->deadline;
+}
+
 static int read_full(peer_conn *p, void *buf, size_t len) {
     uint8_t *b = buf;
     size_t got = 0;
     while (got < len) {
+        if (conn_expired(p)) return -1;
         if (p->utp) {
             int n = utp_bridge_read(p->utp, b + got, (int)(len - got),
                                     UTP_IO_TIMEOUT_MS);
@@ -207,7 +217,7 @@ static int send_ext(peer_conn *p, uint8_t sub_id, const char *bencode, size_t bl
 
 int peer_fetch_metadata(peer_addr addr, const uint8_t info_hash[20],
                         const uint8_t peer_id[20], uint8_t **out, size_t *out_len,
-                        char *err, size_t errlen) {
+                        const volatile bool *stop, char *err, size_t errlen) {
     int sock = socket(AF_INET, SOCK_STREAM, 0);
     if (sock < 0) {
         char e[128];
@@ -242,6 +252,9 @@ int peer_fetch_metadata(peer_addr addr, const uint8_t info_hash[20],
     // transport helpers (send_ext/recv_msg/read_full/write_full).
     peer_conn mp = {0};
     mp.sock = sock;
+    mp.stop = stop;
+    mp.deadline = armGetSystemTick() +
+                  (uint64_t)META_FETCH_SECS * armGetSystemTickFreq();
     peer_conn *p = &mp;
 
     // Handshake with the extension-protocol bit (reserved byte 5, 0x10) set.

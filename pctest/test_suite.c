@@ -23,6 +23,7 @@
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <signal.h>
 #include <sys/socket.h>
 
 #include <switch.h>
@@ -201,6 +202,10 @@ typedef struct {
     pthread_t thread;
     volatile int served;     // connections that got the whole metadata
     volatile int accepted;
+    // Answers the handshakes, then only ever sends a keep-alive a second:
+    // alive enough for every socket timeout, never any metadata.
+    bool trickle;
+    volatile bool quit;
 } mock_peer;
 
 static int read_all(int fd, void *buf, size_t n) {
@@ -247,6 +252,12 @@ static void serve_one(mock_peer *mp, int fd) {
     int en = snprintf(ehs, sizeof(ehs), "d1:md11:ut_metadatai%dee13:metadata_sizei%zuee",
                       MOCK_UT_ID, g_info_len);
     if (send_ext(fd, 0, ehs, (size_t)en, NULL, 0) != 0) return;
+
+    if (mp->trickle) {
+        static const uint8_t ka[4] = {0, 0, 0, 0};
+        while (!mp->quit && write_all(fd, ka, 4) == 0) sleep(1);
+        return;
+    }
 
     int npieces = (int)((g_info_len + 16383) / 16384);
     int sent = 0;
@@ -305,6 +316,7 @@ static void peer_start(mock_peer *mp) {
 }
 
 static void peer_stop(mock_peer *mp) {
+    mp->quit = true;
     shutdown(mp->listen_fd, SHUT_RDWR);
     close(mp->listen_fd);
     pthread_join(mp->thread, NULL);
@@ -611,7 +623,58 @@ static void test_metadata_cache(void) {
     printf("      PASSED\n");
 }
 
+// Sets *flag after `ms` (a thread of its own): Back pressed mid-fetch.
+typedef struct { volatile bool *flag; int ms; } delayed_set;
+static void *delayed_set_main(void *arg) {
+    delayed_set *d = arg;
+    usleep((useconds_t)d->ms * 1000);
+    *d->flag = true;
+    return NULL;
+}
+
+static void test_trickling_peer_cancel(void) {
+    printf("[8/8] Magnet: a peer trickling keep-alives does not outlive a cancel...\n");
+    trackers_reset();
+    meta_cache_clear(g_hash_hex);
+    g_dht_n = 0;
+
+    mock_peer mp;
+    peer_start(&mp);
+    mp.trickle = true;
+    mock_tracker *tr = tracker_add("udp://mock.test:1/announce");
+    tr->peers[0] = loopback(mp.port);
+    tr->n = 1;
+    char magnet[256];
+    magnet_for(magnet, sizeof(magnet), "udp%3a%2f%2fmock.test%3a1%2fannounce");
+
+    volatile bool cancel = false;
+    delayed_set ds = { &cancel, 1500 };
+    pthread_t th;
+    pthread_create(&th, NULL, delayed_set_main, &ds);
+
+    torrent_meta t;
+    peer_addr out[16];
+    int out_n = 0;
+    char err[256] = {0};
+    double t0 = now_s();
+    int rc = torrent_load_magnet_peers_cancel(&t, magnet, out, 16, &out_n, &cancel,
+                                              err, sizeof(err));
+    double dt = now_s() - t0;
+    pthread_join(th, NULL);
+    printf("      rc=%d in %.0f ms err='%s' accepted=%d\n", rc, dt * 1000, err,
+           mp.accepted);
+    CHECK(rc != 0);
+    CHECK(mp.accepted >= 1);   // the worker did get stuck on it
+    // The keep-alives arrive every second, so the socket's 5 s timeout never
+    // fires: before the stop flag reached the reads, this waited for the
+    // peer to hang up -- never, here.
+    CHECK(dt < 4.0);
+    peer_stop(&mp);
+    printf("      PASSED\n");
+}
+
 int main(void) {
+    signal(SIGPIPE, SIG_IGN);   // the trickling peer writes to closed sockets
     printf("=========================================\n");
     printf(" NX TORRENT PLAYER: OFFLINE ENGINE TESTS \n");
     printf("=========================================\n\n");
@@ -627,6 +690,7 @@ int main(void) {
     test_dht_after_stale_peers();
     test_trackerless_no_peers();
     test_metadata_cache();
+    test_trickling_peer_cancel();
 
     meta_cache_clear(g_hash_hex);
     rmdir(TEST_META_DIR);

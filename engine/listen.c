@@ -256,11 +256,11 @@ int torrent_listener_start(int port, listen_route_fn find) {
 
 void torrent_listener_stop(void) {
     if (!s_thread_started) return;
+    // The flag only: the thread polls with a 250 ms timeout, sees it and
+    // closes the socket itself. Closing it from here raced the thread's own
+    // accept()/close() of the same descriptor -- a number another thread may
+    // already have been handed again.
     s_stop = true;
-    if (s_listen_fd >= 0) {
-        close(s_listen_fd);   // wakes the poll() with POLLNVAL
-        s_listen_fd = -1;
-    }
     threadWaitForExit(&s_thread);
     threadClose(&s_thread);
     s_thread_started = false;

@@ -16,7 +16,10 @@ int stream_register(mpv_handle *mpv, torrentfs *tfs);
 // https://host/path, read through curl with range requests (httpsrc.c). This
 // FFmpeg build has no https protocol, so mpv cannot open such a URL itself;
 // plain http:// (and HLS over it) needs no help.
-int stream_register_http(mpv_handle *mpv);
+// `abort` (may be NULL) abandons an open in progress when it turns true: set
+// it before mpv_terminate_destroy, which otherwise waits that open out. It
+// must outlive the mpv instance.
+int stream_register_http(mpv_handle *mpv, const volatile bool *abort);
 
 // Why the last nxhttps:// open failed ("" if it did not), for the player to
 // show: mpv itself only reports "loading failed".

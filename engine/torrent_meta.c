@@ -592,8 +592,10 @@ static void pipe_worker(void *arg) {
         uint8_t *md = NULL;
         size_t len = 0;
         char e[128];
+        // &mp->stop: the deadline, a cancel or another worker's success end
+        // this fetch too, not just the next one.
         if (peer_fetch_metadata(pa, mp->info_hash, mp->peer_id, &md, &len,
-                                e, sizeof(e)) != 0) {
+                                &mp->stop, e, sizeof(e)) != 0) {
             // A peer that answered the SYN but did not yield the metadata is
             // reachable -- worth separating from the dead majority so the panel
             // can say "peers connect but refuse" vs "nothing is reachable".
@@ -620,6 +622,10 @@ static void pipe_worker(void *arg) {
     mp->workers--;
     mutexUnlock(&mp->lock);
 }
+
+static volatile bool s_abort_all = false;
+
+void torrent_meta_abort_all(void) { s_abort_all = true; }
 
 // Runs the pipeline. Returns the metadata (caller frees) or NULL; the peers
 // it collected stay in mp->peers / mp->n.
@@ -682,7 +688,7 @@ static uint8_t *meta_pipe_run(meta_pipe *mp, const volatile bool *cancel) {
         int w = mp->workers;
         mutexUnlock(&mp->lock);
         if (w <= 0) break;
-        if ((cancel && *cancel) ||
+        if ((cancel && *cancel) || s_abort_all ||
             armGetSystemTick() - t0 > (u64)META_DEADLINE_SECS * freq)
             mp->stop = true;
         svcSleepThread(50000000ULL);

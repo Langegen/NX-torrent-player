@@ -42,6 +42,12 @@ typedef struct {
     bool choked;        // peer is choking us -> we cannot request
     uint8_t *bitfield;  // which pieces the peer has; NULL if not received yet
     size_t bitfield_len;
+    // Optional limits on the blocking reads (zero = none): every read fails
+    // once *stop turns true or the system tick passes `deadline`. A peer that
+    // trickles keep-alives or a byte every few seconds never trips the
+    // socket's own timeout.
+    const volatile bool *stop;
+    uint64_t deadline;
 } peer_conn;
 
 // ---------------------------------------------------------------------------
@@ -166,8 +172,11 @@ int peer_recv(peer_conn *p, uint8_t *payload, uint32_t bufcap, uint32_t *plen);
 // On success returns 0 and sets *out to a malloc'd buffer of *out_len bytes
 // whose SHA-1 equals info_hash (caller frees). This is how magnet links obtain
 // what a .torrent file would have contained.
+//
+// Gives up when *stop turns true (may be NULL) or after META_FETCH_SECS with
+// this one peer, whichever comes first.
 int peer_fetch_metadata(peer_addr addr, const uint8_t info_hash[20],
                         const uint8_t peer_id[20], uint8_t **out, size_t *out_len,
-                        char *err, size_t errlen);
+                        const volatile bool *stop, char *err, size_t errlen);
 
 #endif

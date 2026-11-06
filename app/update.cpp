@@ -14,6 +14,7 @@
 #include "http.hpp"
 #include "json.hpp"
 #include "i18n.hpp"
+#include "workers.hpp"
 
 #ifndef APP_VERSION
 #define APP_VERSION "0.0.0"
@@ -313,7 +314,9 @@ void downloadAsync(const Release& r, std::function<void(float)> progress,
     }
 
     int64_t expect = r.size;
-    brls::async([url, dest, expect, progress, done]() {
+    // Tens of MB: on the worker pool, not brls::async's one thread, where
+    // the library and history saves would wait for the whole download.
+    workers::run([url, dest, expect, progress, done]() {
         // The callback runs on this thread, per curl chunk. Marshal to the UI
         // thread, but only when the whole percent changes -- a sync() per chunk
         // would queue thousands of no-op UI updates.

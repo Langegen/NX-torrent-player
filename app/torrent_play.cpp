@@ -216,7 +216,11 @@ void resolveMagnet(const std::shared_ptr<Job>& job, const std::string& magnet)
             // and the peers found here are cached by info-hash, so the player
             // opening it next starts from them instead of the network.
             auto t0 = std::chrono::steady_clock::now();
-            rc = torrent_load_magnet(m, magnet.c_str(), err, sizeof(err));
+            // Cancel (B on the loading box, or its destruction on exit)
+            // stops the fetch instead of letting it run to its deadline.
+            rc = torrent_load_magnet_cancel(
+                m, magnet.c_str(), (const volatile bool*)job->cancelled.get(), err,
+                sizeof(err));
             brls::Logger::info(
                 "[startup] magnet resolved in {} ms ({})",
                 (long long)std::chrono::duration_cast<std::chrono::milliseconds>(
