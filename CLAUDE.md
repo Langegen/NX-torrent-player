@@ -112,7 +112,8 @@ The entry point is `int main()` in `app/main.cpp`.
   arrows + OK + Back alone (a remote): on the console a **keyboard's or USB
   remote's arrows arrive only as `BUTTON_NAV_*`** (Enter/Esc as A/B), so a
   NAV press with no D-pad twin held and no stick pushed is a command
-  (`navFromKeys`). Back leaves only on a second press; OK ×3 unlocks. Its icons are
+  (`navFromKeys`). Back leaves only on a second press; only Y or a tap on the padlock pill
+  unlocks (a remote is used docked, where nothing needs locking). Its icons are
   drawn with nanovg (`player_widgets`): the Material glyphs a player needs sit
   in U+E000-E152, which the Nintendo shared font claims first.
 - Magnet metadata is cached in `APPDATA_META` (`torrent_set_meta_cache`): a
