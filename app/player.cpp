@@ -868,26 +868,10 @@ bool MpvView::command(Cmd c)
         toggleLock();
         return true;
     }
+    // Locked: only Y (above) or a tap on the padlock pill gets out. The lock is
+    // for handheld play; a remote is used docked, where nothing needs locking.
     if (controlsLocked)
     {
-        // OK three times in a row unlocks: a remote has no Y.
-        if (c == Cmd::Ok)
-        {
-            auto now = std::chrono::steady_clock::now();
-            if (unlockPresses == 0 || now - unlockFirst > std::chrono::seconds(2))
-            {
-                unlockPresses = 0;
-                unlockFirst   = now;
-            }
-            if (++unlockPresses >= 3)
-            {
-                unlockPresses = 0;
-                toggleLock();
-                return true;
-            }
-        }
-        else
-            unlockPresses = 0;  // in a row: any other button starts over
         flashLock();
         return true;
     }
@@ -1104,14 +1088,8 @@ void MpvView::flashLock()
     if (!lockHint) return;
     if (lockLabel)
         lockLabel->setText(controlsLocked ? kGlyphLockClosed : kGlyphLockOpen);
-    // In words, how to get out -- the Y glyph alone means nothing on a remote.
-    if (lockText)
-    {
-        std::string t = controlsLocked ? tr("Press OK 3 times to unlock") : tr("Unlocked");
-        if (controlsLocked && unlockPresses > 0)
-            t += "  " + std::to_string(unlockPresses) + "/3";
-        lockText->setText(t);
-    }
+    // In words, next to the Y glyph: the state, so Y reads as the way out.
+    if (lockText) lockText->setText(controlsLocked ? tr("Locked") : tr("Unlocked"));
     lockHint->setVisibility(brls::Visibility::VISIBLE);
     lockFlashActive = true;
     lockFlashUntil =
@@ -2370,25 +2348,32 @@ void MpvView::openTrackMenu()
             return true;
         }));
 
-    // The picture on the console's own screen (picture.hpp). Handheld only:
-    // docked the TV sets the picture, so the rows give way to a line saying
-    // so. pumpEvents brings mpv to the new value on the next frame.
+    // Lets the picture panel know this one is gone (both close at once when
+    // the player leaves).
+    auto panelAlive = std::make_shared<bool>(true);
+
+    // The picture on the console's own screen (picture.hpp): one row here,
+    // the four settings a level below (openPicturePanel), so they do not
+    // crowd this list. Handheld only: docked the TV sets the picture, so the
+    // row just says so.
     if (picture::handheld())
     {
-        for (int p = 0; p < picture::PROP_COUNT; p++)
-        {
-            content->addView(new StepperCell(
-                picture::label(p), [p]() { return picture::valueText(picture::value(p)); },
-                [this, p](int d) {
-                    if (!picture::step(p, d)) return false;
-                    pictureDirty = true;
-                    return true;
-                },
-                [this, p]() {
-                    picture::value(p) = 0;
-                    pictureDirty      = true;
-                }));
-        }
+        auto* pic = new brls::DetailCell();
+        pic->setText(tr("Picture"));
+        pic->detail->setMarginRight(30.0f);  // in line with the rows around it
+        auto showValue = [pic]() {
+            bool changed = false;
+            for (int p = 0; p < picture::PROP_COUNT; p++)
+                if (picture::value(p) != 0) changed = true;
+            pic->setDetailText(changed ? tr("Adjusted") : tr("Default"));
+            pic->setDetailTextColor(changed ? theme::accentText() : theme::textMuted());
+        };
+        showValue();
+        pic->registerClickAction([this, panel, panelAlive, showValue](brls::View*) {
+            openPicturePanel(panel, panelAlive, showValue);
+            return true;
+        });
+        content->addView(pic);
     }
     else
     {
@@ -2510,8 +2495,7 @@ void MpvView::openTrackMenu()
                          "OK \xE2\x80\x94 pause, or the button under the cursor\n"
                          "\xE2\x86\x90 \xE2\x86\x92 \xE2\x80\x94 seek, hold to go faster\n"
                          "\xE2\x86\x91 \xE2\x86\x93 \xE2\x80\x94 show the panel\n"
-                         "Back twice \xE2\x80\x94 leave the player\n"
-                         "OK three times \xE2\x80\x94 unlock"));
+                         "Back twice \xE2\x80\x94 leave the player"));
         help->setFontSize(16.0f);
         help->setTextColor(theme::textMuted());
         help->setLineHeight(1.5f);
@@ -2521,7 +2505,8 @@ void MpvView::openTrackMenu()
 
     auto liveFlag = this->alive;
     brls::Application::pushActivity(
-        new PlayerSettingsActivity(root, [this, liveFlag]() {
+        new PlayerSettingsActivity(root, [this, liveFlag, panelAlive]() {
+            *panelAlive = false;
             if (!*liveFlag) return;
             settingsOpen = false;
             subDelaySink = nullptr;  // the row it fed is about to be freed
@@ -2533,6 +2518,56 @@ void MpvView::openTrackMenu()
             // Back to what the panel was doing: up if it was (or while paused,
             // where it lives).
             if (controlsBeforePanel || userPaused || seeking) setControlsVisible(true);
+        }));
+}
+
+void MpvView::openPicturePanel(brls::View* under, std::shared_ptr<bool> underAlive,
+                               std::function<void()> onClose)
+{
+    brls::Box* panel = nullptr;
+    auto* content    = new brls::Box();
+    auto* root       = sidePanel(tr("Picture"), content, panel, panelWidth());
+
+    // pumpEvents brings mpv to a new value on the next frame; the settings
+    // panel saves them as it closes.
+    auto rows = std::make_shared<std::vector<StepperCell*>>();
+    for (int p = 0; p < picture::PROP_COUNT; p++)
+    {
+        auto* row = new StepperCell(
+            picture::label(p), [p]() { return picture::valueText(picture::value(p)); },
+            [this, p](int d) {
+                if (!picture::step(p, d)) return false;
+                pictureDirty = true;
+                return true;
+            },
+            [this, p]() {
+                picture::value(p) = 0;
+                pictureDirty      = true;
+            });
+        rows->push_back(row);
+        content->addView(row);
+    }
+
+    auto* reset = new brls::DetailCell();
+    reset->setText(tr("Reset all"));
+    // No value: an empty detail label still claims its width and cuts the title.
+    reset->detail->setVisibility(brls::Visibility::GONE);
+    reset->registerClickAction([this, rows](brls::View*) {
+        for (int p = 0; p < picture::PROP_COUNT; p++) picture::value(p) = 0;
+        for (StepperCell* r : *rows) r->refresh();
+        pictureDirty = true;
+        return true;
+    });
+    content->addView(reset);
+
+    // The settings panel sits right under this one at the same place, and is
+    // translucent: hidden, or its rows show through.
+    under->setVisibility(brls::Visibility::INVISIBLE);
+    brls::Application::pushActivity(
+        new PlayerSettingsActivity(root, [under, underAlive, onClose]() {
+            if (!*underAlive) return;
+            under->setVisibility(brls::Visibility::VISIBLE);
+            if (onClose) onClose();
         }));
 }
 

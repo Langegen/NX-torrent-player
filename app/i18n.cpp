@@ -451,6 +451,7 @@ const Entry kFr[] = {
     { "Picture", "Image" },
     { "Pattern", "Mire" },
     { "Reset all", "Tout réinitialiser" },
+    { "Adjusted", "Ajustée" },
     { "Hide the panel", "Masquer le panneau" },
     { "Set by the TV", "Réglée par la TV" },
     { "Black level", "Niveau du noir" },

@@ -164,10 +164,6 @@ class MpvView : public brls::Box
     bool backArmed = false;
     std::chrono::steady_clock::time_point backArmedUntil;
 
-    // A remote has no Y: while locked, OK pressed three times in a row
-    // unlocks too. Counts the presses of the current run.
-    int unlockPresses = 0;
-    std::chrono::steady_clock::time_point unlockFirst;
     void buildLoadingOverlay(const std::string& title);
     void setBackgroundArt(const std::string& path);
     PlayerArt art;
@@ -200,6 +196,11 @@ class MpvView : public brls::Box
     // subtitle track. Pauses playback behind it (it stays paused on close, A
     // resumes), and reads the tracks straight off mpv.
     void openTrackMenu();
+    // The picture rows (brightness...), a level below the settings panel:
+    // `under` is that panel, hidden while this one is up; `onClose` runs as
+    // this one goes, while `under` is still alive (`underAlive`).
+    void openPicturePanel(brls::View* under, std::shared_ptr<bool> underAlive,
+                          std::function<void()> onClose);
 
     // Subtitles from the account's Stremio subtitle addons. The list is asked
     // for once, in the background, as soon as mpv has opened the file -- so by
