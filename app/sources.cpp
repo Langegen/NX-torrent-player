@@ -14,6 +14,7 @@
 
 #include "appdata.hpp"
 #include "browse.hpp"        // stremioStreamSource
+#include "fsutil.hpp"
 #include "config.hpp"
 #include "i18n.hpp"
 #include "jackett.hpp"
@@ -177,11 +178,9 @@ void saveChoice(const std::string& key, const std::string& voice, const std::str
     lines.push_back(key + "\t" + voice + "\t" + group);
     // A few hundred shows at most; the oldest go first.
     if (lines.size() > 300) lines.erase(lines.begin(), lines.end() - 300);
-    if (FILE* f = std::fopen(kChoices, "wb"))
-    {
-        for (const auto& l : lines) std::fprintf(f, "%s\n", l.c_str());
-        std::fclose(f);
-    }
+    std::string out;
+    for (const auto& l : lines) out += l + "\n";
+    fsutil::writeAtomic(kChoices, out);
 }
 
 // ---------------------------------------------------------------------------

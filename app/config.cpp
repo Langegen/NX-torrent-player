@@ -11,6 +11,7 @@
 #include <string>
 
 #include "appdata.hpp"
+#include "fsutil.hpp"
 #include "i18n.hpp"
 
 namespace config
@@ -60,9 +61,62 @@ std::string readStr(const std::string& body, const char* key,
     if (k == std::string::npos) return dflt;
     size_t q1 = body.find('"', body.find(':', k + pat.size()));
     if (q1 == std::string::npos) return dflt;
-    size_t q2 = body.find('"', q1 + 1);
-    if (q2 == std::string::npos) return dflt;
-    return body.substr(q1 + 1, q2 - q1 - 1);
+    // What jsonStr() escapes: \" \\ and \u00XX. Anything else stays as
+    // written, so a value saved before escaping existed reads back the same.
+    std::string out;
+    for (size_t i = q1 + 1; i < body.size(); i++)
+    {
+        char c = body[i];
+        if (c == '"') return out;
+        if (c == '\\' && i + 1 < body.size())
+        {
+            char e = body[i + 1];
+            if (e == '"' || e == '\\')
+            {
+                out += e;
+                i++;
+                continue;
+            }
+            if (e == 'u' && i + 5 < body.size() && body.compare(i + 2, 2, "00") == 0)
+            {
+                char* end = nullptr;
+                std::string hex = body.substr(i + 4, 2);
+                long v = std::strtol(hex.c_str(), &end, 16);
+                if (end && *end == 0)
+                {
+                    out += (char)v;
+                    i += 5;
+                    continue;
+                }
+            }
+        }
+        out += c;
+    }
+    return dflt;  // no closing quote
+}
+
+// `s` as a JSON string: quotes, backslashes and control characters escaped
+// (a value with a quote in it used to break the whole file).
+std::string jsonStr(const std::string& s)
+{
+    std::string o = "\"";
+    for (unsigned char c : s)
+    {
+        if (c == '"' || c == '\\')
+        {
+            o += '\\';
+            o += (char)c;
+        }
+        else if (c < 0x20)
+        {
+            char buf[8];
+            std::snprintf(buf, sizeof(buf), "\\u%04x", c);
+            o += buf;
+        }
+        else
+            o += (char)c;
+    }
+    return o + "\"";
 }
 
 // The languages offered, and what each maps to for mpv. Both 639-2 spellings
@@ -280,19 +334,15 @@ const std::vector<std::string>& uiWidthLabels()
 
 void load()
 {
-    FILE* f = std::fopen(kPath, "rb");
-    if (!f)
+    // config.json, or after a cut save its .tmp / the version before.
+    std::string body;
+    if (!fsutil::readFirst(kPath, body,
+                           [](const std::string& b) { return fsutil::looksComplete(b); }))
     {
         brls::Logger::info("[config] no config.json, using defaults");
         defaultTmdbProxy();
         return;
     }
-
-    std::string body;
-    char buf[512];
-    size_t n;
-    while ((n = std::fread(buf, 1, sizeof(buf), f)) > 0) body.append(buf, n);
-    std::fclose(f);
 
     std::string sTab = readStr(body, "startupTab", "home");
     cfg.startupTab = (sTab == "stremio") ? Tab::STREMIO :
@@ -374,82 +424,64 @@ void load()
 
 bool save()
 {
-    FILE* f = std::fopen(kPath, "wb");
-    if (!f)
-    {
-        brls::Logger::warning("[config] cannot write {}", kPath);
-        return false;
-    }
     const char* sTabStr = (cfg.startupTab == Tab::STREMIO) ? "stremio" :
                           (cfg.startupTab == Tab::JACKETT) ? "jackett" :
                           (cfg.startupTab == Tab::HISTORY) ? "history" :
                           (cfg.startupTab == Tab::HOME)    ? "home" :
                           (cfg.startupTab == Tab::BOOKMARKS) ? "bookmarks" : "local";
+    std::string o = "{\n";
+    auto kv = [&o](const char* key, const std::string& value) {
+        o += "  \"";
+        o += key;
+        o += "\": ";
+        o += value;
+        o += ",\n";
+    };
+    auto b = [](bool v) { return std::string(v ? "true" : "false"); };
+    auto n = [](int v) { return std::to_string(v); };
+    kv("configVersion", "2");
+    kv("bufferMode", n(cfg.bufferMode));
+    kv("startupTab", jsonStr(sTabStr));
+    kv("jackettUrl", jsonStr(cfg.jackettUrl));
+    kv("jackettApiKey", jsonStr(cfg.jackettApiKey));
+    kv("jackettSetupAsked", b(cfg.jackettSetupAsked));
+    kv("torrServerUrl", jsonStr(cfg.torrServerUrl));
+    kv("proxyUrl", jsonStr(cfg.proxyUrl));
+    kv("tmdbApiKey", jsonStr(cfg.tmdbApiKey));
+    kv("tmdbApiUrl", jsonStr(cfg.tmdbApiUrl));
+    kv("tmdbImageUrl", jsonStr(cfg.tmdbImageUrl));
+    kv("tmdbProxyUrl", jsonStr(cfg.tmdbProxyUrl));
     // Only a choice the user made is kept: otherwise the proxy keeps following
     // the UI language.
-    const std::string proxyLine =
-        cfg.tmdbProxyUserSet
-            ? std::string("  \"tmdbProxyEnabled\": ") +
-                  (cfg.tmdbProxyEnabled ? "true" : "false") + ",\n"
-            : std::string();
-    std::fprintf(f,
-                 "{\n"
-                 "  \"configVersion\": 2,\n"
-                 "  \"bufferMode\": %d,\n"
-                 "  \"startupTab\": \"%s\",\n"
-                 "  \"jackettUrl\": \"%s\",\n"
-                 "  \"jackettApiKey\": \"%s\",\n"
-                 "  \"jackettSetupAsked\": %s,\n"
-                 "  \"torrServerUrl\": \"%s\",\n"
-                 "  \"proxyUrl\": \"%s\",\n"
-                 "  \"tmdbApiKey\": \"%s\",\n"
-                 "  \"tmdbApiUrl\": \"%s\",\n"
-                 "  \"tmdbImageUrl\": \"%s\",\n"
-                 "  \"tmdbProxyUrl\": \"%s\",\n"
-                 "%s"
-                 "  \"logging\": %s,\n"
-                 "  \"hide4k\": %s,\n"
-                 "  \"rateGovernor\": %s,\n"
-                 "  \"ramStream\": %s,\n"
-                 "  \"checkUpdates\": %s,\n"
-                 "  \"audioLang\": \"%s\",\n"
-                 "  \"subLang\": \"%s\",\n"
-                 "  \"subtitles\": %s,\n"
-                 "  \"hwDecode\": %s,\n"
-                 "  \"audioBoost\": %s,\n"
-                 "  \"picBrightness\": %d,\n"
-                 "  \"picContrast\": %d,\n"
-                 "  \"picGamma\": %d,\n"
-                 "  \"picSaturation\": %d,\n"
-                 "  \"dockedUiWidth\": %d,\n"
-                 "  \"handheldUiWidth\": %d,\n"
-                 "  \"language\": \"%s\",\n"
-                 "  \"accent\": \"%s\",\n"
-                 "  \"themeVariant\": \"%s\",\n"
-                 "  \"listStyle\": \"%s\"\n"
-                 "}\n",
-                 cfg.bufferMode, sTabStr,
-                 cfg.jackettUrl.c_str(),
-                 cfg.jackettApiKey.c_str(),
-                 cfg.jackettSetupAsked ? "true" : "false",
-                 cfg.torrServerUrl.c_str(),
-                 cfg.proxyUrl.c_str(),
-                 cfg.tmdbApiKey.c_str(),
-                 cfg.tmdbApiUrl.c_str(),
-                 cfg.tmdbImageUrl.c_str(),
-                 cfg.tmdbProxyUrl.c_str(),
-                 proxyLine.c_str(),
-                 cfg.logging ? "true" : "false", cfg.hide4k ? "true" : "false",
-                 cfg.rateGovernor ? "true" : "false",
-                 cfg.ramStream ? "true" : "false",
-                 cfg.checkUpdates ? "true" : "false", cfg.audioLang.c_str(),
-                 cfg.subLang.c_str(), cfg.subtitles ? "true" : "false",
-                 cfg.hwDecode ? "true" : "false",
-                 cfg.audioBoost ? "true" : "false", cfg.picBrightness,
-                 cfg.picContrast, cfg.picGamma, cfg.picSaturation, cfg.dockedUiWidth,
-                 cfg.handheldUiWidth, cfg.language.c_str(), cfg.accent.c_str(),
-                 cfg.themeVariant.c_str(), cfg.listStyle.c_str());
-    std::fclose(f);
+    if (cfg.tmdbProxyUserSet) kv("tmdbProxyEnabled", b(cfg.tmdbProxyEnabled));
+    kv("logging", b(cfg.logging));
+    kv("hide4k", b(cfg.hide4k));
+    kv("rateGovernor", b(cfg.rateGovernor));
+    kv("ramStream", b(cfg.ramStream));
+    kv("checkUpdates", b(cfg.checkUpdates));
+    kv("audioLang", jsonStr(cfg.audioLang));
+    kv("subLang", jsonStr(cfg.subLang));
+    kv("subtitles", b(cfg.subtitles));
+    kv("hwDecode", b(cfg.hwDecode));
+    kv("audioBoost", b(cfg.audioBoost));
+    kv("picBrightness", n(cfg.picBrightness));
+    kv("picContrast", n(cfg.picContrast));
+    kv("picGamma", n(cfg.picGamma));
+    kv("picSaturation", n(cfg.picSaturation));
+    kv("dockedUiWidth", n(cfg.dockedUiWidth));
+    kv("handheldUiWidth", n(cfg.handheldUiWidth));
+    kv("language", jsonStr(cfg.language));
+    kv("accent", jsonStr(cfg.accent));
+    kv("themeVariant", jsonStr(cfg.themeVariant));
+    o += "  \"listStyle\": " + jsonStr(cfg.listStyle) + "\n}\n";
+
+    // Atomic: rewritten in place, a power cut mid-save left an empty file --
+    // the Jackett address and key, the TMDB key and every setting gone.
+    if (!fsutil::writeAtomic(kPath, o))
+    {
+        brls::Logger::warning("[config] cannot write {}", kPath);
+        return false;
+    }
     return true;
 }
 

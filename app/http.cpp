@@ -18,10 +18,18 @@
 namespace http
 {
 
+// Answers held in memory (JSON, an image) are capped: an addon or a proxy
+// streaming an endless body would otherwise take the console's RAM with it.
+// Returning short makes curl fail the transfer (CURLE_WRITE_ERROR).
+static constexpr size_t kMaxBody = 32u * 1024 * 1024;
+
 static size_t writeCb(char* ptr, size_t size, size_t nmemb, void* userdata)
 {
-    ((std::string*)userdata)->append(ptr, size * nmemb);
-    return size * nmemb;
+    auto* s  = (std::string*)userdata;
+    size_t n = size * nmemb;
+    if (s->size() + n > kMaxBody) return 0;
+    s->append(ptr, n);
+    return n;
 }
 
 // Set by abortAll() as the app quits: every transfer in flight stops at its
@@ -41,6 +49,11 @@ static void stoppable(CURL* curl)
 {
     curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
     curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, stopCb);
+    // Every request goes through here, so the common limits do too: curl's
+    // own connect timeout is 300 s, and without NOSIGNAL a resolver timeout
+    // would use signals, which the worker threads cannot take.
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 15L);
+    curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
 }
 
 // Copied from config by applyProxy(): requests run on worker threads, which
@@ -327,8 +340,12 @@ bool downloadTorrent(const std::string& url, const std::string& path,
 {
     magnet.clear();
 
+    // Into .part, renamed over `path` only when complete: the cached .torrent
+    // a history entry or Continue points at must survive a failed refetch
+    // (Jackett offline, a magnet redirect, a cut transfer).
+    const std::string part = path + ".part";
     DlCtx ctx;
-    ctx.f = std::fopen(path.c_str(), "wb");
+    ctx.f = std::fopen(part.c_str(), "wb");
     if (!ctx.f)
     {
         err = "cannot write " + path;
@@ -339,7 +356,7 @@ bool downloadTorrent(const std::string& url, const std::string& path,
     if (!curl)
     {
         std::fclose(ctx.f);
-        std::remove(path.c_str());
+        std::remove(part.c_str());
         err = "cannot initialise the network";
         return false;
     }
@@ -354,6 +371,7 @@ bool downloadTorrent(const std::string& url, const std::string& path,
     curl_easy_setopt(curl, CURLOPT_HEADERDATA, &location);
     curl_easy_setopt(curl, CURLOPT_ERRORBUFFER, errbuf);
     curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L);
+    curl_easy_setopt(curl, CURLOPT_MAXFILESIZE, (long)(64 * 1024 * 1024));
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
     curl_easy_setopt(curl, CURLOPT_MAXREDIRS, 8L);
     // Only plain web redirects are followed; a magnet: one stops the transfer
@@ -366,24 +384,31 @@ bool downloadTorrent(const std::string& url, const std::string& path,
     long code   = 0;
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &code);
     curl_easy_cleanup(curl);
-    std::fclose(ctx.f);
+    bool closed = std::fclose(ctx.f) == 0;
 
     if (location.compare(0, 7, "magnet:") == 0 && (rc != CURLE_OK || (code >= 300 && code < 400)))
     {
-        std::remove(path.c_str());
+        std::remove(part.c_str());
         magnet = location;
         return true;
     }
     if (rc != CURLE_OK)
     {
-        std::remove(path.c_str());
+        std::remove(part.c_str());
         err = tlsAwareErr(rc, errbuf);
         return false;
     }
     if (code >= 400)
     {
-        std::remove(path.c_str());
+        std::remove(part.c_str());
         err = "HTTP " + std::to_string(code);
+        return false;
+    }
+    std::remove(path.c_str());  // FAT cannot rename over a file
+    if (!closed || std::rename(part.c_str(), path.c_str()) != 0)
+    {
+        std::remove(part.c_str());
+        err = "cannot write " + path;
         return false;
     }
     return true;

@@ -456,7 +456,8 @@ bool fetchCached(const Settings& s, const std::string& url, long ttlSec,
     std::string auth;
     if (isBearerToken(s.apiKey)) auth = "Authorization: Bearer " + s.apiKey;
     std::string resp;
-    bool ok = http::get(url, resp, err, auth.empty() ? nullptr : auth.c_str(), 20);
+    long status = 0;
+    bool ok = http::get(url, resp, err, auth.empty() ? nullptr : auth.c_str(), 20, &status);
     if (!ok)
     {
         // One more try: a flaky connection (Wi-Fi waking, a VPN or proxy
@@ -464,7 +465,8 @@ bool fetchCached(const Settings& s, const std::string& url, long ttlSec,
         // This runs on a worker thread, so the pause blocks nothing.
         std::this_thread::sleep_for(std::chrono::milliseconds(800));
         resp.clear();
-        ok = http::get(url, resp, err, auth.empty() ? nullptr : auth.c_str(), 20);
+        status = 0;
+        ok = http::get(url, resp, err, auth.empty() ? nullptr : auth.c_str(), 20, &status);
     }
     if (ok)
     {
@@ -472,6 +474,13 @@ bool fetchCached(const Settings& s, const std::string& url, long ttlSec,
         if (!tmdbErr.empty())
         {
             err = "TMDB: " + tmdbErr;
+            ok  = false;
+        }
+        // http::get succeeds on any answer: a proxy's 502 page or a 429 is
+        // not TMDB's, and cached it replaced the good copy for hours.
+        else if (status != 0 && (status < 200 || status >= 300))
+        {
+            err = "HTTP " + std::to_string(status);
             ok  = false;
         }
     }
@@ -483,13 +492,20 @@ bool fetchCached(const Settings& s, const std::string& url, long ttlSec,
                           std::to_string(std::hash<std::thread::id>()(std::this_thread::get_id()) %
                                          100000) +
                           ".tmp";
+        bool written = false;
         if (FILE* f = std::fopen(tmp.c_str(), "wb"))
         {
-            std::fwrite(resp.data(), 1, resp.size(), f);
-            std::fclose(f);
-            std::remove(path.c_str());
-            std::rename(tmp.c_str(), path.c_str());
+            written = std::fwrite(resp.data(), 1, resp.size(), f) == resp.size();
+            written = std::fclose(f) == 0 && written;
         }
+        if (written)
+        {
+            std::remove(path.c_str());
+            written = std::rename(tmp.c_str(), path.c_str()) == 0;
+        }
+        // A short write (full card) or the loser of a race on the same URL:
+        // keep the old copy, leave no .tmp behind.
+        if (!written) std::remove(tmp.c_str());
         body = std::move(resp);
         return true;
     }

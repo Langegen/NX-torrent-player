@@ -1240,6 +1240,10 @@ static void add_peers_src(torrentfs *t, const peer_addr *peers, int n, int src) 
         t->peer_src[slot]      = (uint8_t)src;
         t->peer_best_kbps[slot] = 0.0f;
         t->peer_rot[slot]      = 0;
+        // Per-address flags too: a new address must not inherit the evicted
+        // one's "TCP failed, try uTP" or "plaintext only".
+        t->peer_utp_retry[slot] = 0;
+        t->peer_mse_off[slot]   = 0;
         added++;
     }
     mutexUnlock(&t->lock);

@@ -307,6 +307,22 @@ void playJackettItem(const jackett::Item& item, const PlayHint& hint)
     // One file per link: history entries resume from this path later, so it
     // must not be overwritten by the next result played.
     std::string tempPath = jackett::cachedTorrentPath(link);
+    // Played before: the file is already here (and history or Continue may
+    // point at it). No refetch -- which also works with Jackett offline.
+    {
+        auto vids = parseTorrentVideos(tempPath);
+        if (!vids.empty())
+        {
+            brls::Logger::info("[play] using the cached {}", tempPath);
+            brls::sync([job, tempPath, vids]() {
+                if (*job->cancelled) return;
+                finish(job, [job, tempPath, vids]() {
+                    playWithVideos(job->hint, tempPath, vids);
+                });
+            });
+            return;
+        }
+    }
     jackett::downloadTorrentAsync(link, tempPath, [job, tempPath, magnet](
                                                       bool ok, const std::string& err,
                                                       const std::string& redirected) {

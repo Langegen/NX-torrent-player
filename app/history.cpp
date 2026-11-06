@@ -9,6 +9,7 @@
 #include <borealis.hpp>
 
 #include "appdata.hpp"
+#include "fsutil.hpp"
 #include "json.hpp"
 
 namespace history
@@ -53,28 +54,13 @@ void load()
     g_items.clear();
     g_loaded = true;
 
-    // save() removes the old file before renaming the new one into place (FAT
-    // will not rename over an existing file); a crash between the two leaves
-    // only the .tmp, which is complete -- read that rather than lose everything.
-    std::string tmp = std::string(APPDATA_HISTORY) + ".tmp";
-    FILE* f = std::fopen(APPDATA_HISTORY, "rb");
-    if (!f) f = std::fopen(tmp.c_str(), "rb");
-    if (!f) return;
-
-    std::fseek(f, 0, SEEK_END);
-    long sz = std::ftell(f);
-    std::fseek(f, 0, SEEK_SET);
-    if (sz <= 0)
-    {
-        std::fclose(f);
-        return;
-    }
-
+    // The saved file, or (cut short, or missing after a save cut between its
+    // renames) the .tmp or the version before -- see fsutil::writeAtomic.
     std::string body;
-    body.resize(sz);
-    size_t rd = std::fread(&body[0], 1, sz, f);
-    std::fclose(f);
-    body.resize(rd);
+    if (!fsutil::readFirst(APPDATA_HISTORY, body, [](const std::string& b) {
+            return fsutil::looksComplete(b);
+        }))
+        return;
 
     std::vector<std::string> objs = json::objects(body, "history");
     g_items.reserve(objs.size());
@@ -151,19 +137,10 @@ void save()
     }
     out += "  ]\n}\n";
 
-    std::string tmp = std::string(APPDATA_HISTORY) + ".tmp";
-    FILE* f = std::fopen(tmp.c_str(), "wb");
-    if (!f)
-    {
-        brls::Logger::error("[history] failed to open {} for writing", tmp);
-        return;
-    }
-    std::fwrite(out.data(), 1, out.size(), f);
-    std::fflush(f);
-    std::fclose(f);
-
-    std::remove(APPDATA_HISTORY);
-    std::rename(tmp.c_str(), APPDATA_HISTORY);
+    // Checked and atomic: an unchecked write on a full card used to replace
+    // the good file with a truncated one.
+    if (!fsutil::writeAtomic(APPDATA_HISTORY, out))
+        brls::Logger::error("[history] could not write {}", APPDATA_HISTORY);
 }
 
 std::vector<Item> all()

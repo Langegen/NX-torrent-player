@@ -34,6 +34,7 @@
 
 #include "appdata.hpp"
 #include "browse.hpp"
+#include "fsutil.hpp"
 #include "config.hpp"
 #include "http.hpp"
 #include "json.hpp"
@@ -340,13 +341,26 @@ static bool g_libFetched = false;
 
 LocalWatch lastWatch() { return g_lastWatch; }
 
+// An addon's JSON: http::get succeeds on any answer, and an addon's 500 page
+// was read (and cached for the session) as an empty result -- "No episodes
+// found", no genres, no streams. Anything but 2xx is an error here.
+static bool getJson(const std::string& url, std::string& resp, std::string& err)
+{
+    long status = 0;
+    if (!http::get(url, resp, err, nullptr, 25, &status)) return false;
+    if (status != 0 && (status < 200 || status >= 300))
+    {
+        err = "HTTP " + std::to_string(status);
+        resp.clear();
+        return false;
+    }
+    return true;
+}
+
 bool saveAuthKey(const std::string& key)
 {
-    FILE* f = std::fopen(kKeyPath, "w");
-    if (!f) return false;
-    std::fwrite(key.data(), 1, key.size(), f);
-    std::fclose(f);
-    return true;
+    // Atomic: rewritten in place, a cut write signed the user out.
+    return fsutil::writeAtomic(kKeyPath, key);
 }
 
 std::string loadAuthKey()
@@ -370,11 +384,7 @@ void clearAuthKey()
 
 bool saveEmail(const std::string& email)
 {
-    FILE* f = std::fopen(kEmailPath, "w");
-    if (!f) return false;
-    std::fwrite(email.data(), 1, email.size(), f);
-    std::fclose(f);
-    return true;
+    return fsutil::writeAtomic(kEmailPath, email);
 }
 
 std::string loadEmail()
@@ -1496,7 +1506,7 @@ void fetchMetaAsync(const std::string& addonBase, const std::string& type,
         std::string url =
             addonBase + "/meta/" + http::urlEncode(type) + "/" + http::urlEncode(id) + ".json";
         std::string resp, err;
-        if (!http::get(url, resp, err))
+        if (!getJson(url, resp, err))
         {
             r.error = err;
         }
@@ -1563,7 +1573,7 @@ void fetchStreamsAsync(const std::string& addonBase, const std::string& type,
         std::string url = addonBase + "/stream/" + http::urlEncode(type) + "/" +
                           http::urlEncode(id) + ".json";
         std::string resp, err;
-        if (!http::get(url, resp, err))
+        if (!getJson(url, resp, err))
         {
             r.error = err;
         }
@@ -1663,7 +1673,7 @@ void fetchSubtitlesAsync(const std::string& authKey, const std::string& type,
                 std::string url = a.base + "/subtitles/" + http::urlEncode(type) +
                                   "/" + http::urlEncode(videoId) + ".json";
                 std::string resp, err;
-                if (!http::get(url, resp, err))
+                if (!getJson(url, resp, err))
                 {
                     brls::Logger::warning("[stremio] subtitles from {} failed: {}",
                                           a.name, err);
@@ -1722,14 +1732,41 @@ void downloadSubtitleAsync(const Subtitle& sub,
         return;
     }
 
+    // A second request for a file still downloading waits for that one
+    // (two taps wrote the same file at once). UI thread only.
+    static std::map<std::string, std::vector<std::function<void(std::string)>>> inFlight;
+    auto it = inFlight.find(path);
+    if (it != inFlight.end())
+    {
+        it->second.push_back(done);
+        return;
+    }
+    inFlight[path].push_back(done);
+
     std::string url = sub.url;
-    workers::run([url, path, done]() {
+    workers::run([url, path]() {
+        // Into .part: the cache counts any file at `path` as a hit, so a
+        // download cut short there was served, truncated, from then on.
+        std::string part = path + ".part";
         std::string err;
-        bool ok = http::download(url, path, err);
+        bool ok = http::download(url, part, err);
+        if (ok)
+        {
+            std::remove(path.c_str());
+            ok = std::rename(part.c_str(), path.c_str()) == 0;
+            if (!ok) err = "cannot rename";
+        }
         if (!ok)
+        {
+            std::remove(part.c_str());
             brls::Logger::warning("[stremio] subtitle download failed: {}", err);
+        }
         std::string out = ok ? path : std::string();
-        brls::sync([done, out]() { done(out); });
+        brls::sync([path, out]() {
+            auto waiting = std::move(inFlight[path]);
+            inFlight.erase(path);
+            for (auto& cb : waiting) cb(out);
+        });
     });
 }
 
@@ -1777,7 +1814,8 @@ void fetchCatalogGenresAsync(const std::string& addonBase,
     workers::run([addonBase, type, catalogId, key, done]() {
         std::vector<std::string> genres;
         std::string resp, err;
-        if (!http::get(addonBase + "/manifest.json", resp, err))
+        bool fetched = getJson(addonBase + "/manifest.json", resp, err);
+        if (!fetched)
         {
             brls::Logger::warning("[stremio] manifest {} failed: {}", addonBase,
                                   err);
@@ -1800,9 +1838,10 @@ void fetchCatalogGenresAsync(const std::string& addonBase,
                                genres.size());
         }
         // Cached even when empty: a catalog with no genres must not be asked
-        // again every time its section is opened.
-        brls::sync([key, genres, done]() {
-            genreCache[key] = genres;
+        // again every time its section is opened. A failed request is not
+        // an answer, though: the next visit asks again.
+        brls::sync([key, genres, done, fetched]() {
+            if (fetched) genreCache[key] = genres;
             done(genres);
         });
     });
@@ -1823,7 +1862,7 @@ void fetchCatalogAsync(const std::string& addonBase, const std::string& type,
         LibraryResult r;
         std::string url = catalogUrl(addonBase, type, catalogId, query);
         std::string resp, err;
-        if (!http::get(url, resp, err))
+        if (!getJson(url, resp, err))
         {
             r.error = err;
         }
@@ -1864,7 +1903,7 @@ void fetchSearchAsync(const std::string& query,
             std::string url = std::string("https://v3-cinemeta.strem.io/catalog/") +
                               type + "/top/search=" + http::urlEncode(query) + ".json";
             std::string resp, err;
-            if (!http::get(url, resp, err)) continue;  // one type may fail; keep the other
+            if (!getJson(url, resp, err)) continue;  // one type may fail; keep the other
             for (const auto& o : json::objects(resp, "metas"))
             {
                 LibItem it;

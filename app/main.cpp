@@ -56,6 +56,7 @@
 #include "autotest.hpp"
 #include "widgets.hpp"  // ui::paintField
 #include "workers.hpp"  // workers::stop
+#include "fsutil.hpp"
 #include "history.hpp"
 #include "history_tab.hpp"
 #include "bookmarks.hpp"
@@ -529,12 +530,9 @@ void updateMagnetName(const std::string& magnet, const std::string& name)
         if (nl != std::string::npos) out += '\n';
     }
     if (!changed) return;
-    if (FILE* w = std::fopen(APPDATA_MAGNETS, "wb"))
-    {
-        std::fwrite(out.data(), 1, out.size(), w);
-        std::fclose(w);
+    // Atomic: the user's own list, rewritten in place, was lost to a cut write.
+    if (fsutil::writeAtomic(APPDATA_MAGNETS, out))
         brls::Logger::info("[magnet] saved name '{}' for {}", name, want);
-    }
 }
 
 std::vector<TorrentEntry> scanTorrents(const std::string& dir)
@@ -872,11 +870,8 @@ void removeMagnetFromFile(const std::string& magnet)
             if (nl != std::string::npos) out += '\n';
         }
     }
-    if (FILE* w = std::fopen(APPDATA_MAGNETS, "wb"))
-    {
-        std::fwrite(out.data(), 1, out.size(), w);
-        std::fclose(w);
-    }
+    if (!fsutil::writeAtomic(APPDATA_MAGNETS, out))
+        brls::Logger::warning("[magnet] could not write {}", APPDATA_MAGNETS);
 }
 
 // "Add magnet": the on-screen keyboard captures a magnet link or a bare hash.
