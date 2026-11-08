@@ -121,6 +121,10 @@ The entry point is `int main()` in `app/main.cpp`.
   on — the engine's own discovery finds them.
 - The Switch outputs stereo: mpv is forced to `audio-channels=stereo` or 5.1
   dialogue (centre channel) is lost.
+- **mpv (0.39 in portlibs) defaults to its old `gpu-hq` rendering**: linear,
+  kernel-widened downscaling and a per-frame HDR peak pass, too much for the
+  Tegra over a 4K frame. `startMpv` turns those off, and `applyRenderLoad`
+  drops the scalers to bilinear for video wider than 1920.
 - The portlibs **FFmpeg has no `https` protocol** (only file, http, ftp, tcp,
   udp, rtmp, tls, httpproxy; `tls` is libnx's ssl service). mpv opens `http://`
   and HLS over it itself; an `https://` URL is played as `nxhttps://` through

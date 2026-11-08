@@ -96,4 +96,11 @@ int matchEpisode(const std::vector<std::string>& paths, int season, int episode)
 // false when no episode is named, or no season is known.
 bool episodeOfFile(const std::string& path, int packSeason, int& season, int& episode);
 
+// The episode's own title out of a file name, for a list of a pack's files:
+// "Family.Guy.S08E16.April.in.Quahog.720p.WEB-DL.mkv" -> "April in Quahog",
+// "06. Пилот.mkv" -> "Пилот". What follows the episode marker, up to the first
+// release tag. A name with no marker gives its words up to the tags ("" when
+// nothing is left, as in "Серия 2.avi" or "S01E02.1080p.mkv").
+std::string episodeTitleOfFile(const std::string& path);
+
 } // namespace release

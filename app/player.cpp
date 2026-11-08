@@ -159,6 +159,11 @@ constexpr float kStickDeadzone   = 0.15f;
 constexpr double kSeekBaseRate   = 30.0;  // seconds of video per second, full tilt
 constexpr double kSeekAccelMax   = 12.0;  // held-down multiplier ceiling
 constexpr double kSeekAccelSecs  = 4.0;   // seconds of holding to reach it
+// The stick as a D-pad: how far it has to go before it counts as a press, and
+// how a held one repeats along the buttons.
+constexpr float kStickStep     = 0.5f;
+constexpr int kStickRepeatMs   = 420;  // first repeat
+constexpr int kStickRepeatNext = 160;  // then every
 
 // Material Icons padlock glyphs (present in the bundled MaterialIcons-Regular.ttf,
 // same font as the Options gear): the control-lock pill shows the open one as a
@@ -663,6 +668,18 @@ bool MpvView::startMpv()
     // (black frame). This is what the other Switch mpv players set too.
     mpv_set_option_string(mpv, "opengl-glfinish", "yes");
     mpv_set_option_string(mpv, "vd-lavc-dr", "yes");
+    // Rendering sized for the Switch's GPU. Since 0.37 mpv's defaults are its
+    // old "gpu-hq": downscaling in linear light with a kernel widened to the
+    // scale factor, sigmoidal upscaling, and an HDR peak measured by a compute
+    // pass every frame. Each is an extra full-size pass, and over a 4K frame
+    // they are more than the Tegra has -- 4K stuttered. These are the parts of
+    // mpv's own "fast" profile that cost the most and show the least; the
+    // scalers themselves drop to bilinear only for video above 1080p (see
+    // applyRenderLoad).
+    mpv_set_option_string(mpv, "correct-downscaling", "no");
+    mpv_set_option_string(mpv, "linear-downscaling", "no");
+    mpv_set_option_string(mpv, "sigmoid-upscaling", "no");
+    mpv_set_option_string(mpv, "hdr-compute-peak", "no");
     // A dead host should fail the open with a reason, not hang on the
     // loading screen (FFmpeg's http has no timeout of its own by default).
     if (direct)
@@ -715,6 +732,8 @@ bool MpvView::startMpv()
     mpv_observe_property(mpv, 0, "demuxer-cache-idle", MPV_FORMAT_FLAG);
     mpv_observe_property(mpv, 0, "time-pos", MPV_FORMAT_DOUBLE);
     mpv_observe_property(mpv, 0, "duration", MPV_FORMAT_DOUBLE);
+    // The decoded picture's width: above 1080p the scalers go cheap.
+    mpv_observe_property(mpv, 0, "width", MPV_FORMAT_INT64);
 
     if (direct)
     {
@@ -767,8 +786,10 @@ bool navFromKeys(brls::ControllerButton dpadTwin)
     brls::ControllerState st {};
     brls::Application::getPlatform()->getInputManager()->updateUnifiedControllerState(&st);
     if (st.buttons[dpadTwin]) return false;
+    // The same threshold the per-frame stick handler counts as a push, so
+    // there is no tilt at which both act.
     for (int a = 0; a < brls::_AXES_MAX; a++)
-        if (st.axes[a] <= -0.3f || st.axes[a] >= 0.3f) return false;
+        if (st.axes[a] <= -kStickDeadzone || st.axes[a] >= kStickDeadzone) return false;
     return true;
 }
 } // namespace
@@ -2085,20 +2106,6 @@ brls::Box* sidePanel(const std::string& titleText, brls::Box* content,
     panelOut = panel;
     return root;
 }
-
-// A column that hands the first focus to a chosen row (the current choice)
-// rather than to its first one, so a picker opens on what is playing.
-class PreferFocusBox : public brls::Box
-{
-  public:
-    brls::View* preferred = nullptr;
-    brls::View* getDefaultFocus() override
-    {
-        if (preferred)
-            if (brls::View* f = preferred->getDefaultFocus()) return f;
-        return brls::Box::getDefaultFocus();
-    }
-};
 } // namespace
 
 void MpvView::applyVideoSize(int mode)
@@ -2138,7 +2145,11 @@ void MpvView::openChoicePanel(const std::string& titleText,
     settingsOpen = true;
 
     brls::Box* panel = nullptr;
-    auto* content    = new PreferFocusBox();
+    // Opens on the current choice: borealis focuses a box's last focused child
+    // first and keeps it up to date as the cursor moves -- which is also what
+    // the CENTERED scroll follows. (A box that always named the current row
+    // pinned the list on it while the cursor walked off the screen.)
+    auto* content    = new brls::Box();
     auto* root       = sidePanel(titleText, content, panel, panelWidth());
 
     auto pick = std::make_shared<std::function<void(int)>>(std::move(onPick));
@@ -2159,7 +2170,7 @@ void MpvView::openChoicePanel(const std::string& titleText,
             return true;
         });
         content->addView(cell);
-        if ((int)i == current) content->preferred = cell;
+        if ((int)i == current) content->setLastFocusedView(cell);
     }
     if (labels.empty())
     {
@@ -2210,10 +2221,43 @@ void MpvView::openEpisodesPanel()
 {
     if (!ready || playlist.size() < 2) return;
     std::vector<std::string> labels, details;
+
+    // "Episode 16 · April in Quahog" rather than the file's name: in a pack
+    // every name starts with the same "Family.Guy.S08...", and that was all
+    // the row had room for. A pack of several seasons says which one.
+    std::vector<int> seasons(playlist.size(), 0), episodes(playlist.size(), 0);
+    int firstSeason = 0;
+    bool manySeasons = false;
+    for (size_t i = 0; i < playlist.size(); i++)
+    {
+        int s = 0, e = 0;
+        if (!release::episodeOfFile(playlist[i].path, watch.season, s, e)) continue;
+        seasons[i]  = s;
+        episodes[i] = e;
+        if (firstSeason == 0) firstSeason = s;
+        else if (s != firstSeason) manySeasons = true;
+    }
+
     for (size_t i = 0; i < playlist.size(); i++)
     {
         const PlaylistItem& p = playlist[i];
-        labels.push_back(p.label);
+        std::string name = release::episodeTitleOfFile(p.path);
+        std::string l;
+        if (episodes[i] > 0)
+        {
+            if (manySeasons)
+            {
+                char se[24];
+                std::snprintf(se, sizeof(se), "S%02dE%02d", seasons[i], episodes[i]);
+                l = se;
+            }
+            else
+                l = tr("Episode ") + std::to_string(episodes[i]);
+            if (!name.empty()) l += " \xC2\xB7 " + name;
+        }
+        else
+            l = name.empty() ? p.label : name;
+        labels.push_back(l);
         // Where each one stands, from the watch history: done, or where it
         // was left.
         std::string d;
@@ -2807,6 +2851,9 @@ void MpvView::pumpEvents()
                 else if (p->format == MPV_FORMAT_INT64 &&
                          std::strcmp(p->name, "file-size") == 0)
                     obsFileSize = *(int64_t*)p->data;
+                else if (p->format == MPV_FORMAT_INT64 &&
+                         std::strcmp(p->name, "width") == 0)
+                    applyRenderLoad(*(int64_t*)p->data);
                 break;
             }
             default:
@@ -2815,6 +2862,27 @@ void MpvView::pumpEvents()
                 break;
         }
     }
+}
+
+// The scalers for a picture `width` pixels wide. Up to 1080p mpv's own
+// (lanczos / hermite) cost little: the frame is at most the screen's size.
+// Above it -- 4K -- every one of them is a separable two-pass filter over the
+// full frame, chroma included, and bilinear is one texture fetch done by the
+// GPU's sampler: the difference between keeping up and dropping frames, for a
+// picture that is shrunk to 1080p or 720p anyway.
+void MpvView::applyRenderLoad(int64_t width)
+{
+    if (!mpv || width <= 0) return;
+    bool light = width > 1920;
+    if (light == lightScalers) return;
+    lightScalers = light;
+    brls::Logger::info("[player] {}px wide video: {} scalers", width,
+                       light ? "bilinear" : "default");
+    const char* up   = light ? "bilinear" : "lanczos";
+    const char* down = light ? "bilinear" : "hermite";
+    mpv_set_property_string(mpv, "scale", up);
+    mpv_set_property_string(mpv, "cscale", up);
+    mpv_set_property_string(mpv, "dscale", down);
 }
 
 // Paints `path` as the background, blurring it first when the artwork is a
@@ -4021,28 +4089,40 @@ void MpvView::updateSeekCommit()
     if (idle >= std::chrono::milliseconds(seekPaused ? 1200 : 900)) commitSeek();
 }
 
-// Analog scrubbing, driven every frame from the stick's X axis rather than from
-// button events: only the axis carries how far it is pushed, which is what makes
-// a slow nudge and a fast sweep the same gesture.
+// The sticks, driven every frame from the axes rather than from button events:
+// only the axis carries how far it is pushed, which is what makes a slow nudge
+// and a fast sweep the same scrub. (borealis' own stick events -- the
+// BUTTON_NAV_* ones -- are swallowed in registerPlayerActions.)
+//
+// A push is either a scrub or a step, decided as it leaves the centre:
+//   - sideways on the timeline, or with the panel down: scrub, analog;
+//   - sideways on the buttons: a D-pad press, repeating while held;
+//   - up / down anywhere: a D-pad press (panel up, timeline <-> buttons).
 void MpvView::updateStickSeek()
 {
     if (!ready || !mpv)
         return;
     // A side panel has the cursor, but the stick is polled straight off the
     // controller rather than routed through focus -- so without this it would
-    // go on scrubbing the video from under an open menu.
+    // go on scrubbing the video from under an open menu. The push in progress
+    // is dropped: it belonged to the panel.
     if (settingsOpen)
+    {
+        stickMode = StickMode::None;
         return;
+    }
 
     brls::ControllerState st {};
     brls::Application::getPlatform()->getInputManager()->updateUnifiedControllerState(&st);
-    // Either stick scrubs -- take whichever is pushed further from centre, so the
-    // right Joy-Con's stick works the same as the left one.
-    float lx = st.axes[brls::ControllerAxis::LEFT_X];
-    float rx = st.axes[brls::ControllerAxis::RIGHT_X];
-    float x  = (lx < 0 ? -lx : lx) >= (rx < 0 ? -rx : rx) ? lx : rx;
+    // Either stick works -- take whichever is pushed further from centre, so
+    // the right Joy-Con's stick works the same as the left one. Y grows
+    // downwards (borealis flips the hardware's axis).
+    auto stronger = [](float a, float b) { return std::fabs(a) >= std::fabs(b) ? a : b; };
+    float x  = stronger(st.axes[brls::ControllerAxis::LEFT_X], st.axes[brls::ControllerAxis::RIGHT_X]);
+    float y  = stronger(st.axes[brls::ControllerAxis::LEFT_Y], st.axes[brls::ControllerAxis::RIGHT_Y]);
+    float ax = std::fabs(x), ay = std::fabs(y);
 
-    bool pushed = x <= -kStickDeadzone || x >= kStickDeadzone;
+    bool pushed = ax >= kStickDeadzone || ay >= kStickDeadzone;
 
     // Locked: the stick is a blocked input like any other, so it flashes the
     // pill. Once per push, not once per frame: re-arming the timer every frame
@@ -4051,6 +4131,7 @@ void MpvView::updateStickSeek()
     {
         if (pushed && !stickWasPushed) flashLock();
         stickWasPushed = pushed;
+        stickMode      = StickMode::None;
         return;
     }
     stickWasPushed = pushed;
@@ -4065,7 +4146,55 @@ void MpvView::updateStickSeek()
 
     if (!pushed)
     {
-        seekHeld = 0.0;  // released: next push starts slow again
+        seekHeld  = 0.0;  // released: next push starts slow again
+        stickMode = StickMode::None;
+        return;
+    }
+
+    if (stickMode == StickMode::None)
+    {
+        bool onButtons = controlsShown && zone == Zone::Buttons;
+        if (ax >= ay && !onButtons)
+            stickMode = StickMode::Scrub;
+        else if (ax >= ay && ax >= kStickStep)
+        {
+            stickMode = StickMode::Step;
+            stickCmd  = x < 0 ? Cmd::Left : Cmd::Right;
+        }
+        else if (ay > ax && ay >= kStickStep)
+        {
+            stickMode = StickMode::Step;
+            stickCmd  = y < 0 ? Cmd::Up : Cmd::Down;
+        }
+        else
+            return;  // not far enough yet to tell which
+
+        if (stickMode == StickMode::Step)
+        {
+            command(stickCmd);
+            stickRepeatAt = now + std::chrono::milliseconds(kStickRepeatMs);
+            return;
+        }
+    }
+
+    if (stickMode == StickMode::Step)
+    {
+        // Held sideways on the buttons: walk along them. Up/down have only
+        // two rows to go between, so they do not repeat.
+        bool along = (stickCmd == Cmd::Left || stickCmd == Cmd::Right) && controlsShown &&
+                     zone == Zone::Buttons && ax >= kStickStep;
+        if (along && now >= stickRepeatAt)
+        {
+            command(stickCmd);
+            stickRepeatAt = now + std::chrono::milliseconds(kStickRepeatNext);
+        }
+        return;
+    }
+
+    // Scrub: only the sideways tilt counts.
+    if (ax < kStickDeadzone)
+    {
+        seekHeld = 0.0;
         return;
     }
 

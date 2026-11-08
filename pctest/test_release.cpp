@@ -168,6 +168,20 @@ static void test_match_episode()
     CHECK(release::episodeOfFile(numbered[2], 3, s, e) && s == 3 && e == 10);
     CHECK(!release::episodeOfFile(numbered[2], 0, s, e));
     CHECK(!release::episodeOfFile(pack[3], 1, s, e));  // a sample, no episode
+
+    // The episode's own title, for the player's episode list.
+    CHECK(release::episodeTitleOfFile(
+              "Family.Guy.S08.720p/Family.Guy.S08E16.April.in.Quahog.720p.WEB-DL.DDP5.1.H.264-NTb.mkv") ==
+          "April in Quahog");
+    CHECK(release::episodeTitleOfFile("Family.Guy.S08E15.Quagmire's.Dad.mkv") == "Quagmire's Dad");
+    CHECK(release::episodeTitleOfFile("Show - S01E02 - The Pilot - 1080p.mkv") == "The Pilot");
+    CHECK(release::episodeTitleOfFile("show.1x06.spider-man.x264-GRP.mkv") == "spider-man");
+    CHECK(release::episodeTitleOfFile("Show.S01E01E02.Two.Parts.[rus].mkv") == "Two Parts");
+    CHECK(release::episodeTitleOfFile(numbered[0]) == "Пилот");
+    CHECK(release::episodeTitleOfFile(pack[2]).empty());
+    CHECK(release::episodeTitleOfFile(russian[1]).empty());
+    CHECK(release::episodeTitleOfFile(seasons[0]).empty());
+    CHECK(release::episodeTitleOfFile("Show.S02E03.Title.2019.1080p.mkv") == "Title");
     std::printf("      PASSED\n");
 }
 

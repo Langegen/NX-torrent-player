@@ -360,6 +360,10 @@ class MpvView : public brls::Box
     int videoSize = 0;
     void applyVideoSize(int mode);
 
+    // Bilinear scalers for video above 1080p (4K), mpv's own below.
+    bool lightScalers = false;
+    void applyRenderLoad(int64_t width);
+
     // ---- Episodes -------------------------------------------------------
     // A torrent with several videos (a season pack) is its own playlist, as
     // in Lampa: the episodes are its files, and moving between them reopens
@@ -492,6 +496,19 @@ class MpvView : public brls::Box
     // this is what turns it into one -- needed to flash the lock pill once per
     // push while locked instead of on every frame it is held.
     bool stickWasPushed = false;
+    // What the current push of the stick is, decided when it leaves the centre
+    // and kept until it returns: a scrub of the timeline, or a D-pad-like step
+    // (up/down between the rows, left/right along the buttons) that repeats
+    // while held. A diagonal wobble mid-push does not switch between them.
+    enum class StickMode
+    {
+        None,
+        Scrub,
+        Step,
+    };
+    StickMode stickMode = StickMode::None;
+    Cmd stickCmd        = Cmd::Up;
+    std::chrono::steady_clock::time_point stickRepeatAt;
     std::chrono::steady_clock::time_point seekLastFrame;
     bool seekFrameValid = false;
 

@@ -665,6 +665,181 @@ int matchEpisode(const std::vector<std::string>& paths, int season, int episode)
     return tie ? -1 : best;
 }
 
+namespace
+{
+bool digitsOnly(const std::string& s)
+{
+    if (s.empty()) return false;
+    for (char c : s)
+        if (!std::isdigit((unsigned char)c)) return false;
+    return true;
+}
+
+// Digits at t[i..] (1 to max of them), advancing i; -1 when none.
+int digitsAt(const std::string& t, size_t& i, size_t max)
+{
+    size_t k = 0;
+    int n    = 0;
+    while (i < t.size() && k < max && std::isdigit((unsigned char)t[i]))
+    {
+        n = n * 10 + (t[i] - '0');
+        i++;
+        k++;
+    }
+    if (k == 0 || (i < t.size() && std::isdigit((unsigned char)t[i]))) return -1;
+    return n;
+}
+
+// One token (lower case) that names the episode: "s08e16", "s01e01e02",
+// "s01e01-e02", "1x06", "e06", "ep06".
+bool isEpisodeToken(const std::string& t)
+{
+    size_t i = 0;
+    if (t.size() < 2) return false;
+    if (t[0] == 's')
+    {
+        i = 1;
+        if (digitsAt(t, i, 2) < 0 || i >= t.size() || t[i] != 'e') return false;
+        i++;
+        if (digitsAt(t, i, 3) < 0) return false;
+        return i == t.size() || t[i] == 'e' || t[i] == '-';
+    }
+    if (std::isdigit((unsigned char)t[0]))
+    {
+        if (digitsAt(t, i, 2) < 0 || i >= t.size() || t[i] != 'x') return false;
+        i++;
+        if (digitsAt(t, i, 3) < 0) return false;
+        return i == t.size() || t[i] == '-';
+    }
+    if (t[0] == 'e')
+    {
+        i = (t.size() > 2 && t[1] == 'p') ? 2 : 1;
+        return digitsAt(t, i, 3) >= 0 && i == t.size();
+    }
+    return false;
+}
+
+// A release tag: resolution, source, codec, audio, language, scene flags --
+// where the title part of a file name ends. `t` is lower case.
+bool isTagToken(const std::string& raw, const std::string& next)
+{
+    std::string t = raw;
+    size_t dash   = t.find('-');
+    if (dash != std::string::npos && dash > 0) t = t.substr(0, dash);  // "x264-NTb", "web-dl"
+    if (t.empty()) return false;
+
+    static const char* const tags[] = {
+        "4k", "8k", "uhd", "hdr", "hdr10", "dv", "dovi", "sdr", "10bit", "8bit", "hevc",
+        "avc", "xvid", "divx", "x264", "x265", "h264", "h265", "av1", "web", "webrip",
+        "webdl", "blu", "bluray", "bdrip", "brrip", "bdremux", "remux", "hdtv", "hdrip",
+        "dvdrip", "dvd", "rip", "proper", "repack", "internal", "amzn", "nf", "dsnp",
+        "hulu", "atvp", "hmax", "pcok", "multi", "rus", "eng", "ukr", "dub", "mvo", "dvo",
+        "avo", "aac", "ac3", "eac3", "dts", "truehd", "atmos", "flac", "opus", "mp3",
+    };
+    for (const char* k : tags)
+        if (t == k) return true;
+    // "DDP5.1", "DD5.1", "AAC2.0": the channel count rides on the codec.
+    for (const char* k : { "ddp", "dd5", "dd2", "aac", "eac3", "ac3", "dts" })
+        if (t.compare(0, std::strlen(k), k) == 0) return true;
+    // 720p, 1080p, 2160p, 1080i.
+    if (t.size() >= 4 && t.size() <= 5 && (t.back() == 'p' || t.back() == 'i') &&
+        digitsOnly(t.substr(0, t.size() - 1)))
+        return true;
+    // "H.264" split at the dot.
+    if ((t == "h" || t == "x") && (next == "264" || next == "265")) return true;
+    return false;
+}
+
+bool isYear(const std::string& t)
+{
+    if (t.size() != 4 || !digitsOnly(t)) return false;
+    int y = std::atoi(t.c_str());
+    return y >= 1900 && y <= 2099;
+}
+} // namespace
+
+std::string episodeTitleOfFile(const std::string& path)
+{
+    size_t slash     = path.find_last_of("/\\");
+    std::string base = slash == std::string::npos ? path : path.substr(slash + 1);
+    // The extension: a short run of letters and digits after the last dot.
+    size_t dot = base.find_last_of('.');
+    if (dot != std::string::npos && dot > 0 && base.size() - dot - 1 >= 2 &&
+        base.size() - dot - 1 <= 4)
+    {
+        bool ext = true;
+        for (size_t i = dot + 1; i < base.size(); i++)
+            if (!std::isalnum((unsigned char)base[i])) ext = false;
+        if (ext) base = base.substr(0, dot);
+    }
+
+    std::vector<std::string> tok;
+    std::string cur;
+    for (char c : base)
+    {
+        if (c == '.' || c == '_' || c == ' ')
+        {
+            if (!cur.empty()) tok.push_back(cur);
+            cur.clear();
+        }
+        else
+            cur += c;
+    }
+    if (!cur.empty()) tok.push_back(cur);
+    std::vector<std::string> low;
+    for (const auto& t : tok) low.push_back(lower(t));
+
+    // Where the title starts: after the episode marker -- "S08E16", "1x06",
+    // "E06", "Ep 06", "Серия 6", or a leading number ("06. Title").
+    size_t from = 0;
+    for (size_t i = 0; i < tok.size(); i++)
+    {
+        if (isEpisodeToken(low[i]))
+        {
+            from = i + 1;
+            // "S01E16.E17": the rest of a double episode.
+            while (from < tok.size() && isEpisodeToken(low[from])) from++;
+            break;
+        }
+        if ((low[i] == "ep" || low[i] == "episode" || low[i] == "серия") &&
+            i + 1 < tok.size() && digitsOnly(low[i + 1]) && low[i + 1].size() <= 3)
+        {
+            from = i + 2;
+            break;
+        }
+    }
+    if (from == 0 && !tok.empty() && digitsOnly(low[0]) && low[0].size() <= 3) from = 1;
+
+    std::vector<std::string> out;
+    for (size_t i = from; i < tok.size(); i++)
+    {
+        const std::string& t = low[i];
+        const std::string next = i + 1 < tok.size() ? low[i + 1] : "";
+        if (t[0] == '[') break;
+        if (t[0] == '(')
+        {
+            std::string in = t.substr(1);
+            if (!in.empty() && in.back() == ')') in.pop_back();
+            if (isYear(in) || isTagToken(in, "")) break;
+        }
+        // A year ends it once there is a title before it ("1917" alone is one).
+        if (isYear(t) && !out.empty()) break;
+        if (isTagToken(t, next)) break;
+        out.push_back(tok[i]);
+    }
+    // Separators left at either end: "Show - S01E02 - Title - 1080p".
+    while (!out.empty() && out.front() == "-") out.erase(out.begin());
+    while (!out.empty() && out.back() == "-") out.pop_back();
+
+    std::string s;
+    for (const auto& w : out)
+    {
+        if (!s.empty()) s += ' ';
+        s += w;
+    }
+    return s;
+}
+
 bool episodeOfFile(const std::string& path, int packSeason, int& season, int& episode)
 {
     int s = -1, e = -1;
