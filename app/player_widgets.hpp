@@ -90,6 +90,21 @@ class Shade : public brls::Box
     int alpha;
 };
 
+// The console's battery, drawn as a battery: an outline with a nub, filled to
+// `level` (0..100) -- red when low -- and a bolt over it while charging. The
+// percentage is a Label beside it (MpvView), in the panel's own font.
+class Battery : public brls::Box
+{
+  public:
+    Battery();
+
+    void draw(NVGcontext* vg, float x, float y, float width, float height,
+              brls::Style style, brls::FrameContext* ctx) override;
+
+    int level     = 100;
+    bool charging = false;
+};
+
 // A row whose value changes in place: left/right step it (held, they repeat)
 // and OK does `onOk` -- by default the next value, wrapping round. A dropdown
 // cost three presses a notch and hid the video behind its list; this is one

@@ -1312,12 +1312,43 @@ void MpvView::activateButton(int b)
 
 namespace
 {
-// A SelectorCell whose value (the track name) truncates to the cell width instead
-// of wrapping and overflowing the dialog, and marquee-scrolls while the cell is
-// focused -- same idea as the source cards' lines.
-class TrackCell : public brls::SelectorCell
+// A one-choice list a level above the settings panel (defined below, with
+// the panel's frame). `under` is hidden while it is up; onPick runs once it
+// has closed, and only while `underAlive`.
+void openListPanel(const std::string& title, const std::vector<std::string>& labels,
+                   int current, brls::View* under, std::shared_ptr<bool> underAlive,
+                   std::function<void(int)> onPick);
+
+// A row whose value (the track name) truncates to the cell width instead of
+// wrapping and overflowing the panel, and marquee-scrolls while the cell is
+// focused -- same idea as the source cards' lines. OK opens the choices as a
+// side list (openListPanel), not borealis' Dropdown: its RecyclerFrame broke
+// and stopped scrolling on a release with dozens of dubs or subtitles.
+class TrackCell : public brls::DetailCell
 {
   public:
+    // `under` is the settings panel this row is in, `underAlive` its flag.
+    void init(const std::string& name, std::vector<std::string> values, int current,
+              std::function<void(int)> onPick, brls::View* under,
+              std::shared_ptr<bool> underAlive)
+    {
+        setText(name);
+        labels   = std::move(values);
+        selected = current;
+        showSelected();
+        auto pick = std::make_shared<std::function<void(int)>>(std::move(onPick));
+        registerClickAction([this, name, pick, under, underAlive](brls::View*) {
+            openListPanel(name, labels, selected, under, underAlive,
+                          [this, pick, underAlive](int i) {
+                              if (!*underAlive || i < 0 || i >= (int)labels.size()) return;
+                              selected = i;
+                              showSelected();
+                              (*pick)(i);
+                          });
+            return true;
+        });
+    }
+
     TrackCell()
     {
         // The value label ships with shrink=0, so a long track name forced its
@@ -1340,14 +1371,24 @@ class TrackCell : public brls::SelectorCell
     }
     void onFocusGained() override
     {
-        brls::SelectorCell::onFocusGained();
+        brls::DetailCell::onFocusGained();
         detail->setAnimated(true);
     }
     void onFocusLost() override
     {
-        brls::SelectorCell::onFocusLost();
+        brls::DetailCell::onFocusLost();
         detail->setAnimated(false);
     }
+
+  private:
+    void showSelected()
+    {
+        bool ok = selected >= 0 && selected < (int)labels.size();
+        setDetailText(ok ? labels[(size_t)selected] : "");
+        setDetailTextColor(theme::accentText());
+    }
+    std::vector<std::string> labels;
+    int selected = 0;
 };
 
 using player_ui::StepperCell;
@@ -2106,6 +2147,64 @@ brls::Box* sidePanel(const std::string& titleText, brls::Box* content,
     panelOut = panel;
     return root;
 }
+
+// The rows of a one-choice list: the current one marked, `details` beside
+// each. OK on a row closes the list, then hands its index to onPick.
+void fillChoiceList(brls::Box* content, const std::vector<std::string>& labels,
+                    const std::vector<std::string>& details, int current,
+                    std::function<void(int)> onPick)
+{
+    // Opens on the current choice: borealis focuses a box's last focused child
+    // first and keeps it up to date as the cursor moves -- which is also what
+    // the CENTERED scroll follows. (A box that always named the current row
+    // pinned the list on it while the cursor walked off the screen.)
+    auto pick = std::make_shared<std::function<void(int)>>(std::move(onPick));
+    for (size_t i = 0; i < labels.size(); i++)
+    {
+        auto* cell = new brls::DetailCell();
+        cell->title->setSingleLine(true);
+        cell->setText(((int)i == current ? "\xE2\x97\x8F  " : "     ") + labels[i]);
+        if ((int)i == current) cell->setTextColor(theme::accentText());
+        std::string d = i < details.size() ? details[i] : "";
+        cell->setDetailText(d);
+        cell->setDetailTextColor(theme::textMuted());
+        // An empty detail label still claims its width and cuts the title.
+        if (d.empty()) cell->detail->setVisibility(brls::Visibility::GONE);
+        int idx = (int)i;
+        cell->registerClickAction([pick, idx](brls::View*) {
+            auto p = pick;  // the pop frees the cell, and this lambda with it
+            brls::Application::popActivity(brls::TransitionAnimation::FADE,
+                                           [p, idx]() { (*p)(idx); });
+            return true;
+        });
+        content->addView(cell);
+        if ((int)i == current) content->setLastFocusedView(cell);
+    }
+    if (labels.empty())
+    {
+        auto* cell = new brls::DetailCell();
+        cell->setText(tr("None"));
+        cell->setFocusable(true);
+        content->addView(cell);
+    }
+}
+
+void openListPanel(const std::string& title, const std::vector<std::string>& labels,
+                   int current, brls::View* under, std::shared_ptr<bool> underAlive,
+                   std::function<void(int)> onPick)
+{
+    brls::Box* panel = nullptr;
+    auto* content    = new brls::Box();
+    auto* root       = sidePanel(title, content, panel, panelWidth());
+    fillChoiceList(content, labels, {}, current, std::move(onPick));
+
+    // Same place as the settings panel under it, which is translucent too:
+    // hidden, or its rows show through (as for the picture rows).
+    under->setVisibility(brls::Visibility::INVISIBLE);
+    brls::Application::pushActivity(new PlayerSettingsActivity(root, [under, underAlive]() {
+        if (*underAlive) under->setVisibility(brls::Visibility::VISIBLE);
+    }));
+}
 } // namespace
 
 void MpvView::applyVideoSize(int mode)
@@ -2145,40 +2244,9 @@ void MpvView::openChoicePanel(const std::string& titleText,
     settingsOpen = true;
 
     brls::Box* panel = nullptr;
-    // Opens on the current choice: borealis focuses a box's last focused child
-    // first and keeps it up to date as the cursor moves -- which is also what
-    // the CENTERED scroll follows. (A box that always named the current row
-    // pinned the list on it while the cursor walked off the screen.)
     auto* content    = new brls::Box();
     auto* root       = sidePanel(titleText, content, panel, panelWidth());
-
-    auto pick = std::make_shared<std::function<void(int)>>(std::move(onPick));
-    for (size_t i = 0; i < labels.size(); i++)
-    {
-        auto* cell = new brls::DetailCell();
-        cell->title->setSingleLine(true);
-        cell->setText(((int)i == current ? "\xE2\x97\x8F  " : "     ") + labels[i]);
-        if ((int)i == current) cell->setTextColor(theme::accentText());
-        std::string d = i < details.size() ? details[i] : "";
-        cell->setDetailText(d);
-        cell->setDetailTextColor(theme::textMuted());
-        int idx = (int)i;
-        cell->registerClickAction([pick, idx](brls::View*) {
-            auto p = pick;  // the pop frees the cell, and this lambda with it
-            brls::Application::popActivity(brls::TransitionAnimation::FADE,
-                                           [p, idx]() { (*p)(idx); });
-            return true;
-        });
-        content->addView(cell);
-        if ((int)i == current) content->setLastFocusedView(cell);
-    }
-    if (labels.empty())
-    {
-        auto* cell = new brls::DetailCell();
-        cell->setText(tr("None"));
-        cell->setFocusable(true);
-        content->addView(cell);
-    }
+    fillChoiceList(content, labels, details, current, std::move(onPick));
 
     auto liveFlag = this->alive;
     brls::Application::pushActivity(new PlayerSettingsActivity(root, [this, liveFlag]() {
@@ -2304,6 +2372,9 @@ void MpvView::openTrackMenu()
     brls::Box* panel   = nullptr;
     auto* content      = new brls::Box();
     auto* root         = sidePanel(tr("Playback"), content, panel, panelWidth());
+    // Lets the lists a level above (tracks, picture) know this one is gone
+    // (both close at once when the player leaves).
+    auto panelAlive = std::make_shared<bool>(true);
 
     // The index whose value sits closest to `x`: these are doubles read back from
     // mpv, so matching them by equality would fail on the first rounding.
@@ -2355,7 +2426,7 @@ void MpvView::openTrackMenu()
             char v[24];
             std::snprintf(v, sizeof(v), "%lld", (long long)aIds[sel]);
             mpv_set_property_string(mpv, "aid", v);
-        });
+        }, panel, panelAlive);
         content->addView(a);
     }
 
@@ -2391,10 +2462,6 @@ void MpvView::openTrackMenu()
             applyVideoSize(n);
             return true;
         }));
-
-    // Lets the picture panel know this one is gone (both close at once when
-    // the player leaves).
-    auto panelAlive = std::make_shared<bool>(true);
 
     // The picture on the console's own screen (picture.hpp): one row here,
     // the four settings a level below (openPicturePanel), so they do not
@@ -2442,7 +2509,7 @@ void MpvView::openTrackMenu()
             auto* s = new TrackCell();
             s->init(tr("Subtitles"), labels, cur, [this, picks](int sel) {
                 applySubPick(picks[(size_t)sel]);
-            });
+            }, panel, panelAlive);
             content->addView(s);
         }
         else  // nothing anywhere: say so rather than offering a bare "Off"
@@ -4288,12 +4355,29 @@ void MpvView::buildControls()
         right->setAxis(brls::Axis::COLUMN);
         right->setAlignItems(brls::AlignItems::FLEX_END);
 
+        // The battery, then the clock, on one line.
+        auto* clockRow = new brls::Box();
+        clockRow->setAxis(brls::Axis::ROW);
+        clockRow->setAlignItems(brls::AlignItems::CENTER);
+
+        barBattery = new player_ui::Battery();
+        barBattery->setMarginRight(8.0f);
+        clockRow->addView(barBattery);
+
+        barBatteryPct = new brls::Label();
+        barBatteryPct->setText("");
+        barBatteryPct->setFontSize(20.0f);
+        barBatteryPct->setTextColor(dim);
+        barBatteryPct->setMarginRight(22.0f);
+        clockRow->addView(barBatteryPct);
+
         barClock = new brls::Label();
         barClock->setText("");
         barClock->setFontSize(28.0f);
         barClock->setTextColor(white);
         barClock->setHorizontalAlign(brls::HorizontalAlign::RIGHT);
-        right->addView(barClock);
+        clockRow->addView(barClock);
+        right->addView(clockRow);
 
         barEnds = new brls::Label();
         barEnds->setText("");
@@ -4488,6 +4572,7 @@ void MpvView::updateControls()
         std::strftime(buf, sizeof(buf), "%H:%M", tm);
         setIfChanged(barClock, buf);
     }
+    updateBattery();
     if (obsDur > 0.0 && obsPos >= 0.0)
     {
         double speed = playSpeed > 0.0 ? playSpeed : 1.0;
@@ -4498,6 +4583,28 @@ void MpvView::updateControls()
             setIfChanged(barEnds, std::string(tr("Ends at ")) + buf);
         }
     }
+}
+
+// The battery beside the clock, read with it once a second (psm on the
+// console). Gone where the platform has none to show (a desktop PC).
+void MpvView::updateBattery()
+{
+    if (!barBattery || !barBatteryPct) return;
+    brls::Platform* p = brls::Application::getPlatform();
+    if (!p || !p->canShowBatteryLevel())
+    {
+        barBattery->setVisibility(brls::Visibility::GONE);
+        barBatteryPct->setVisibility(brls::Visibility::GONE);
+        return;
+    }
+    int level = p->getBatteryLevel();
+    if (level < 0) level = 0;
+    if (level > 100) level = 100;
+    barBattery->level    = level;
+    barBattery->charging = p->isBatteryCharging();
+    setIfChanged(barBatteryPct, std::to_string(level) + "%");
+    barBatteryPct->setTextColor(level <= 15 && !barBattery->charging ? nvgRGB(240, 96, 96)
+                                                                     : nvgRGB(196, 196, 202));
 }
 
 // Renders mpv's current frame into the framebuffer borealis is drawing, in

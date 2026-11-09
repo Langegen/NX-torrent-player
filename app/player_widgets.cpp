@@ -334,6 +334,70 @@ void Shade::draw(NVGcontext* vg, float x, float y, float w, float h, brls::Style
     brls::Box::draw(vg, x, y, w, h, style, ctx);
 }
 
+Battery::Battery()
+{
+    setWidth(40.0f);
+    setHeight(20.0f);
+}
+
+void Battery::draw(NVGcontext* vg, float x, float y, float w, float h, brls::Style style,
+                   brls::FrameContext* ctx)
+{
+    const float nubW = 3.0f;
+    const float bodyW = w - nubW - 1.0f;
+    const NVGcolor white = nvgRGBA(255, 255, 255, 235);
+
+    // The outline and the nub on the right.
+    nvgBeginPath(vg);
+    nvgRoundedRect(vg, x + 1.0f, y + 1.0f, bodyW - 2.0f, h - 2.0f, 4.0f);
+    nvgStrokeColor(vg, white);
+    nvgStrokeWidth(vg, 2.0f);
+    nvgStroke(vg);
+    nvgBeginPath(vg);
+    nvgRoundedRect(vg, x + bodyW, y + h * 0.3f, nubW, h * 0.4f, 1.5f);
+    nvgFillColor(vg, white);
+    nvgFill(vg);
+
+    // The charge, inset from the outline.
+    int lv = level < 0 ? 0 : level > 100 ? 100 : level;
+    const float inset = 4.0f;
+    float fullW = bodyW - inset * 2.0f;
+    float fillW = fullW * (float)lv / 100.0f;
+    if (lv > 0 && fillW < 2.0f) fillW = 2.0f;
+    if (fillW > 0.0f)
+    {
+        NVGcolor fill = charging ? nvgRGB(92, 214, 120)
+                        : lv <= 15 ? nvgRGB(240, 72, 72)
+                                   : white;
+        nvgBeginPath(vg);
+        nvgRoundedRect(vg, x + inset, y + inset, fillW, h - inset * 2.0f, 1.5f);
+        nvgFillColor(vg, fill);
+        nvgFill(vg);
+    }
+
+    // A bolt across the middle while it charges, outlined in black so it
+    // reads over the fill as well as over the empty part.
+    if (charging)
+    {
+        float cx = x + bodyW * 0.5f, cy = y + h * 0.5f;
+        nvgBeginPath(vg);
+        nvgMoveTo(vg, cx + 2.5f, cy - 8.0f);
+        nvgLineTo(vg, cx - 5.0f, cy + 1.5f);
+        nvgLineTo(vg, cx - 0.5f, cy + 1.5f);
+        nvgLineTo(vg, cx - 2.5f, cy + 8.0f);
+        nvgLineTo(vg, cx + 5.0f, cy - 1.5f);
+        nvgLineTo(vg, cx + 0.5f, cy - 1.5f);
+        nvgClosePath(vg);
+        nvgFillColor(vg, white);
+        nvgFill(vg);
+        nvgStrokeColor(vg, nvgRGBA(0, 0, 0, 200));
+        nvgStrokeWidth(vg, 1.2f);
+        nvgStroke(vg);
+    }
+
+    brls::Box::draw(vg, x, y, w, h, style, ctx);
+}
+
 StepperCell::StepperCell(const std::string& titleText, std::function<std::string()> valueFn,
                          std::function<bool(int)> stepFn, std::function<void()> onOk)
     : value(std::move(valueFn)), step(std::move(stepFn))

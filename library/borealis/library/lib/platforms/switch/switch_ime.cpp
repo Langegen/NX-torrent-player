@@ -21,6 +21,7 @@ limitations under the License.
 #include <borealis/platforms/switch/switch_ime.hpp>
 #include <cstring>
 #include <iostream>
+#include <vector>
 
 namespace brls
 {
@@ -87,24 +88,39 @@ bool SwitchImeManager::openForText(std::function<void(std::string)> f, std::stri
     std::string subText, int maxStringLength, std::string initialText,
     int kbdDisableBitmask)
 {
-    SwkbdConfig config = createSwkbdBaseConfig(headerText, subText, maxStringLength, initialText);
+    // LOCAL PATCH (NX-torrent-player). The stock version froze the console on
+    // the server-address fields -- the only calls passing a sub text, and the
+    // only ones that hung. Above 32 characters swkbd draws the input as a box
+    // and shows no header or sub text anyway (libnx, SwkbdTextDrawType), so
+    // the hint goes in as the guide text, shown in the empty field: the way
+    // the app's own magnet prompt has always called it. Also: a failed
+    // swkbdCreate is no longer used, and the answer has room for a full
+    // maxStringLength of UTF-8 (it was a fixed 256 bytes).
+    SwkbdConfig config;
+    if (R_FAILED(swkbdCreate(&config, 0)))
+        return false;
 
-    swkbdConfigSetType(&config, SwkbdType_All);
+    swkbdConfigMakePresetDefault(&config);
+    swkbdConfigSetType(&config, SwkbdType_All);  // Cyrillic in a search
+    swkbdConfigSetHeaderText(&config, headerText.c_str());
+    if (maxStringLength > 0 && maxStringLength <= 32)
+        swkbdConfigSetSubText(&config, subText.c_str());
+    swkbdConfigSetGuideText(&config, (subText.empty() ? headerText : subText).c_str());
+    if (maxStringLength > 0)
+        swkbdConfigSetStringLenMax(&config, maxStringLength);
+    if (!initialText.empty())
+        swkbdConfigSetInitialText(&config, initialText.c_str());
     swkbdConfigSetKeySetDisableBitmask(&config, getSwkbdKeyDisableBitmask(kbdDisableBitmask));
 
-    char buffer[0x100];
-
-    if (R_SUCCEEDED(swkbdShow(&config, buffer, 0x100)))
-    {
-        f(buffer);
-
-        swkbdClose(&config);
-        return true;
-    }
-
+    std::vector<char> buffer((maxStringLength > 64 ? maxStringLength : 64) * 4 + 1, 0);
+    Result rc = swkbdShow(&config, buffer.data(), buffer.size());
     swkbdClose(&config);
 
-    return false;
+    if (R_FAILED(rc))
+        return false;
+
+    f(std::string(buffer.data()));
+    return true;
 }
 
 bool SwitchImeManager::openForNumber(std::function<void(long)> f, std::string headerText,

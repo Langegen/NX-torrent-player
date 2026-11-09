@@ -127,6 +127,9 @@ class SearchScreen : public brls::Box
     // The third type: Japanese animation, films and series both (kind is
     // Series then, for the genre list).
     bool anime = false;
+    // The default: films, shows and anime at once, as three sections one
+    // under another (runAll). The genres are the films' then.
+    bool all = true;
     int genre    = 0;
     int yearIdx  = 0;
     tmdb::Discover::Sort sort = tmdb::Discover::Sort::Popular;
@@ -138,6 +141,7 @@ class SearchScreen : public brls::Box
     brls::ScrollingFrame* scroll = nullptr;
     brls::Box* body = nullptr;
     brls::Box* tiles = nullptr;
+    brls::Box* sections = nullptr;  // "All": a heading and a grid per type
     PosterGrid* grid = nullptr;
     bool gridShown = false;
 
@@ -160,7 +164,8 @@ class SearchScreen : public brls::Box
             barText->setText(query);
             barText->setTextColor(theme::text());
         }
-        kindBtn->setText(anime ? tr("Anime")
+        kindBtn->setText(all ? tr("All")
+                         : anime ? tr("Anime")
                          : kind == content::Kind::Series ? tr("Shows") : tr("Movies"));
         genreBtn->setText(genreName());
         const YearChoice& y = yearChoices()[yearIdx];
@@ -187,6 +192,13 @@ class SearchScreen : public brls::Box
             }
     }
 
+    void dropSections()
+    {
+        if (!sections) return;
+        body->removeView(sections);
+        sections = nullptr;
+    }
+
     void showTiles()
     {
         parkFocus();
@@ -195,6 +207,7 @@ class SearchScreen : public brls::Box
             body->removeView(grid, false);  // kept for the next search
             gridShown = false;
         }
+        dropSections();
         if (tiles)
         {
             body->removeView(tiles);
@@ -270,21 +283,145 @@ class SearchScreen : public brls::Box
     {
         if (query.empty()) return true;  // discover filtered it already
         if (anime && !tmdb::isAnime(it)) return false;
-        if (genre)
-        {
-            bool has = false;
-            for (int g : it.genreIds) has = has || g == genre;
-            if (!has) return false;
-        }
+        return hasGenre(it, genre) && inYears(it);
+    }
+
+    static bool hasGenre(const content::Item& it, int id)
+    {
+        if (!id) return true;
+        for (int g : it.genreIds)
+            if (g == id) return true;
+        return false;
+    }
+
+    bool inYears(const content::Item& it) const
+    {
         const YearChoice& y = yearChoices()[yearIdx];
-        if (y.from || y.to)
-        {
-            int year = it.year.empty() ? 0 : std::atoi(it.year.c_str());
-            if (!year) return false;
-            if (y.from && year < y.from) return false;
-            if (y.to && year > y.to) return false;
-        }
+        if (!y.from && !y.to) return true;
+        int year = it.year.empty() ? 0 : std::atoi(it.year.c_str());
+        if (!year) return false;
+        if (y.from && year < y.from) return false;
+        if (y.to && year > y.to) return false;
         return true;
+    }
+
+    // A film genre's counterpart among TMDB's TV genres (0: there is none --
+    // no horror or romance shows, say). The TV list folds some together.
+    static int tvGenreOf(int movieGenre)
+    {
+        switch (movieGenre)
+        {
+            case 28: case 12: return 10759;   // Action & Adventure
+            case 878: case 14: return 10765;  // Sci-Fi & Fantasy
+            case 10752: return 10768;         // War & Politics
+            case 16: case 35: case 80: case 99: case 18:
+            case 10751: case 9648: case 37:
+                return movieGenre;            // the same id on both
+            default: return 0;
+        }
+    }
+
+    // "All": films, shows and anime one under another, each under its heading
+    // with a line between them. The anime are kept out of the other two, so
+    // nothing is listed twice; a few pages each, then the next section.
+    void runAll()
+    {
+        parkFocus();
+        if (tiles)
+        {
+            body->removeView(tiles);
+            tiles = nullptr;
+        }
+        if (gridShown)
+        {
+            body->removeView(grid, false);  // kept for a single type
+            gridShown = false;
+        }
+        dropSections();
+        // A genre tile was pressed and is gone: the first section takes the
+        // focus once its posters land.
+        bool focusOnce         = grid->focusResultsOnce;
+        grid->focusResultsOnce = false;
+
+        sections = new brls::Box();
+        sections->setAxis(brls::Axis::COLUMN);
+        body->addView(sections);
+
+        const YearChoice& y = yearChoices()[yearIdx];
+        const int single    = (y.from && y.from == y.to) ? y.from : 0;
+        const bool text     = !query.empty();
+        const int tvGenre   = genre ? tvGenreOf(genre) : 0;
+        // A film genre with no TV counterpart: films only.
+        const bool tvToo    = !genre || tvGenre;
+
+        auto discover = [this, &y](content::Kind k, int g, bool a) {
+            tmdb::Discover d;
+            d.kind     = k;
+            d.genre    = g;
+            d.yearFrom = y.from;
+            d.yearTo   = y.to;
+            d.sort     = sort;
+            d.anime    = a;
+            return tmdb::discoverQuery(d);
+        };
+        auto section = [this, &focusOnce](const std::string& title, const tmdb::ListQuery& q,
+                                          std::function<bool(const content::Item&)> f,
+                                          int pages) {
+            if (!sections->getChildren().empty())
+            {
+                auto* line = new brls::Box();
+                line->setHeight(2.0f);
+                line->setMargins(4.0f, kInset, 18.0f, kInset);
+                line->setBackgroundColor(theme::scrim(60));
+                sections->addView(line);
+            }
+            auto* head = ui::heading(title, kInset);
+            head->setMarginTop(8.0f);
+            sections->addView(head);
+            auto* g       = new PosterGrid();
+            g->parkTarget = bar;
+            g->filter     = std::move(f);
+            g->maxPages   = pages;
+            g->focusResultsOnce = focusOnce;
+            focusOnce     = false;
+            sections->addView(g);
+            g->load(q, scroll);
+        };
+
+        if (text)
+        {
+            int g = genre;
+            section(tr("Movies"), tmdb::searchQuery(query, 0, single),
+                    [this, g](const content::Item& it) {
+                        return !tmdb::isAnime(it) && hasGenre(it, g) && inYears(it);
+                    }, 2);
+            if (tvToo)
+            {
+                section(tr("Shows"), tmdb::searchQuery(query, 1, single),
+                        [this, tvGenre](const content::Item& it) {
+                            return !tmdb::isAnime(it) && hasGenre(it, tvGenre) && inYears(it);
+                        }, 2);
+                // Films and shows both: the multi search, which takes no year.
+                section(tr("Anime"), tmdb::searchQuery(query, -1),
+                        [this, g, tvGenre](const content::Item& it) {
+                            return tmdb::isAnime(it) &&
+                                   (hasGenre(it, g) || hasGenre(it, tvGenre)) && inYears(it);
+                        }, 3);
+            }
+        }
+        else
+        {
+            // Anime films stay with the films (the anime list is the shows);
+            // anime shows go to their own section only.
+            section(tr("Movies"), discover(content::Kind::Movie, genre, false), nullptr, 2);
+            if (tvToo)
+            {
+                section(tr("Shows"), discover(content::Kind::Series, tvGenre, false),
+                        [](const content::Item& it) { return !tmdb::isAnime(it); }, 2);
+                section(tr("Anime"), discover(content::Kind::Series, tvGenre, true), nullptr,
+                        2);
+            }
+        }
     }
 
     void run()
@@ -295,12 +432,18 @@ class SearchScreen : public brls::Box
             showTiles();
             return;
         }
+        if (all)
+        {
+            runAll();
+            return;
+        }
         parkFocus();
         if (tiles)
         {
             body->removeView(tiles);
             tiles = nullptr;
         }
+        dropSections();
         if (!gridShown)
         {
             body->addView(grid);
@@ -353,13 +496,16 @@ class SearchScreen : public brls::Box
 
     void pickKind()
     {
-        dropdown(tr("Type"), { tr("Movies"), tr("Shows"), tr("Anime") },
-                 anime ? 2 : kind == content::Kind::Series ? 1 : 0, [this](int i) {
-                     content::Kind k = i == 0 ? content::Kind::Movie : content::Kind::Series;
-                     bool a          = i == 2;
-                     if (k == kind && a == anime) return;
+        dropdown(tr("Type"), { tr("All"), tr("Movies"), tr("Shows"), tr("Anime") },
+                 all ? 0 : anime ? 3 : kind == content::Kind::Series ? 2 : 1, [this](int i) {
+                     // "All" lists by the films' genres.
+                     content::Kind k = i <= 1 ? content::Kind::Movie : content::Kind::Series;
+                     bool a          = i == 3;
+                     bool everything = i == 0;
+                     if (k == kind && a == anime && everything == all) return;
                      kind  = k;
                      anime = a;
+                     all   = everything;
                      genre = 0;  // the kinds have different genre lists
                      refreshLabels();
                      run();

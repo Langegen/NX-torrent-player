@@ -162,6 +162,27 @@ woken by `Threading::async()` and `Threading::stop()`, instead of a fixed
 `retro_sleep(500)` that delayed every `brls::async` task by up to half a
 second. Marked `LOCAL PATCH`.
 
+### 10. `library/lib/platforms/switch/switch_ime.cpp` — the on-screen keyboard
+
+`SwitchImeManager::openForText` is rewritten. The stock one froze the console
+on the server-address fields (Jackett, TorrServer): the only calls passing a
+sub text, and the only ones that hung. Above 32 characters swkbd draws the
+input as a box and shows no header or sub text anyway, so the hint now goes in
+as the guide text (shown in the empty field), and the sub text only below 33.
+Also: a failed `swkbdCreate` returns instead of using an unset config, the
+answer buffer holds a full `maxStringLength` of UTF-8 (it was a fixed 256
+bytes), and the callback runs after `swkbdClose` (a callback that opens the
+keyboard again no longer nests). Marked `LOCAL PATCH`.
+
+### 11. `library/lib/views/recycler.cpp` (+ `recycler.hpp`) — per-frame width
+
+`RecyclerFrame::checkWidth()` kept the last width in a function-`static`,
+shared by every RecyclerFrame in the process: a new one as wide as the last
+(every dropdown) only counted as laid out if some pass happened to see another
+width first, and until then `reloadData()` did nothing for it. It is a member
+now (`lastWidth`). The player no longer uses Dropdown for its track lists
+(they are side lists in `app/player.cpp`). Marked `LOCAL PATCH`.
+
 ## Updating
 
 Re-cloning upstream **drops the patch** — re-apply it, and check this file's

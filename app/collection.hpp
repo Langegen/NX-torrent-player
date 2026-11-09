@@ -27,6 +27,9 @@ class PosterGrid : public brls::Box
     // Set before load(): when the page comes in, move the focus from
     // `parkTarget` onto the first result (a genre tile was pressed: it is gone).
     bool focusResultsOnce = false;
+    // Pages to ask for at most (0: until the query runs out). A grid that is
+    // one section of several (the search's "All") stops after a few.
+    int maxPages = 0;
 
     void draw(NVGcontext* vg, float x, float y, float w, float h, brls::Style style,
               brls::FrameContext* ctx) override;
@@ -44,6 +47,7 @@ class PosterGrid : public brls::Box
     brls::View* firstCard = nullptr;  // freed with the grid's rows (load() clears it)
 
     void next();
+    bool exhausted() const { return page >= totalPages || (maxPages > 0 && page >= maxPages); }
     void add(const content::Item& it);
     void focusFirstIfLost();
 };

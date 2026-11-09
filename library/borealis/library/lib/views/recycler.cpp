@@ -368,14 +368,16 @@ void RecyclerFrame::cacheCellFrames()
 
 bool RecyclerFrame::checkWidth()
 {
-    float width           = getWidth();
-    static float oldWidth = width;
-    if ((int)oldWidth != (int)width && width != 0)
+    // LOCAL PATCH: per instance. A function-static width was shared by every
+    // RecyclerFrame, so a new one as wide as the last never counted as laid
+    // out, and reloadData() did nothing for it.
+    float width = getWidth();
+    if ((int)lastWidth != (int)width && width != 0)
     {
-        oldWidth = width;
+        lastWidth = width;
         return true;
     }
-    oldWidth = width;
+    lastWidth = width;
     return false;
 }
 

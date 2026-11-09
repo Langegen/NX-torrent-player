@@ -53,7 +53,7 @@ void PosterGrid::load(const tmdb::ListQuery& q, brls::ScrollingFrame* frame)
 
 void PosterGrid::next()
 {
-    if (loading || page >= totalPages) return;
+    if (loading || exhausted()) return;
     loading = true;
     if (!status)
     {
@@ -85,14 +85,14 @@ void PosterGrid::next()
             if (!filter || filter(it)) add(it);
         addView(status);
         if (before == 0 && shown > 0) focusFirstIfLost();
-        if (shown == 0 && page >= totalPages)
+        if (shown == 0 && exhausted())
             status->setText(tr("Nothing here"));
         else
-            status->setVisibility(page >= totalPages ? brls::Visibility::GONE
+            status->setVisibility(exhausted() ? brls::Visibility::GONE
                                                      : brls::Visibility::VISIBLE);
         // A filter can thin a page to nothing: keep going while the screen
         // is not even full.
-        if (shown < columns * 2 && page < totalPages) next();
+        if (shown < columns * 2 && !exhausted()) next();
     });
 }
 
@@ -134,11 +134,13 @@ void PosterGrid::draw(NVGcontext* vg, float x, float y, float w, float h, brls::
     brls::Box::draw(vg, x, y, w, h, style, ctx);
     // borealis' ScrollingFrame says nothing when it scrolls: compare its
     // offset with the content each frame (catches a touch flick too).
-    if (!scroll || loading || page >= totalPages) return;
+    if (!scroll || loading || exhausted()) return;
+    // Where this grid's bottom is against the frame's, both on screen: right
+    // for a grid that is the whole content and for one section among others
+    // (the search's "All"), whose own height says nothing about the offset.
     float visible = scroll->getHeight();
-    float content = getHeight();
-    if (visible <= 0.0f || content <= 0.0f) return;
-    if (scroll->getContentOffsetY() + visible >= content - kNearBottom) next();
+    if (visible <= 0.0f || h <= 0.0f) return;
+    if (y + h <= scroll->getY() + visible + kNearBottom) next();
 }
 
 void openCollection(const std::string& title, const tmdb::ListQuery& q)

@@ -240,6 +240,9 @@ class RecyclerFrame : public ScrollingFrame
     RecyclerDataSource* dataSource = nullptr;
     bool deleteDataSource          = false;
     bool layouted                  = false;
+    // LOCAL PATCH: the width checkWidth() last saw, per frame (was a static
+    // shared by every RecyclerFrame in the process).
+    float lastWidth                = 0;
 
     uint32_t visibleMin, visibleMax;
 

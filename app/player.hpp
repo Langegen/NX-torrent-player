@@ -19,6 +19,7 @@ struct torrentfs;
 
 namespace player_ui
 {
+class Battery;
 class Button;
 class Timeline;
 }
@@ -319,6 +320,9 @@ class MpvView : public brls::Box
     brls::Label* barSubtitle = nullptr;
     brls::Label* barClock    = nullptr;
     brls::Label* barEnds     = nullptr;  // "Ends at 23:10"
+    player_ui::Battery* barBattery = nullptr;  // left of the clock
+    brls::Label* barBatteryPct     = nullptr;  // "87%"
+    void updateBattery();
     brls::Label* timeCur     = nullptr;
     brls::Label* timeTotal   = nullptr;
     std::chrono::steady_clock::time_point clockLast;
