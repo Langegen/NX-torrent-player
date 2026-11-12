@@ -183,6 +183,13 @@ bool torrentfs_set_zones(torrentfs *tfs, const int64_t *first, const int64_t *co
 // (full speed) until set.
 void torrentfs_set_backlog(torrentfs *tfs, int ms);
 
+// Back window: how many bytes behind the playhead to fetch (lowest priority,
+// only once the backlog is deep) and keep -- so rewinding a minute or two
+// after a resume or a seek plays at once instead of re-downloading. In RAM
+// mode it is held on top of the RAM window. 0 (the default) turns it off;
+// capped at 384 MB. Takes effect immediately.
+void torrentfs_set_back_window(torrentfs *tfs, int64_t bytes);
+
 // Wake the discovery thread so it re-announces to trackers/DHT immediately.
 void torrentfs_announce_now(torrentfs *tfs);
 

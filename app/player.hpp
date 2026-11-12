@@ -21,6 +21,7 @@ namespace player_ui
 {
 class Battery;
 class Button;
+class Chip;
 class Timeline;
 }
 
@@ -250,6 +251,7 @@ class MpvView : public brls::Box
     // has one. A (while playing) or a tap on it leaves the player and opens the
     // next episode's sources; ignoring it just lets the file end as before.
     void updateNextCard();     // per frame: show/hide against the time left
+    void updateSleepTimer();   // per frame: the sleep timer (see kSleepMinutes)
     void goToNextEpisode();    // pop out of the player and open the next one
     brls::Box* nextCard      = nullptr;
     float nextCardBottom     = -1.0f;    // its offset, last pushed to layout
@@ -301,6 +303,7 @@ class MpvView : public brls::Box
     {
         Buttons,
         Timeline,
+        SubChip,  // the "subtitles off/on" chip over the subtitles button
     };
     void buildControls();
     void updateControls();          // per frame while shown: times, clock, knob
@@ -337,6 +340,17 @@ class MpvView : public brls::Box
                          std::function<void(int)> onPick);
     void openAudioPanel();
     void openSubtitlesPanel();
+
+    // Subtitles off in one press: with the cursor on the subtitles button a
+    // chip pops up over it (Up reaches it, OK or a tap runs it). Off remembers
+    // the track, so the same chip turns that one back on.
+    player_ui::Chip* subChip = nullptr;
+    float subChipLeft = -1.0f, subChipTop = -1.0f;  // last pushed to layout
+    std::string obsSid = "no";   // mpv "sid", observed: "no", "auto" or a track id
+    bool subsOn() const;         // obsSid is a track
+    int64_t lastSid    = -1;     // the track the chip turned off
+    void toggleSubtitles();
+    bool placeSubChip();  // false until the button row is laid out
     void openEpisodesPanel();
     // Whether the panel was up when a side panel opened, to bring it back.
     bool controlsBeforePanel = false;
@@ -367,6 +381,8 @@ class MpvView : public brls::Box
     // Bilinear scalers for video above 1080p (4K), mpv's own below.
     bool lightScalers = false;
     void applyRenderLoad(int64_t width);
+    // Sizes the engine's back window from the stream's bitrate (needs obsDur).
+    void applyBackWindow();
 
     // ---- Episodes -------------------------------------------------------
     // A torrent with several videos (a season pack) is its own playlist, as

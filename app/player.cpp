@@ -261,6 +261,49 @@ void popPlayerThen(brls::Activity* player, int n, std::function<void()> then)
     popActivitiesThen(above + n, then);
 }
 
+// The sleep timer, in minutes; 0 off, -1 "at the end of the video". The
+// session's, not one player's: the next episode is a new MpvView, and the
+// timer runs on through it. UI thread only.
+const int kSleepMinutes[] = { 0, 15, 30, 45, 60, 90, 120, -1 };
+constexpr int kSleepChoices = (int)(sizeof(kSleepMinutes) / sizeof(kSleepMinutes[0]));
+int g_sleepChoice = 0;
+std::chrono::steady_clock::time_point g_sleepAt;
+bool g_sleepWarned = false;
+
+void setSleepChoice(int i)
+{
+    g_sleepChoice = i;
+    g_sleepWarned = false;
+    if (kSleepMinutes[i] > 0)
+        g_sleepAt = std::chrono::steady_clock::now() + std::chrono::minutes(kSleepMinutes[i]);
+    brls::Logger::info("[player] sleep timer: {}", kSleepMinutes[i]);
+}
+
+std::string sleepLabel()
+{
+    int m = kSleepMinutes[g_sleepChoice];
+    if (m == 0) return tr("Off");
+    if (m < 0) return tr("End of the video");
+    // What is left of it, once it runs: the row says when, not what was set.
+    auto left = std::chrono::duration_cast<std::chrono::seconds>(
+                    g_sleepAt - std::chrono::steady_clock::now())
+                    .count();
+    long mins = left > 0 ? (long)((left + 59) / 60) : 0;
+    return std::to_string(mins) + tr(" min");
+}
+
+// Puts the console to sleep, as its power button would. The app is suspended
+// where it is and picks up from there on waking.
+void sleepConsole()
+{
+#ifdef __SWITCH__
+    Result rc = appletRequestToSleep();
+    if (R_FAILED(rc)) brls::Logger::error("[player] sleep request failed: 0x{:x}", rc);
+#else
+    brls::Logger::info("[player] sleep requested (the console only)");
+#endif
+}
+
 } // namespace
 
 // Seconds -> "M:SS" (or "H:MM:SS" past an hour).
@@ -663,6 +706,10 @@ bool MpvView::startMpv()
     // become true and the loading screen hung forever no matter how much was
     // downloaded. Must stay comfortably above bufferSecs().
     mpv_set_option_string(mpv, "cache-secs", std::to_string(buf.cacheSecs).c_str());
+    // What was already played stays in the demuxer cache (mpv's default 50 MiB
+    // is ~40 s of 1080p): a rewind inside it is instant, and for a direct link
+    // it is the only copy -- the engine's back window covers torrents beyond it.
+    mpv_set_option_string(mpv, "demuxer-max-back-bytes", "128MiB");
     // On Switch the hardware decoder's GPU work is async; without a glFinish
     // after mpv's render, glfwSwapBuffers can present before the video is drawn
     // (black frame). This is what the other Switch mpv players set too.
@@ -734,6 +781,8 @@ bool MpvView::startMpv()
     mpv_observe_property(mpv, 0, "duration", MPV_FORMAT_DOUBLE);
     // The decoded picture's width: above 1080p the scalers go cheap.
     mpv_observe_property(mpv, 0, "width", MPV_FORMAT_INT64);
+    // The subtitle track, for the subtitles chip's on/off.
+    mpv_observe_property(mpv, 0, "sid", MPV_FORMAT_STRING);
 
     if (direct)
     {
@@ -920,9 +969,14 @@ bool MpvView::command(Cmd c)
     switch (c)
     {
         case Cmd::Ok:
+            if (controlsShown && zone == Zone::SubChip)
+            {
+                pokeControls();
+                toggleSubtitles();
+            }
             // The buttons first: rewind pressed again while its jump is still
             // pending adds to it rather than doing it.
-            if (controlsShown && zone == Zone::Buttons)
+            else if (controlsShown && zone == Zone::Buttons)
             {
                 pokeControls();
                 activateButton(focusBtn);
@@ -955,7 +1009,12 @@ bool MpvView::command(Cmd c)
         case Cmd::Right:
         {
             int dir = c == Cmd::Left ? -1 : 1;
-            if (controlsShown && zone == Zone::Buttons)
+            if (controlsShown && zone == Zone::SubChip)
+            {
+                zone = Zone::Buttons;  // off the chip, along the row
+                moveFocus(dir);
+            }
+            else if (controlsShown && zone == Zone::Buttons)
                 moveFocus(dir);
             else
                 stepSeek(dir, true);
@@ -973,8 +1032,14 @@ bool MpvView::command(Cmd c)
                 break;
             }
             pokeControls();
-            if (c == Cmd::Up && zone == Zone::Buttons)
+            // From the subtitles button, up is its chip first; the timeline
+            // is one more press.
+            if (c == Cmd::Up && zone == Zone::Buttons && focusBtn == BTN_SUBS && subChip)
+                setZone(Zone::SubChip);
+            else if (c == Cmd::Up && (zone == Zone::Buttons || zone == Zone::SubChip))
                 setZone(Zone::Timeline);
+            else if (c == Cmd::Down && zone == Zone::SubChip)
+                setZone(Zone::Buttons);
             else if (c == Cmd::Down && zone == Zone::Timeline)
             {
                 if (seeking) commitSeek();
@@ -1063,6 +1128,7 @@ void MpvView::setControlsVisible(bool show)
     brls::Visibility v = show ? brls::Visibility::VISIBLE : brls::Visibility::GONE;
     if (topBar) topBar->setVisibility(v);
     if (bottomBar) bottomBar->setVisibility(v);
+    if (subChip && !show) subChip->setVisibility(brls::Visibility::GONE);
     // The big centre button is for a paused picture; over a playing one the
     // row below has the same button.
     if (pauseOverlay)
@@ -1262,12 +1328,93 @@ void MpvView::refreshButtons()
     buttons[BTN_PLAY]->caption = userPaused ? tr("Play") : tr("Pause");
     buttons[BTN_LOCK]->icon =
         controlsLocked ? player_ui::Icon::LockClosed : player_ui::Icon::LockOpen;
+    if (zone == Zone::SubChip && focusBtn != BTN_SUBS) zone = Zone::Buttons;
+    // The chip, while the cursor is on the subtitles button or on the chip.
+    // It takes the place of that button's caption, and says it anyway.
+    bool chip = subChip && controlsShown &&
+                (zone == Zone::SubChip || (zone == Zone::Buttons && focusBtn == BTN_SUBS));
+    if (subChip)
+    {
+        if (chip)
+        {
+            subChip->text    = !subsOn() ? tr("Turn subtitles on") : tr("Turn subtitles off");
+            subChip->focused = zone == Zone::SubChip;
+            chip = placeSubChip();
+        }
+        auto vis = chip ? brls::Visibility::VISIBLE : brls::Visibility::GONE;
+        if (subChip->getVisibility() != vis) subChip->setVisibility(vis);
+    }
     for (int b = 0; b < BTN_COUNT; b++)
     {
         buttons[b]->focused     = zone == Zone::Buttons && b == focusBtn;
-        buttons[b]->showCaption = buttons[b]->focused;
+        buttons[b]->showCaption = buttons[b]->focused && !(chip && b == BTN_SUBS);
     }
     if (timeline) timeline->focused = zone == Zone::Timeline;
+}
+
+// Centres the chip over the subtitles button, a little above it (where the
+// button's caption would be). From the laid-out frames, pushed only when they
+// moved: a position change re-runs the layout.
+bool MpvView::placeSubChip()
+{
+    player_ui::Button* b = buttons[BTN_SUBS];
+    // Not laid out yet (the panel was just shown): updateControls retries.
+    if (!subChip || !b || b->getWidth() <= 0.0f) return false;
+    float left = b->getX() + b->getWidth() / 2.0f - subChip->getWidth() / 2.0f - getX();
+    float top  = b->getY() - subChip->getHeight() - 8.0f - getY();
+    float maxLeft = getWidth() - subChip->getWidth();
+    if (left > maxLeft) left = maxLeft;
+    if (left < 0.0f) left = 0.0f;
+    if (left == subChipLeft && top == subChipTop) return true;
+    subChipLeft = left;
+    subChipTop  = top;
+    subChip->setPositionLeft(left);
+    subChip->setPositionTop(top);
+    return true;
+}
+
+// "auto" is what mpv reads back while no track is picked yet: off too.
+bool MpvView::subsOn() const
+{
+    char* end    = nullptr;
+    long long id = std::strtoll(obsSid.c_str(), &end, 10);
+    return end && end != obsSid.c_str() && *end == '\0' && id > 0;
+}
+
+// Off: remember the track and drop it. On: that track again, else the first
+// one there is; with none at all, the subtitles list (addons may have some).
+void MpvView::toggleSubtitles()
+{
+    if (!ready || !mpv) return;
+    if (subsOn())
+    {
+        lastSid = std::strtoll(obsSid.c_str(), nullptr, 10);
+        mpv_set_property_string(mpv, "sid", "no");
+        obsSid = "no";  // at once: the observed value follows
+        flashPill(tr("Subtitles off"));
+    }
+    else
+    {
+        TrackList t = readTracks();
+        int64_t want = -1;
+        for (size_t i = 1; i < t.sIds.size(); i++)
+            if (t.sIds[i] == lastSid) want = lastSid;
+        if (want < 0 && t.sIds.size() > 1) want = t.sIds[1];
+        if (want < 0)
+        {
+            openSubtitlesPanel();
+            return;
+        }
+        char v[24];
+        std::snprintf(v, sizeof(v), "%lld", (long long)want);
+        mpv_set_property_string(mpv, "sid", v);
+        obsSid = v;
+        size_t at = 0;
+        for (size_t i = 1; i < t.sIds.size(); i++)
+            if (t.sIds[i] == want) at = i;
+        flashPill(std::string(tr("Subtitles")) + ": " + t.sLabels[at]);
+    }
+    refreshButtons();
 }
 
 void MpvView::moveFocus(int dir)
@@ -1636,6 +1783,33 @@ void MpvView::updateNextCard()
     if (want && nextCardSub) nextCardSub->setText(nextEpisodeLabel());
     nextCard->setVisibility(want ? brls::Visibility::VISIBLE
                                  : brls::Visibility::GONE);
+}
+
+// Per frame: the sleep timer's last-minute warning, then at its time the
+// video paused where it is, the progress saved, and the console to sleep.
+void MpvView::updateSleepTimer()
+{
+    if (kSleepMinutes[g_sleepChoice] <= 0 || !ready || !mpv || ended || switching) return;
+    auto now = std::chrono::steady_clock::now();
+    if (!g_sleepWarned && now >= g_sleepAt - std::chrono::seconds(60))
+    {
+        g_sleepWarned = true;
+        flashPill(tr("Sleep timer: one minute left"), 5000);
+    }
+    if (now < g_sleepAt) return;
+    setSleepChoice(0);
+    brls::Logger::info("[player] sleep timer ran out: pause and sleep");
+    if (seeking) cancelSeek();
+    if (!userPaused)
+    {
+        userPaused = true;
+        mpv_set_property_string(mpv, "pause", "yes");
+    }
+    if (!settingsOpen) setControlsVisible(true);
+    maybePushWatchState(true);
+    maybeUpdateHistory(true);
+    // After this frame: the pause and the panel are drawn before it sleeps.
+    brls::sync([]() { sleepConsole(); });
 }
 
 // "Season 1 · Episode 5" (or the file's name) for what "next" would open.
@@ -2597,6 +2771,30 @@ void MpvView::openTrackMenu()
         },
         [this]() { toggleInfo(); }));
 
+    // The sleep timer: pauses, saves and puts the console to sleep after so
+    // many minutes, or at the end of the video. Runs on into the next episode.
+    content->addView(new StepperCell(
+        tr("Sleep timer"), []() { return sleepLabel(); },
+        [](int d) {
+            int n = g_sleepChoice + d;
+            if (n < 0 || n >= kSleepChoices) return false;
+            setSleepChoice(n);
+            return true;
+        },
+        []() { setSleepChoice(0); }));
+
+    // What happens when a video plays to its end (also in Options).
+    content->addView(new StepperCell(
+        tr("When it ends"),
+        []() { return config::endActionLabels()[(size_t)config::get().endAction]; },
+        [](int d) {
+            int n = config::get().endAction + d;
+            if (n < 0 || n >= config::END_ACTION_COUNT) return false;
+            config::get().endAction = n;
+            config::save();
+            return true;
+        }));
+
     // How the player is driven, for whoever picks up a remote: everything
     // works with the arrows, OK and Back. One short line a key.
     content->addView(panelSection(tr("CONTROLS"), 18.0f));
@@ -2854,10 +3052,18 @@ void MpvView::pumpEvents()
                 }
                 if (ef && ef->reason == MPV_END_FILE_REASON_EOF && !ended && !switching)
                 {
+                    // Options -> "When a video ends", unless the sleep timer
+                    // was set to the end of this one.
+                    int action = config::get().endAction;
+                    if (kSleepMinutes[g_sleepChoice] < 0)
+                    {
+                        action = config::END_SLEEP;
+                        setSleepChoice(0);
+                    }
                     // An episode with one after it goes on to it, as Lampa
                     // does: the next file of the pack plays straight away, or
                     // the next episode's page / sources come up.
-                    if (isEpisodic() && hasNextEpisode())
+                    if (action == config::END_NEXT_EPISODE && isEpisodic() && hasNextEpisode())
                     {
                         brls::Logger::info("[mpv event] EOF -> next episode");
                         goToEpisode(+1);
@@ -2869,11 +3075,19 @@ void MpvView::pumpEvents()
                     }
                     ended   = true;
                     int pops = watch.endPop;
-                    brls::Logger::info("[mpv event] EOF -> pop {}", pops);
+                    brls::Logger::info("[mpv event] EOF -> pop {} (end action {})", pops,
+                                       action);
+                    // Once back at the menu: to sleep, or out of the app. The
+                    // player is gone by then, its progress saved.
+                    std::function<void()> then;
+                    if (action == config::END_SLEEP)
+                        then = []() { sleepConsole(); };
+                    else if (action == config::END_QUIT)
+                        then = []() { brls::Application::quit(); };
                     // Deferred: we are inside draw()'s pumpEvents, and popping
                     // (which frees this view) mid-draw is unsafe.
-                    brls::sync([act = getParentActivity(), pops]() {
-                        popPlayerThen(act, pops, nullptr);
+                    brls::sync([act = getParentActivity(), pops, then]() {
+                        popPlayerThen(act, pops, then);
                     });
                 }
                 break;
@@ -2908,7 +3122,10 @@ void MpvView::pumpEvents()
                     else if (std::strcmp(p->name, "time-pos") == 0)
                         obsPos = v;
                     else if (std::strcmp(p->name, "duration") == 0)
+                    {
                         obsDur = v;
+                        applyBackWindow();
+                    }
                     else if (std::strcmp(p->name, "cache-speed") == 0)
                         obsCacheSpeed = v;
                 }
@@ -2921,6 +3138,12 @@ void MpvView::pumpEvents()
                 else if (p->format == MPV_FORMAT_INT64 &&
                          std::strcmp(p->name, "width") == 0)
                     applyRenderLoad(*(int64_t*)p->data);
+                else if (p->format == MPV_FORMAT_STRING &&
+                         std::strcmp(p->name, "sid") == 0)
+                {
+                    const char* s = *(const char**)p->data;
+                    obsSid = s ? s : "no";
+                }
                 break;
             }
             default:
@@ -2929,6 +3152,24 @@ void MpvView::pumpEvents()
                 break;
         }
     }
+}
+
+// The engine's back window, once the duration gives the stream's bitrate. A
+// rewind after a resume or a seek lands behind everything read so far, where
+// neither mpv's back cache nor the engine had anything: the engine now fetches
+// kRewindSecs behind its playhead too. Its playhead is mpv's READ position,
+// which runs ahead of the picture by the demuxer cache, so the window covers
+// that stretch as well.
+void MpvView::applyBackWindow()
+{
+    if (!tfs || obsDur < 60.0) return;
+    constexpr double kRewindSecs = 150.0;
+    const double rate = (double)torrentfs_size(tfs) / obsDur;   // bytes/s
+    const config::BufferPreset buf = config::bufferPreset();
+    double ahead = rate * buf.cacheSecs;
+    const double aheadMax = (double)buf.demuxerMaxMiB * 1024.0 * 1024.0;
+    if (ahead > aheadMax) ahead = aheadMax;
+    torrentfs_set_back_window(tfs, (int64_t)(ahead + rate * kRewindSecs));
 }
 
 // The scalers for a picture `width` pixels wide. Up to 1080p mpv's own
@@ -4220,7 +4461,7 @@ void MpvView::updateStickSeek()
 
     if (stickMode == StickMode::None)
     {
-        bool onButtons = controlsShown && zone == Zone::Buttons;
+        bool onButtons = controlsShown && (zone == Zone::Buttons || zone == Zone::SubChip);
         if (ax >= ay && !onButtons)
             stickMode = StickMode::Scrub;
         else if (ax >= ay && ax >= kStickStep)
@@ -4492,6 +4733,18 @@ void MpvView::buildControls()
     this->addView(bot);
     bottomBar = bot;
 
+    // The subtitles chip (see toggleSubtitles): a child of the player itself,
+    // placed over the button once the row is laid out (placeSubChip).
+    subChip = new player_ui::Chip();
+    subChip->setPositionType(brls::PositionType::ABSOLUTE);
+    subChip->setVisibility(brls::Visibility::GONE);
+    subChip->addGestureRecognizer(new brls::TapGestureRecognizer(subChip, [this]() {
+        if (controlsLocked) { flashLock(); return; }
+        pokeControls();
+        toggleSubtitles();
+    }));
+    this->addView(subChip);
+
     // Tap the timeline to jump there; drag along it to aim, the seek is done
     // on release -- one seek instead of one per pixel.
     timeRow->addGestureRecognizer(new brls::TapGestureRecognizer(
@@ -4558,6 +4811,14 @@ void MpvView::updateControls()
     {
         player_ui::Icon want = userPaused ? player_ui::Icon::Play : player_ui::Icon::Pause;
         if (buttons[BTN_PLAY]->icon != want) refreshButtons();
+    }
+    // The subtitles chip: placed once the row has a layout, and following the
+    // observed track (a pick from the subtitles list flips on/off).
+    if (subChip && (zone == Zone::SubChip || (zone == Zone::Buttons && focusBtn == BTN_SUBS)))
+    {
+        const char* want = !subsOn() ? tr("Turn subtitles on") : tr("Turn subtitles off");
+        if (subChip->getVisibility() != brls::Visibility::VISIBLE || subChip->text != want)
+            refreshButtons();
     }
 
     // The clock, and when the film will end at this speed: once a second.
@@ -4742,6 +5003,7 @@ void MpvView::draw(NVGcontext* vg, float x, float y, float width, float height,
     updateLockHint();  // fades the lock flash out after its moment
     updatePill();          // ... and the L/R readout after its own
     updateNextCard();      // "next episode", over the last seconds
+    updateSleepTimer();
     updateInfoOverlay();
     logStats();  // always, even with the ZR panel closed
 

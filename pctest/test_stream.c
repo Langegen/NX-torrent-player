@@ -364,10 +364,13 @@ static void scratch_cleanup(void) {
 }
 
 int main(int argc, char **argv) {
+#ifdef SIGPIPE   // none on Windows (a mingw build with compat/)
     signal(SIGPIPE, SIG_IGN);
+#endif
     mkdir(SCRATCH_DIR, 0777);
     if (chdir(SCRATCH_DIR) != 0) { fprintf(stderr, "chdir failed\n"); return 2; }
     int size_mb = 96, piece_mb = 4, latency = 0, limit = 120;
+    int resume_back_mb = -1;   // --resume N: the resume scenario, back window N MB
     const char *seeds = "0,0,0";
     const char *label = "";
     for (int i = 1; i + 1 < argc; i += 2) {
@@ -377,6 +380,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--latency")) latency = atoi(argv[i + 1]);
         else if (!strcmp(argv[i], "--label")) label = argv[i + 1];
         else if (!strcmp(argv[i], "--limit")) limit = atoi(argv[i + 1]);
+        else if (!strcmp(argv[i], "--resume")) resume_back_mb = atoi(argv[i + 1]);
     }
     // A short last piece on purpose: + 123 KB.
     g_size = (int64_t)size_mb * 1024 * 1024 + 123 * 1024;
@@ -456,6 +460,48 @@ int main(int argc, char **argv) {
     int64_t tail_off = g_size - 1024 * 1024;
     ok = ok && read_at(tail_off, 64 * 1024, buf);
     t_tail = now_s() - t0;
+
+    // The resume scenario (torrentfs_set_back_window): playback picks up at
+    // 70% of the file, reads on a little with the player well buffered, then
+    // rewinds 16 MB -- behind everything read so far. With a back window that
+    // covers it the rewind is served from RAM at once; without, it waits for
+    // the download.
+    if (resume_back_mb >= 0) {
+        int64_t at = g_size * 7 / 10;
+        torrentfs_set_back_window(g_tfs, (int64_t)resume_back_mb * 1024 * 1024);
+        for (int64_t off = at; ok && off < at + 8LL * 1024 * 1024; off += 512 * 1024)
+            ok = read_at(off, 512 * 1024, buf);
+        // The player comfortably ahead, the rate limiter off (the app's default).
+        torrentfs_set_governor(0);
+        torrentfs_set_backlog(g_tfs, 20000);
+        // Long enough for the forward window (the higher priority) and then
+        // the back window to come in at the seeders' rate.
+        double tw = now_s();
+        while (now_s() - tw < 12.0) usleep(50 * 1000);
+        int64_t done = 0, total = 0, ph = 0;
+        torrentfs_stats(g_tfs, &done, &total, &ph);
+        int behind = 0;
+        for (int64_t i = (at - 16LL * 1024 * 1024) / g_piece; i < at / g_piece; i++)
+            if (torrentfs_piece_done(g_tfs, i)) behind++;
+        printf("  pieces done %lld/%lld, playhead %lld, the 16 MB behind: %d/%d in\n",
+               (long long)done, (long long)total, (long long)ph, behind,
+               (int)(16LL * 1024 * 1024 / g_piece));
+        double ts = now_s();
+        ok = ok && read_at(at - 16LL * 1024 * 1024, 256 * 1024, buf);
+        double t_rewind = now_s() - ts;
+        printf("%-34s resume: back window %3d MB  rewind 16 MB  %6.3fs  data %s%s\n",
+               label, resume_back_mb, t_rewind, g_bad ? "BAD" : "ok",
+               ok ? "" : "  TIMEOUT/ERROR");
+        fflush(stdout);
+        g_stop = true;
+        torrentfs_cancel(g_tfs);
+        torrentfs_close(g_tfs);
+        free(buf);
+        remove(tpath);
+        scratch_cleanup();
+        if (chdir("..") == 0) rmdir(SCRATCH_DIR);
+        return (ok && g_bad == 0) ? 0 : 1;
+    }
 
     // Then front to back, as fast as the engine delivers.
     double t_seq0 = now_s();

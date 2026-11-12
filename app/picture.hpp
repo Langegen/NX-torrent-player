@@ -1,7 +1,8 @@
 #pragma once
 
 // The picture on the console's own screen: brightness, contrast, gamma and
-// saturation, through mpv's video equalizer. Handheld only -- docked, the TV
+// saturation, through mpv's video equalizer (saturation through a shader of
+// ours, see picture.cpp). Handheld only -- docked, the TV
 // has its own picture settings and is the one to calibrate, so the player
 // sends neutral values there and swaps them live when the console goes in or
 // out of the dock. The values live in config (picBrightness...).

@@ -19,9 +19,12 @@
 #include <mpv/render_gl.h>
 
 #include <cstdio>
+#include <string>
+#include <sys/stat.h>
 
 #include "appdata.hpp"
 #include "config.hpp"
+#include "fsutil.hpp"
 #include "i18n.hpp"
 #include "player.hpp"  // renderMpvFrame
 #include "player_widgets.hpp"
@@ -87,6 +90,59 @@ bool handheld()
     return appletGetOperationMode() == AppletOperationMode_Handheld;
 }
 
+namespace
+{
+// Saturation through a user shader of ours, not mpv's equalizer: that one
+// scales only a YCbCr source's chroma while converting it, so on an RGB
+// picture -- the patterns, the hardware decoder's frames -- -30 and +30 looked
+// the same. The shader works on the final image (the OUTPUT hook: at the
+// screen's size, no extra pass over a 4K frame) and is loaded only while the
+// value is not 0.
+//
+// One file per value, with the factor written into it: libmpv renders with
+// vo_gpu, which knows no //!PARAM (that is gpu-next), and caches a shader by
+// its path for the renderer's life -- rewriting one file would not be seen.
+// They are a few hundred bytes, written once and reused.
+std::string saturationShader(int v)
+{
+    char name[48];
+    std::snprintf(name, sizeof(name), "/sat_%d.glsl", 100 + v);
+    std::string path = std::string(APPDATA_SHADERS) + name;
+    std::string have;
+    if (fsutil::readFile(path, have) && fsutil::looksComplete(have)) return path;
+    char body[640];
+    std::snprintf(body, sizeof(body),
+                  "// NX Torrent Player: saturation %+d (app/picture.cpp)\n"
+                  "//!HOOK OUTPUT\n"
+                  "//!BIND HOOKED\n"
+                  "//!DESC saturation\n"
+                  "vec4 hook()\n"
+                  "{\n"
+                  "    vec4 c = HOOKED_tex(HOOKED_pos);\n"
+                  "    float l = dot(c.rgb, vec3(0.2126, 0.7152, 0.0722));\n"
+                  "    c.rgb = clamp(mix(vec3(l), c.rgb, %.3f), 0.0, 1.0);\n"
+                  "    return c;\n"
+                  "}\n",
+                  v, 1.0 + v / 100.0);
+    mkdir(APPDATA_SHADERS, 0777);
+    if (!fsutil::writeAtomic(path, body)) return "";
+    return path;
+}
+
+void applySaturation(mpv_handle* mpv, int want)
+{
+    // change-list, not a plain set: a set splits the list on ':' (and on the
+    // console every path has one, "sdmc:/").
+    const char* clr[] = { "change-list", "glsl-shaders", "clr", "", nullptr };
+    mpv_command(mpv, clr);
+    if (want == 0) return;
+    std::string path = saturationShader(want);
+    const char* add[] = { "change-list", "glsl-shaders", "append", path.c_str(), nullptr };
+    if (path.empty() || mpv_command(mpv, add) < 0)
+        brls::Logger::error("[picture] saturation shader did not load ({})", path);
+}
+} // namespace
+
 void sync(mpv_handle* mpv, Eq& applied)
 {
     if (!mpv) return;
@@ -95,9 +151,14 @@ void sync(mpv_handle* mpv, Eq& applied)
     {
         int want = on ? value(p) : 0;
         if (want == applied.v[p]) continue;
-        char s[8];
-        std::snprintf(s, sizeof(s), "%d", want);
-        mpv_set_property_string(mpv, kMpvNames[p], s);
+        if (p == SATURATION)
+            applySaturation(mpv, want);
+        else
+        {
+            char s[8];
+            std::snprintf(s, sizeof(s), "%d", want);
+            mpv_set_property_string(mpv, kMpvNames[p], s);
+        }
         applied.v[p] = want;
     }
 }

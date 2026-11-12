@@ -342,6 +342,16 @@ brls::View* playbackPane()
     list->addView(caption(
         tr("On by default. Off decodes in software: slower, may stutter on 1080p.")));
 
+    auto* endAction = new brls::SelectorCell();
+    endAction->init(tr("When a video ends"), config::endActionLabels(), cfg.endAction,
+                    [](int sel) {
+                        config::get().endAction = sel;
+                        config::save();
+                    });
+    list->addView(endAction);
+    list->addView(caption(
+        tr("Also in the player's settings, with the sleep timer.")));
+
     // The picture on the console's own screen (picture.hpp). The settings
     // themselves are on the calibration screen, next to the patterns they are
     // judged against -- and in the player's panel, against the film.

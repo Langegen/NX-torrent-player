@@ -125,6 +125,17 @@ The entry point is `int main()` in `app/main.cpp`.
   kernel-widened downscaling and a per-frame HDR peak pass, too much for the
   Tegra over a 4K frame. `startMpv` turns those off, and `applyRenderLoad`
   drops the scalers to bilinear for video wider than 1920.
+- **mpv's `saturation` does nothing on an RGB picture** (it only scales a
+  YCbCr source's chroma), which is what the patterns and the hardware decoder
+  give it. `picture.cpp` does saturation with a generated OUTPUT-hook shader
+  in `APPDATA_SHADERS`, one file per value: libmpv renders with vo_gpu, which
+  has no `//!PARAM` (gpu-next only) and caches a shader by its path. Set
+  `glsl-shaders` with `change-list`: a plain set splits on the `:` of `sdmc:/`.
+- **The engine's back window** (`torrentfs_set_back_window`, zone 6): after a
+  resume or a seek, the 2.5 min behind the playhead are fetched last (only
+  with >= 12 s buffered) and kept, so a rewind plays from RAM. The playhead is
+  mpv's *read* position, so the player sizes it as bitrate x (cache-ahead +
+  rewind); `pctest/test_stream --resume N` checks it.
 - The portlibs **FFmpeg has no `https` protocol** (only file, http, ftp, tcp,
   udp, rtmp, tls, httpproxy; `tls` is libnx's ssl service). mpv opens `http://`
   and HLS over it itself; an `https://` URL is played as `nxhttps://` through

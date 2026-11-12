@@ -44,3 +44,7 @@
 // (torrent_set_meta_cache): the magnet opened again -- the next episode of a
 // pack, a resume -- loads from it at once instead of asking peers again.
 #define APPDATA_META     APPDATA_DIR "/meta"
+
+// Generated mpv shaders: the picture settings' saturation, one file per value
+// (picture.cpp).
+#define APPDATA_SHADERS  APPDATA_DIR "/shaders"

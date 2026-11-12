@@ -209,6 +209,42 @@ void Button::draw(NVGcontext* vg, float x, float y, float w, float h, brls::Styl
 
 // ---------------------------------------------------------------------------
 
+Chip::Chip()
+{
+    setDimensions(320.0f, 34.0f);
+}
+
+void Chip::draw(NVGcontext* vg, float x, float y, float w, float h, brls::Style style,
+                brls::FrameContext* ctx)
+{
+    int font = brls::Application::getFont(brls::FONT_REGULAR);
+    if (font == brls::FONT_INVALID || text.empty()) return;
+    nvgFontFaceId(vg, font);
+    nvgFontSize(vg, 18.0f);
+    nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+    float b[4];
+    nvgTextBounds(vg, 0, 0, text.c_str(), nullptr, b);
+    float pw = (b[2] - b[0]) + 32.0f;
+    if (pw > w) pw = w;
+    float cx = x + w / 2.0f, cy = y + h / 2.0f;
+    nvgBeginPath(vg);
+    nvgRoundedRect(vg, cx - pw / 2.0f, y, pw, h, h / 2.0f);
+    nvgFillColor(vg, focused ? nvgRGBA(255, 255, 255, 240) : nvgRGBA(0, 0, 0, 200));
+    nvgFill(vg);
+    if (!focused)
+    {
+        // Outlined: it is a button, not a caption.
+        nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 150));
+        nvgStrokeWidth(vg, 1.5f);
+        nvgStroke(vg);
+    }
+    nvgFillColor(vg, focused ? nvgRGB(18, 18, 22) : nvgRGB(255, 255, 255));
+    nvgText(vg, cx, cy, text.c_str(), nullptr);
+    brls::Box::draw(vg, x, y, w, h, style, ctx);
+}
+
+// ---------------------------------------------------------------------------
+
 Timeline::Timeline()
 {
     setHeight(36.0f);

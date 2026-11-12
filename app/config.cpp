@@ -243,6 +243,13 @@ const std::vector<std::string>& bufferLabels()
     return v;
 }
 
+const std::vector<std::string>& endActionLabels()
+{
+    static std::vector<std::string> v = { tr("Next episode"), tr("Back to the menu"),
+                                          tr("Sleep the console"), tr("Close the app") };
+    return v;
+}
+
 std::string mpvLangList(const std::string& code)
 {
     std::string c = code == "auto" ? consoleLang() : code;
@@ -393,6 +400,8 @@ void load()
     cfg.listStyle    = readStr(body, "listStyle", cfg.listStyle);
     cfg.bufferMode   = readInt(body, "bufferMode", cfg.bufferMode);
     if (cfg.bufferMode < 0 || cfg.bufferMode > 2) cfg.bufferMode = 0;
+    cfg.endAction    = readInt(body, "endAction", cfg.endAction);
+    if (cfg.endAction < 0 || cfg.endAction >= END_ACTION_COUNT) cfg.endAction = 0;
 
     // After the language, which the default depends on. Version 1 files always
     // carried the key (whatever the user did), so only a version 2 file's key
@@ -441,6 +450,7 @@ bool save()
     auto n = [](int v) { return std::to_string(v); };
     kv("configVersion", "2");
     kv("bufferMode", n(cfg.bufferMode));
+    kv("endAction", n(cfg.endAction));
     kv("startupTab", jsonStr(sTabStr));
     kv("jackettUrl", jsonStr(cfg.jackettUrl));
     kv("jackettApiKey", jsonStr(cfg.jackettApiKey));

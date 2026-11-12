@@ -135,6 +135,11 @@ struct Config
     // of RAM and a longer wait before the first frame. Applies to the next video.
     int bufferMode = 0;
 
+    // What the player does when a video plays to its end (EndAction): go on
+    // to the next episode (what it always did), back to the menu, put the
+    // console to sleep, or close the app. The player's panel sets it too.
+    int endAction = 0;
+
     // Jackett server configuration
     std::string jackettUrl = "";
     std::string jackettApiKey = "";
@@ -179,6 +184,17 @@ struct BufferPreset
 // afford (an applet launch has far less RAM than a full one).
 BufferPreset bufferPreset();
 const std::vector<std::string>& bufferLabels();
+
+// The values of Config::endAction.
+enum EndAction
+{
+    END_NEXT_EPISODE,  // the next episode when there is one, else the menu
+    END_MENU,          // back to the menu, even mid-series
+    END_SLEEP,         // back to the menu and the console to sleep
+    END_QUIT,          // close the app
+    END_ACTION_COUNT,
+};
+const std::vector<std::string>& endActionLabels();
 
 // The UI language with "auto" resolved: "en", "fr" or "ru".
 std::string effectiveUiLang(const std::string& setting);

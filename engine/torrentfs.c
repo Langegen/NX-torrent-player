@@ -174,6 +174,16 @@
 #define STREAM_WINDOW    (32LL * 1024 * 1024)
 #define STREAM_MIN_PIECES 2
 
+// Request zones: 1..5 forward of the playhead (piece_priority), 6 the back
+// window behind it (torrentfs_set_back_window). The back window is claimed
+// only once the player has this much buffered ahead, so it never competes with
+// the startup buffer or a stream that struggles to keep up.
+#define TFS_ZONES        6
+#define TFS_ZONE_BACK    6
+#define BACK_MIN_BACKLOG_MS 12000
+// The back window's ceiling: in RAM mode it is held on top of the RAM window.
+#define BACK_WINDOW_MAX  (384LL << 20)
+
 // Startup criticals: mpv probes the container head and tail (MP4 moov, MKV
 // cues) first, so both ends are fetched up front. Budgeted in BYTES: one big
 // piece already covers the probed region.
@@ -477,6 +487,11 @@ struct torrentfs {
     int64_t ram_resident;
     int64_t ram_peak;
     int64_t ram_lo;
+    // Back window (torrentfs_set_back_window): pieces this far behind the
+    // playhead are fetched at the lowest priority (zone 6) and kept resident,
+    // so a rewind of a minute or two after a resume or a seek plays at once.
+    // In RAM mode it adds to ram_budget. 0 = off. Written by the app thread.
+    volatile int64_t back_pieces;
 
     // t->lock guards: status[] transitions shared with the writer, the writer
 // queue, buffer returns, the peer pool (shared with discovery), counters
@@ -509,7 +524,7 @@ struct torrentfs {
     // and clears on every read, is handled separately (always first).
     int32_t *cand;
     uint8_t *cand_tmp;         // rebuild scratch: per-piece zone
-    int cand_end[6];           // zone z occupies cand[cand_end[z-1] .. cand_end[z])
+    int cand_end[TFS_ZONES + 1]; // zone z occupies cand[cand_end[z-1] .. cand_end[z])
     bool cand_valid;
     int64_t cand_ph, cand_first, cand_last;
     uint32_t cand_gen;
@@ -949,14 +964,19 @@ static void ram_evict(torrentfs *t) {   // caller holds t->cache_lock
         ((PIN_HEAD_BYTES + t->meta.piece_len - 1) / t->meta.piece_len);
     if (t->ram_lo < pin_limit) t->ram_lo = pin_limit;
 
-    // Keep at most ~32 MB (or at least 4 pieces) behind playhead for slight seek resilience.
+    // Keep ~32 MB (at least 4 pieces) behind the playhead for slight seek
+    // resilience, or the whole back window when that is set: the back window
+    // fetches those pieces, so dropping them would only fetch them again.
+    int64_t back = t->back_pieces;
     int64_t keep_behind = (32LL * 1024 * 1024) / t->meta.piece_len;
+    if (keep_behind < back) keep_behind = back;
     if (keep_behind < 4) keep_behind = 4;
     int64_t safe_ph = (ph > keep_behind) ? ph - keep_behind : 0;
     if (safe_ph < pin_limit) safe_ph = pin_limit;
+    const int64_t budget = t->ram_budget + back * t->meta.piece_len;
 
-    while (t->ram_resident > t->ram_budget || (t->ram_lo < safe_ph && t->ram_resident > (64LL << 20))) {
-        int64_t target_ph = (t->ram_resident > t->ram_budget) ? ph : safe_ph;
+    while (t->ram_resident > budget || (t->ram_lo < safe_ph && t->ram_resident > (64LL << 20))) {
+        int64_t target_ph = (t->ram_resident > budget) ? ph : safe_ph;
         while (t->ram_lo < target_ph && !t->ram_piece[t->ram_lo]) t->ram_lo++;
         if (t->ram_lo >= target_ph) break;     // nothing strictly behind left to drop
         int64_t v = t->ram_lo;
@@ -2078,7 +2098,12 @@ static int piece_priority_rb(torrentfs *t, int64_t idx, int64_t rb) {
         if (cap < STREAM_MIN_PIECES) cap = STREAM_MIN_PIECES;
         if (max_d > cap) max_d = cap;
     }
-    if (d < 0 || d > max_d) {
+    if (d < 0) {
+        // Behind the playhead: the back window, below every forward zone.
+        int64_t back = t->back_pieces;
+        return (back > 0 && -d <= back) ? 6 : 0;
+    }
+    if (d > max_d) {
         return 0;
     }
     if (d == 0) return 1;
@@ -2111,21 +2136,28 @@ static void cand_refresh(torrentfs *t) {
     int64_t fhi = t->file_last_piece + LOOKAHEAD_PIECES;
     if (fhi >= t->meta.piece_count) fhi = t->meta.piece_count - 1;
     int64_t flo = (ph > t->file_first_piece) ? ph : t->file_first_piece;
-    int count[6] = {0};
+    int64_t back = t->back_pieces;
+    if (back > 0) flo -= back;   // the back window (zone 6)
+    if (flo < t->file_first_piece) flo = t->file_first_piece;
+    int count[TFS_ZONES + 1] = {0};
     for (int64_t i = flo; i <= fhi; i++) {
         int z = piece_priority_rb(t, i, -1);
-        if (z < 1 || z > 5) z = 0;
+        if (z < 1 || z > TFS_ZONES) z = 0;
         t->cand_tmp[i - flo] = (uint8_t)z;
         count[z]++;
     }
     t->cand_end[0] = 0;
-    for (int z = 1; z <= 5; z++) t->cand_end[z] = t->cand_end[z - 1] + count[z];
-    int pos[6];
-    for (int z = 1; z <= 5; z++) pos[z] = t->cand_end[z - 1];
+    for (int z = 1; z <= TFS_ZONES; z++) t->cand_end[z] = t->cand_end[z - 1] + count[z];
+    int pos[TFS_ZONES + 1];
+    for (int z = 1; z <= TFS_ZONES; z++) pos[z] = t->cand_end[z - 1];
     for (int64_t i = flo; i <= fhi; i++) {
         int z = t->cand_tmp[i - flo];
-        if (z) t->cand[pos[z]++] = (int32_t)i;
+        if (z && z != TFS_ZONE_BACK) t->cand[pos[z]++] = (int32_t)i;
     }
+    // The back window nearest-first: a short rewind is the likely one.
+    for (int64_t i = fhi; i >= flo; i--)
+        if (t->cand_tmp[i - flo] == TFS_ZONE_BACK)
+            t->cand[pos[TFS_ZONE_BACK]++] = (int32_t)i;
     t->cand_valid = true;
 }
 // Per-session in-flight request budget: dynamic window scaled by rate EMA and
@@ -2414,6 +2446,38 @@ static int try_open(torrentfs *t, sess *s, u64 now, int64_t i, int zone,
     return 1;
 }
 
+// The back window may be claimed: it is set, has candidates, and the player is
+// comfortably buffered ahead.
+static bool back_window_open(const torrentfs *t) {
+    return t->back_pieces > 0 && t->backlog_ms >= BACK_MIN_BACKLOG_MS &&
+           t->cand_end[TFS_ZONE_BACK] > t->cand_end[TFS_ZONE_BACK - 1];
+}
+
+// Zone 6 (the back window, nearest-first): finish its open pieces, then open
+// one -- at most a quarter of the assembly slots, and never the last free one,
+// so the forward window always has a slot when the playhead moves on.
+static bool scan_back_zone(torrentfs *t, sess *s, u64 now,
+                           int64_t *out_piece, int *out_block) {
+    const int z0 = t->cand_end[TFS_ZONE_BACK - 1], z1 = t->cand_end[TFS_ZONE_BACK];
+    for (int c = z0; c < z1; c++)
+        if (try_active(t, s, now, t->cand[c], TFS_ZONE_BACK, out_piece, out_block))
+            return true;
+    if (t->n_active_aq >= t->n_aq - 1) return false;
+    const int64_t ph = t->playhead_piece;
+    int open_back = 0;
+    for (int i = 0; i < t->n_aq; i++)
+        if (t->aq[i].idx >= 0 && t->aq[i].idx < ph) open_back++;
+    int cap = t->n_aq / 4;
+    if (cap < 1) cap = 1;
+    if (open_back >= cap) return false;
+    for (int c = z0; c < z1; c++) {
+        int r = try_open(t, s, now, t->cand[c], TFS_ZONE_BACK, out_piece, out_block);
+        if (r > 0) return true;
+        if (r < 0) break;
+    }
+    return false;
+}
+
 // Pick the next (piece, block) this session should request:
 // Uses strict_fill_pending_first: existing open/assembling pieces are filled
 // to completion BEFORE opening new pieces far ahead, preventing pieces from
@@ -2447,7 +2511,8 @@ static bool scan_next_block_slow(torrentfs *t, sess *s, u64 now,
         for (int c = z1 - 1; c >= z0; c--)
             if (try_active(t, s, now, t->cand[c], zone, out_piece, out_block)) return true;
     }
-    return false;
+    // Nothing ahead for it: the back window suits a slow session well.
+    return back_window_open(t) && scan_back_zone(t, s, now, out_piece, out_block);
 }
 
 static bool scan_next_block(torrentfs *t, sess *s, u64 now,
@@ -2485,7 +2550,7 @@ static bool scan_next_block(torrentfs *t, sess *s, u64 now,
             if (r < 0) break;
         }
     }
-    return false;
+    return back_window_open(t) && scan_back_zone(t, s, now, out_piece, out_block);
 }
 
 // Keep the session's outstanding-request ring full up to its nominal depth.
@@ -5184,6 +5249,21 @@ int torrentfs_ram_active(const torrentfs *tfs) {
 
 void torrentfs_set_backlog(torrentfs *tfs, int ms) {
     tfs->backlog_ms = ms;
+}
+
+void torrentfs_set_back_window(torrentfs *tfs, int64_t bytes) {
+    if (!tfs || tfs->meta.piece_len <= 0) return;
+    if (bytes < 0) bytes = 0;
+    if (bytes > BACK_WINDOW_MAX) bytes = BACK_WINDOW_MAX;
+    int64_t n = (bytes + tfs->meta.piece_len - 1) / tfs->meta.piece_len;
+    if (n == tfs->back_pieces) return;
+    // Under cache_lock: ram_evict reads it for the RAM budget.
+    if (tfs->ram_mode) mutexLock(&tfs->cache_lock);
+    tfs->back_pieces = n;
+    if (tfs->ram_mode) mutexUnlock(&tfs->cache_lock);
+    __atomic_add_fetch(&tfs->zone_gen, 1, __ATOMIC_RELEASE);   // rebuild candidates
+    engine_log(ENGINE_LOG_INFO, "[torrentfs] back window %lld pieces (%lld MB)",
+               (long long)n, (long long)(n * tfs->meta.piece_len >> 20));
 }
 
 void torrentfs_announce_now(torrentfs *tfs) {

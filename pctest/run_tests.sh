@@ -110,6 +110,12 @@ echo
     --label "2MB pieces, 6 x 800 KB/s"
 "$out/test_stream" --size 400 --piece 8 --seeds 0,0,0,0 \
     --label "8MB pieces, 400 MB (RAM window evicts)"
+# Resume at 70% and rewind 16 MB: with the back window the rewind is in RAM
+# already (16 MB behind: 8/8 in, ~0 s); without it, it waits for the download.
+"$out/test_stream" --size 128 --piece 2 --seeds 6000,6000 --resume 24 \
+    --label "resume, back window 24 MB"
+"$out/test_stream" --size 128 --piece 2 --seeds 6000,6000 --resume 0 \
+    --label "resume, no back window"
 echo
 "$out/test_httpsrc"
 echo

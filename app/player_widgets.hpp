@@ -52,6 +52,21 @@ class Button : public brls::Box
     bool showCaption = false;
 };
 
+// A one-line action pill that pops up over a panel button (the subtitles
+// chip). The pill is sized to the text and centred in the view, which is the
+// touch area; `focused` paints it white, like a focused button.
+class Chip : public brls::Box
+{
+  public:
+    Chip();
+
+    void draw(NVGcontext* vg, float x, float y, float width, float height,
+              brls::Style style, brls::FrameContext* ctx) override;
+
+    std::string text;
+    bool focused = false;
+};
+
 // The timeline: played / buffered / the rest, a knob, and -- while a seek is
 // being aimed -- the target time in a bubble over the cursor. Times are
 // seconds; set them every frame the panel is up.
