@@ -6,6 +6,26 @@ The text under a version heading is the GitHub release description, which the
 app also shows in About → View changelog. So a section holds plain text and
 lists only, no headings or emphasis.
 
+## 1.1 — 14 November 2026
+
+Instant rewind, sleep timer, quick subtitle toggle, side panels for audio and subtitles, battery indicator in player, and unified search.
+
+Player
+- Instant rewind: mpv keeps 128 MB of back cache, and the torrent engine fetches and retains a sliding window of up to 2.5 minutes behind the playhead in RAM (up to 384 MB). Back pieces are requested with low priority once ahead buffer is sufficient, making rewind instantaneous.
+- Quick subtitle toggle: hovering over the Subtitles button reveals a pop-up button to turn subtitles off or back on with a single click or tap.
+- Battery indicator: exact percentage and battery status icon in the top bar beside the clock (turns red when low, lightning bolt when charging).
+- Side track lists: audio and subtitle selection now use smooth side panels instead of dropdowns, eliminating hangs on releases with dozens of tracks.
+- Sleep timer: automatic sleep after 15, 30, 45, 60, 90, 120 minutes or at the end of the video. Displays a warning 1 minute before sleeping, pauses playback with position saved, and puts the console to sleep.
+- Playback end action: choose between "Next episode", "Return to menu", "Sleep mode", or "Exit application" (in the player settings and general playback options).
+- Handheld saturation: color adjustment now uses a screen-space shader, properly working with the hardware video decoder and test patterns.
+
+Catalog and search
+- Search all categories: "All" is now the default search category, neatly separating Movies, TV Shows, and Anime into distinct sections.
+
+Stability and fixes
+- Fixed on-screen keyboard freeze when entering long server addresses (Jackett, TorrServer).
+- Fixed Borealis RecyclerFrame list width caching bug across instances.
+
 ## 1.0.0 — 8 November 2026
 
 The first major version: a new torrent engine, a Lampa-style player and a lot of stability work.

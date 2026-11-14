@@ -20,8 +20,8 @@ include(${BOREALIS_LIBRARY}/cmake/toolchain.cmake)
 
 project(NX-torrent-player)
 set(VERSION_MAJOR "1")
-set(VERSION_MINOR "0")
-set(VERSION_ALTER "0")
+set(VERSION_MINOR "1")
+set(VERSION_ALTER "")
 set(PROJECT_AUTHOR "shodowlo")
 # On-device app name shown in the Homebrew Menu.
 set(APP_TITLE "NX Torrent Player")
@@ -102,8 +102,14 @@ target_compile_options(${PROJECT_NAME} PRIVATE -Wformat -Werror=format)
 
 # One source of truth for the version: it names the release archive, is shown in
 # Options, and is what the updater compares against the latest tag.
+if (VERSION_ALTER STREQUAL "")
+    set(APP_VERSION "${VERSION_MAJOR}.${VERSION_MINOR}")
+else ()
+    set(APP_VERSION "${VERSION_MAJOR}.${VERSION_MINOR}.${VERSION_ALTER}")
+endif ()
+
 target_compile_definitions(${PROJECT_NAME} PRIVATE
-    APP_VERSION="${VERSION_MAJOR}.${VERSION_MINOR}.${VERSION_ALTER}"
+    APP_VERSION="${APP_VERSION}"
     UPDATE_API_URL="${UPDATE_API_URL}"
     UPDATE_TAG_URL="${UPDATE_TAG_URL}"
     TMDB_API_KEY="${TMDB_API_KEY}"
@@ -114,7 +120,7 @@ if (PLATFORM_SWITCH)
     # "romfs:/"). The font is dropped — borealis uses the Switch shared system
     # font on device. This mirrors borealis/demo's Switch packaging.
     add_custom_target(${PROJECT_NAME}.nro DEPENDS ${PROJECT_NAME}
-        COMMAND ${NX_NACPTOOL_EXE} --create "${APP_TITLE}" "${PROJECT_AUTHOR}" "${VERSION_MAJOR}.${VERSION_MINOR}.${VERSION_ALTER}" ${PROJECT_NAME}.nacp --titleid=${PROJECT_TITLEID}
+        COMMAND ${NX_NACPTOOL_EXE} --create "${APP_TITLE}" "${PROJECT_AUTHOR}" "${APP_VERSION}" ${PROJECT_NAME}.nacp --titleid=${PROJECT_TITLEID}
         COMMAND ${CMAKE_COMMAND} -E copy_directory ${PROJECT_RESOURCES} ${CMAKE_BINARY_DIR}/resources
         COMMAND ${CMAKE_COMMAND} -E remove_directory ${CMAKE_BINARY_DIR}/resources/font
         # Drop borealis' demo/sample resources -- our app ships its own UI in code

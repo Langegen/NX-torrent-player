@@ -210,10 +210,21 @@ void fetchNotesAsync(
             std::string resp, err;
             if (!http::get(url, resp, err))
             {
-                if (firstErr.empty()) firstErr = err;
-                brls::Logger::info("[update] changelog {} fetch failed: {}", tag,
-                                   err);
-                continue;
+                if (p == 0)
+                {
+                    char shorttag[32];
+                    std::snprintf(shorttag, sizeof(shorttag), "v%d.%d", v0, v1);
+                    std::string url2 = std::string(UPDATE_TAG_URL) + shorttag;
+                    if (http::get(url2, resp, err))
+                        tag = shorttag;
+                }
+                if (resp.empty())
+                {
+                    if (firstErr.empty()) firstErr = err;
+                    brls::Logger::info("[update] changelog {} fetch failed: {}", tag,
+                                       err);
+                    continue;
+                }
             }
             std::string body = json::str(resp, "body");
             if (body.empty())

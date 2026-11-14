@@ -45,7 +45,12 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         run: |
           v() { sed -n "s/^set(VERSION_$1 \"\([0-9]*\)\")/\1/p" CMakeLists.txt; }
-          version="$(v MAJOR).$(v MINOR).$(v ALTER)"
+          alter="$(v ALTER)"
+          if [ -n "$alter" ]; then
+            version="$(v MAJOR).$(v MINOR).$alter"
+          else
+            version="$(v MAJOR).$(v MINOR)"
+          fi
           tag="${GITHUB_REF_NAME#v}"
           echo "CMakeLists.txt: $version, tag: $tag"
           if [ "$version" != "$tag" ]; then
