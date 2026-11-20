@@ -191,6 +191,14 @@ In `GLFWVideoContext::beginFrame()`, initialized `oldWidth/oldHeight` (previousl
 
 In `Application::onWindowResized()`, bypassed the desktop 100ms debounce timer on `__SWITCH__`. Docking is a discrete hardware event: delaying `setWindowSize()` left `windowWidth/Height` at 1280x720 while the native surface was already 1920x1080, which broke mpv FBO bounds and letterboxing. Marked `LOCAL PATCH`.
 
+### 14. `library/include/borealis/core/cache_helper.hpp` — TextureCache reverse-iterator fix & safe set()
+
+Fixed a fatal Use-After-Free bug in `LRUCache::deleteCache()` where erasing a node with a reverse iterator `cacheList.erase(std::next(i).base())` invalidated `i` and subsequent `i++` accessed freed memory, causing crashes when cache capacity was reached. Also replaced `throw std::logic_error` in `LRUCache::set()` on duplicate keys with a safe texture update. Marked `LOCAL PATCH`.
+
+### 15. `library/lib/core/box.cpp` — nested Box culling in `Box::draw`
+
+Enabled viewport culling for `Box` children (grid rows, poster cards) when their bounding rect is completely above or below the parent's visible bounds and neither the child nor its subtree holds focus. Previously `Box::draw` skipped culling for any `Box*`, forcing full frame traversal and draw commands for hundreds of off-screen items. Marked `LOCAL PATCH`.
+
 ## Updating
 
 Re-cloning upstream **drops the patch** — re-apply it, and check this file's

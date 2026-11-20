@@ -47,7 +47,11 @@ class PosterGrid : public brls::Box
     brls::View* firstCard = nullptr;  // freed with the grid's rows (load() clears it)
 
     void next();
-    bool exhausted() const { return page >= totalPages || (maxPages > 0 && page >= maxPages); }
+    bool exhausted() const
+    {
+        int cap = maxPages > 0 ? maxPages : 20;  // safety ceiling: at most 20 pages (400 items)
+        return page >= totalPages || page >= cap;
+    }
     void add(const content::Item& it);
     void focusFirstIfLost();
 };

@@ -9,6 +9,7 @@
 #include <stb_image.h>
 
 #include <cmath>
+#include <deque>
 
 namespace ui
 {
@@ -98,6 +99,84 @@ int cachedTexture(const std::string& path)
     if (tex > 0) cache.removeCache(tex);
     return tex;
 }
+
+struct PendingTexture
+{
+    brls::Image* img;
+    std::string path;
+    std::shared_ptr<bool> alive;
+    unsigned char* rgba;
+    int w, h;
+};
+
+static std::deque<PendingTexture> s_pendingUploads;
+static bool s_uploadPumpScheduled = false;
+static bool s_exitSubscribed = false;
+
+static void pumpUploads();
+
+static void ensureExitSubscribed()
+{
+    if (s_exitSubscribed) return;
+    s_exitSubscribed = true;
+    brls::Application::getExitEvent()->subscribe([]() {
+        for (auto& item : s_pendingUploads)
+        {
+            if (item.rgba) stbi_image_free(item.rgba);
+        }
+        s_pendingUploads.clear();
+        s_uploadPumpScheduled = false;
+    });
+}
+
+static void pumpUploads()
+{
+    s_uploadPumpScheduled = false;
+    constexpr int kMaxUploadsPerTick = 4;
+    int processed = 0;
+
+    while (!s_pendingUploads.empty() && processed < kMaxUploadsPerTick)
+    {
+        PendingTexture item = std::move(s_pendingUploads.front());
+        s_pendingUploads.pop_front();
+        processed++;
+
+        if (!item.rgba) continue;
+
+        if (!*item.alive)
+        {
+            stbi_image_free(item.rgba);
+            continue;
+        }
+
+        if (cachedTexture(item.path) > 0)
+        {
+            stbi_image_free(item.rgba);
+            item.img->setImageFromFile(item.path);
+            continue;
+        }
+
+        if (item.img->getTexture() > 0 && !item.img->getFreeTexture())
+            brls::TextureCache::instance().removeCache(item.img->getTexture());
+        item.img->setFreeTexture(false);
+
+        int tex = nvgCreateImageRGBA(brls::Application::getNVGContext(), item.w, item.h, 0,
+                                     item.rgba);
+        stbi_image_free(item.rgba);
+
+        if (tex > 0)
+        {
+            item.img->innerSetImage(tex);
+            brls::TextureCache::instance().addCache(item.path, tex);
+        }
+    }
+
+    if (!s_pendingUploads.empty())
+    {
+        s_uploadPumpScheduled = true;
+        brls::delay(1, pumpUploads);
+    }
+}
 } // namespace
 
 void loadImageAsync(brls::Image* img, const std::string& path, std::shared_ptr<bool> alive)
@@ -112,31 +191,50 @@ void loadImageAsync(brls::Image* img, const std::string& path, std::shared_ptr<b
         [img, path, alive]() {
             int w = 0, h = 0, n = 0;
             unsigned char* rgba = stbi_load(path.c_str(), &w, &h, &n, 4);
+            if (rgba && (w > 512 || h > 768))
+            {
+                int scale = 1;
+                while ((w / (scale * 2) >= 300) && (h / (scale * 2) >= 450))
+                    scale *= 2;
+                if (scale > 1)
+                {
+                    int nw = w / scale;
+                    int nh = h / scale;
+                    unsigned char* downsampled = (unsigned char*)malloc(nw * nh * 4);
+                    if (downsampled)
+                    {
+                        for (int dy = 0; dy < nh; dy++)
+                        {
+                            const unsigned char* srcRow = rgba + (dy * scale) * (w * 4);
+                            unsigned char* dstRow = downsampled + dy * (nw * 4);
+                            for (int dx = 0; dx < nw; dx++)
+                            {
+                                const unsigned char* sp = srcRow + (dx * scale) * 4;
+                                unsigned char* dp = dstRow + dx * 4;
+                                dp[0] = sp[0]; dp[1] = sp[1]; dp[2] = sp[2]; dp[3] = sp[3];
+                            }
+                        }
+                        stbi_image_free(rgba);
+                        rgba = downsampled;
+                        w = nw;
+                        h = nh;
+                    }
+                }
+            }
+
             brls::sync([img, path, alive, rgba, w, h]() {
                 if (!*alive || !rgba)
                 {
                     if (rgba) stbi_image_free(rgba);
                     return;
                 }
-                // Another card may have loaded the same file meanwhile.
-                if (cachedTexture(path) > 0)
+                ensureExitSubscribed();
+                s_pendingUploads.push_back({ img, path, alive, rgba, w, h });
+                if (!s_uploadPumpScheduled)
                 {
-                    stbi_image_free(rgba);
-                    img->setImageFromFile(path);
-                    return;
+                    s_uploadPumpScheduled = true;
+                    pumpUploads();
                 }
-                // What Image::setImageFromFile does, minus the decoding: the
-                // previous cached texture loses this reference, and the new
-                // one is TextureCache's to free.
-                if (img->getTexture() > 0 && !img->getFreeTexture())
-                    brls::TextureCache::instance().removeCache(img->getTexture());
-                img->setFreeTexture(false);
-                int tex = nvgCreateImageRGBA(brls::Application::getNVGContext(), w, h, 0,
-                                             rgba);
-                stbi_image_free(rgba);
-                if (tex <= 0) return;
-                img->innerSetImage(tex);
-                brls::TextureCache::instance().addCache(path, tex);
             });
         },
         workers::Priority::Low);

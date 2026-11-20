@@ -17,6 +17,7 @@
 #include "player.hpp"
 #include "theme.hpp"
 #include "i18n.hpp"
+#include "widgets.hpp"
 
 bool naturalCompare(const std::string& a, const std::string& b)
 {
@@ -252,7 +253,7 @@ class RowCell : public brls::Box
             stremio::fetchPosterAsync(r.artId, r.artUrl,
                                       [art, live = alive](std::string path) {
                                           if (!*live || path.empty()) return;
-                                          art->setImageFromFile(path);
+                                          ui::loadImageAsync(art, path, live);
                                       });
         }
 
@@ -1351,7 +1352,7 @@ class MovieDetailActivity : public AddonSourcePicker
         stremio::fetchHqArtAsync(item.id, item.poster,
                                  [this, live](std::string path) {
                                      if (!*live || path.empty() || !poster) return;
-                                     poster->setImageFromFile(path);
+                                     ui::loadImageAsync(poster, path, live);
                                  });
     }
 
@@ -1436,7 +1437,7 @@ class EpisodeDetailActivity : public AddonSourcePicker
             auto live = alive;
             stremio::fetchPosterAsync(
                 ep.id, ep.thumbnail, [still, live](std::string p) {
-                    if (*live && !p.empty()) still->setImageFromFile(p);
+                    if (*live && !p.empty()) ui::loadImageAsync(still, p, live);
                 });
         }
         top->addView(still);
@@ -1832,7 +1833,7 @@ class SeriesDetailActivity : public brls::Activity
         stremio::fetchHqArtAsync(item.id, item.poster,
                                  [this, live](std::string path) {
                                      if (!*live || path.empty() || !poster) return;
-                                     poster->setImageFromFile(path);
+                                     ui::loadImageAsync(poster, path, live);
                                  });
     }
 
@@ -2059,7 +2060,7 @@ class SeriesDetailActivity : public brls::Activity
             auto live = cardsAlive;
             stremio::fetchPosterAsync(
                 v.id, v.thumbnail, [img, live](std::string p) {
-                    if (*live && !p.empty()) img->setImageFromFile(p);
+                    if (*live && !p.empty()) ui::loadImageAsync(img, p, live);
                 });
         }
 
