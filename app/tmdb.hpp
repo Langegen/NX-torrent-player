@@ -73,6 +73,14 @@ std::vector<content::Item> parseList(const std::string& json,
 bool parseDetails(const std::string& json, content::Kind kind,
                   const std::string& imageBase, content::Details& out);
 
+// /person/{id}/combined_credits.
+// If isDirector is true, extracts works directed or created by the person (or falls back to cast).
+// If isDirector is false, extracts works where the person is part of the cast (or falls back to crew).
+// Sorted by popularity descending.
+std::vector<content::Item> parsePersonCredits(const std::string& json,
+                                              const std::string& imageBase,
+                                              bool isDirector);
+
 // /tv/{id}/season/{n}.
 std::vector<content::Episode> parseSeason(const std::string& json,
                                           const std::string& imageBase);
@@ -176,6 +184,8 @@ void fetchGenreAsync(content::Kind kind, int genreId, std::function<void(ListRes
 void searchAsync(const std::string& query, std::function<void(ListResult)> done);
 void fetchDetailsAsync(content::Kind kind, int id,
                        std::function<void(DetailsResult)> done);
+void fetchPersonCreditsAsync(int personId, bool isDirector,
+                             std::function<void(ListResult)> done);
 void fetchSeasonAsync(int tvId, int season, std::function<void(SeasonResult)> done);
 
 // Size of the response cache on the SD card, and emptying it.

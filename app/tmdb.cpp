@@ -1,9 +1,11 @@
 #include "tmdb.hpp"
 
+#include <algorithm>
 #include <cctype>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <set>
 
 #include "http.hpp"
 #include "json.hpp"
@@ -248,6 +250,7 @@ void readCommon(const std::string& top, content::Kind kind,
     it.posterUrlLarge = imageUrl(imageBase, "w342", poster);
     it.backdropUrl    = imageUrl(imageBase, "w1280", json::str(top, "backdrop_path"));
     it.rating         = json::number(top, "vote_average", 0.0);
+    it.popularity     = json::number(top, "popularity", 0.0);
     it.originalLanguage = json::str(top, "original_language");
 }
 } // namespace
@@ -365,12 +368,56 @@ bool parseDetails(const std::string& body, content::Kind kind,
         for (auto& s : specials) out.seasons.push_back(s);
     }
 
+    // For series, creators may be in root-level "created_by"
+    if (kind == content::Kind::Series)
+    {
+        for (const auto& c : json::objects(body, "created_by"))
+        {
+            content::Person p;
+            p.id = (int)json::integer(c, "id", 0);
+            p.name = json::str(c, "name");
+            p.role = "Creator";
+            p.profileUrl = imageUrl(imageBase, "w185", json::str(c, "profile_path"));
+            if (!p.name.empty())
+                out.directors.push_back(std::move(p));
+        }
+    }
+
     std::string credits = json::object(body, "credits");
+    for (const auto& c : json::objects(credits, "crew"))
+    {
+        if (json::str(c, "job") == "Director")
+        {
+            int pid = (int)json::integer(c, "id", 0);
+            std::string n = json::str(c, "name");
+            if (n.empty()) continue;
+            bool dup = false;
+            for (const auto& d : out.directors)
+            {
+                if (pid > 0 && d.id == pid) { dup = true; break; }
+                if (d.name == n) { dup = true; break; }
+            }
+            if (dup) continue;
+
+            content::Person p;
+            p.id = pid;
+            p.name = n;
+            p.role = "Director";
+            p.profileUrl = imageUrl(imageBase, "w185", json::str(c, "profile_path"));
+            out.directors.push_back(std::move(p));
+        }
+    }
+
     for (const auto& c : json::objects(credits, "cast"))
     {
-        std::string n = json::str(c, "name");
-        if (!n.empty()) out.cast.push_back(n);
-        if (out.cast.size() >= 6) break;
+        content::Person p;
+        p.id = (int)json::integer(c, "id", 0);
+        p.name = json::str(c, "name");
+        p.role = json::str(c, "character");
+        p.profileUrl = imageUrl(imageBase, "w185", json::str(c, "profile_path"));
+        if (!p.name.empty())
+            out.cast.push_back(std::move(p));
+        if (out.cast.size() >= 20) break;
     }
 
     // "recommendations": a list answer of its own, nested. Its titles are of
@@ -382,6 +429,66 @@ bool parseDetails(const std::string& body, content::Kind kind,
         if (out.similar.size() > 20) out.similar.resize(20);
     }
     return true;
+}
+
+std::vector<content::Item> parsePersonCredits(const std::string& body,
+                                              const std::string& imageBase,
+                                              bool isDirector)
+{
+    std::vector<content::Item> out;
+    std::set<std::pair<int, int>> seen;
+
+    auto addObj = [&](const std::string& obj, bool matchDirector) {
+        std::string top = json::topLevel(obj);
+        if (matchDirector)
+        {
+            std::string job = json::str(top, "job");
+            std::string dept = json::str(top, "department");
+            if (job != "Director" && dept != "Directing" && job != "Creator")
+                return;
+        }
+        std::string mt = json::str(top, "media_type");
+        content::Kind k = (mt == "tv") ? content::Kind::Series : content::Kind::Movie;
+        content::Item it;
+        readCommon(top, k, imageBase, it);
+        for (long g : json::integers(obj, "genre_ids")) it.genreIds.push_back((int)g);
+        if (it.tmdbId <= 0 || it.title.empty()) return;
+
+        auto key = std::make_pair(it.isSeries() ? 1 : 0, it.tmdbId);
+        if (seen.insert(key).second)
+        {
+            out.push_back(std::move(it));
+        }
+    };
+
+    if (isDirector)
+    {
+        for (const auto& obj : json::objects(body, "crew"))
+            addObj(obj, true);
+        if (out.empty())
+        {
+            for (const auto& obj : json::objects(body, "cast"))
+                addObj(obj, false);
+        }
+    }
+    else
+    {
+        for (const auto& obj : json::objects(body, "cast"))
+            addObj(obj, false);
+        if (out.empty())
+        {
+            for (const auto& obj : json::objects(body, "crew"))
+                addObj(obj, false);
+        }
+    }
+
+    std::sort(out.begin(), out.end(), [](const content::Item& a, const content::Item& b) {
+        if (a.popularity != b.popularity)
+            return a.popularity > b.popularity;
+        return a.date > b.date;
+    });
+
+    return out;
 }
 
 std::vector<content::Episode> parseSeason(const std::string& body,
@@ -806,6 +913,57 @@ void fetchDetailsAsync(content::Kind kind, int id,
         {
             r.ok = parseDetails(body, kind, s.imageBase, r.details);
             if (!r.ok) r.error = "unexpected answer from TMDB";
+        }
+        brls::sync([done, r]() { done(r); });
+    });
+}
+
+void fetchPersonCreditsAsync(int personId, bool isDirector,
+                             std::function<void(ListResult)> done)
+{
+    Settings s = settings();
+    if (s.apiKey.empty())
+    {
+        ListResult r;
+        r.error = "no TMDB key";
+        done(r);
+        return;
+    }
+    std::string url = requestUrl(s, "/person/" + std::to_string(personId) + "/combined_credits");
+    workers::run([s, url, isDirector, done]() {
+        ListResult r;
+        std::string body;
+        if (fetchCached(s, url, kListTtl, body, r.error))
+        {
+            r.items      = parsePersonCredits(body, s.imageBase, isDirector);
+            r.ok         = true;
+            r.page       = 1;
+            r.totalPages = 1;
+
+            for (auto& it : r.items)
+            {
+                if (hasUnsupportedGlyphs(it.title) || hasUnsupportedGlyphs(it.originalTitle))
+                {
+                    std::string itemPath = std::string(it.isSeries() ? "/tv/" : "/movie/") +
+                                           std::to_string(it.tmdbId);
+                    Settings enSettings = s;
+                    enSettings.language = "en-US";
+                    std::string enUrl = requestUrl(enSettings, itemPath);
+                    std::string enBody, enErr;
+                    if (fetchCached(enSettings, enUrl, kDetailsTtl, enBody, enErr))
+                    {
+                        std::string enTop = json::topLevel(enBody);
+                        std::string enTitle = json::str(enTop, it.isSeries() ? "name" : "title");
+                        if (!enTitle.empty() && !hasUnsupportedGlyphs(enTitle))
+                            it.title = enTitle;
+                    }
+                    if (hasUnsupportedGlyphs(it.title))
+                    {
+                        std::string clean = sanitizeRenderable(it.title);
+                        if (!clean.empty()) it.title = clean;
+                    }
+                }
+            }
         }
         brls::sync([done, r]() { done(r); });
     });

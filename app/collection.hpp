@@ -20,6 +20,8 @@ class PosterGrid : public brls::Box
     // Drops what is shown and starts over on `q` (page 1). `scroll` is the
     // frame the grid sits in, watched for the bottom.
     void load(const tmdb::ListQuery& q, brls::ScrollingFrame* scroll);
+    // Loads a person's filmography (movies and series).
+    void loadPersonCredits(int personId, bool isDirector, brls::ScrollingFrame* scroll);
     // Applied to each page before it is shown (the search's genre filter).
     std::function<bool(const content::Item&)> filter;
     // Where the focus goes when the grid is emptied under it.
@@ -58,3 +60,6 @@ class PosterGrid : public brls::Box
 
 // The full screen of one collection ("Top rated movies" and so on).
 void openCollection(const std::string& title, const tmdb::ListQuery& q);
+
+// The full screen of a person's filmography.
+void openPersonCredits(const std::string& name, const std::string& role, int personId, bool isDirector);

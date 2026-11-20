@@ -197,6 +197,12 @@ brls::Box* posterCard(const std::string& title, const std::string& artId,
                       std::function<void()> onClick, float w = 190.0f,
                       const std::string& badge = "");
 
+// A person card (actor or director): portrait photo on top, name and role below.
+brls::Box* personCard(const std::string& name, const std::string& role,
+                      const std::string& artId, const std::string& artUrl,
+                      std::shared_ptr<bool> alive,
+                      std::function<void()> onClick, float w = 120.0f);
+
 // A wide 16:9 card: image, title on a dark band, and a progress bar along the
 // bottom edge when `progress` is in 0..1 (Continue watching, episodes).
 brls::Box* wideCard(const std::string& title, const std::string& artId,

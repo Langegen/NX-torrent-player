@@ -391,6 +391,65 @@ brls::Box* posterCard(const std::string& title, const std::string& artId,
     return card;
 }
 
+brls::Box* personCard(const std::string& name, const std::string& role,
+                      const std::string& artId, const std::string& artUrl,
+                      std::shared_ptr<bool> alive,
+                      std::function<void()> onClick, float w)
+{
+    const float imgH = w * 1.35f;
+    const float h = imgH + 52.0f;
+
+    auto* card = new brls::Box();
+    card->setAxis(brls::Axis::COLUMN);
+    card->setWidth(w);
+    card->setHeight(h);
+    card->setCornerRadius(kRadius);
+    card->setBackgroundColor(theme::scrim(25));
+    card->setMargins(0.0f, 14.0f, 0.0f, 0.0f);
+    card->setClipsToBounds(true);
+    makeFocusable(card, std::move(onClick));
+
+    auto* imgBox = new brls::Box();
+    imgBox->setWidth(w);
+    imgBox->setHeight(imgH);
+    imgBox->setCornerRadius(kRadius);
+    imgBox->setClipsToBounds(true);
+    imgBox->setBackgroundColor(theme::scrim(40));
+
+    auto* img = new brls::Image();
+    img->setDimensions(w, imgH);
+    img->setScalingType(brls::ImageScalingType::FILL);
+    img->setClipsToBounds(true);
+    if (!artUrl.empty())
+        attachArt(img, artId, artUrl, alive);
+    imgBox->addView(img);
+    card->addView(imgBox);
+
+    auto* text = new brls::Box();
+    text->setAxis(brls::Axis::COLUMN);
+    text->setPadding(4.0f, 6.0f, 4.0f, 6.0f);
+
+    auto* nameLbl = new brls::Label();
+    nameLbl->setText(name);
+    nameLbl->setFontSize(13.0f);
+    nameLbl->setTextColor(nvgRGBA(255, 255, 255, 245));
+    nameLbl->setSingleLine(true);
+    text->addView(nameLbl);
+
+    if (!role.empty())
+    {
+        auto* roleLbl = new brls::Label();
+        roleLbl->setText(role);
+        roleLbl->setFontSize(11.0f);
+        roleLbl->setTextColor(nvgRGBA(255, 255, 255, 150));
+        roleLbl->setSingleLine(true);
+        text->addView(roleLbl);
+    }
+    card->addView(text);
+
+    return card;
+}
+
 brls::Box* wideCard(const std::string& title, const std::string& artId,
                     const std::string& artUrl, const std::string& localPath,
                     double progress, std::shared_ptr<bool> alive,

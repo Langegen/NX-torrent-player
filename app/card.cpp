@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <memory>
 
+#include "collection.hpp"
 #include "config.hpp"
 #include "i18n.hpp"
 #include "library.hpp"
@@ -80,6 +81,7 @@ struct CardState
     brls::Label* title         = nullptr;
     brls::Box* chips           = nullptr;
     brls::Label* overview      = nullptr;
+    brls::Label* director      = nullptr;
     brls::Label* cast          = nullptr;
     brls::Button* playBtn      = nullptr;
     brls::Button* markBtn      = nullptr;  // the bookmark status
@@ -91,6 +93,10 @@ struct CardState
     // The season on show, kept so its cards can be redrawn with fresh
     // progress when the library changes (an episode watched from here).
     std::vector<content::Episode> eps;
+    brls::Box* directorsSection = nullptr;
+    brls::Box* directorsRow    = nullptr;
+    brls::Box* castSection     = nullptr;
+    brls::Box* castRow         = nullptr;
     brls::Box* similarSection  = nullptr;  // "More like this"
     brls::Box* similarRow      = nullptr;
 };
@@ -140,6 +146,8 @@ class CardView : public brls::Box
         body->setPadding(34.0f, 60.0f, 40.0f, 60.0f);
         buildTop(body);
         buildSeasons(body);
+        buildDirectors(body);
+        buildCast(body);
         buildSimilar(body);
         scroll->setContentView(body);
         addView(scroll);
@@ -227,8 +235,13 @@ class CardView : public brls::Box
         st->overview->setMarginTop(18.0f);
         info->addView(st->overview);
 
-        st->cast = whiteLabel("", 16.0f, 165);
-        st->cast->setMarginTop(10.0f);
+        st->director = whiteLabel("", 16.0f, 215);
+        st->director->setMarginTop(12.0f);
+        st->director->setVisibility(brls::Visibility::GONE);
+        info->addView(st->director);
+
+        st->cast = whiteLabel("", 15.0f, 165);
+        st->cast->setMarginTop(4.0f);
         st->cast->setVisibility(brls::Visibility::GONE);
         info->addView(st->cast);
 
@@ -487,6 +500,72 @@ class CardView : public brls::Box
         body->addView(st->seasonsSection);
     }
 
+    static constexpr float kPersonW = 120.0f;
+    static constexpr float kPersonH = 120.0f * 1.35f + 52.0f;
+
+    void buildDirectors(brls::Box* body)
+    {
+        st->directorsSection = new brls::Box();
+        st->directorsSection->setAxis(brls::Axis::COLUMN);
+        st->directorsSection->setMarginTop(26.0f);
+        st->directorsSection->setVisibility(brls::Visibility::GONE);
+
+        auto* h = whiteLabel(st->d.item.isSeries() ? tr("Creators") : tr("Directors"), 20.0f, 235);
+        h->setMarginBottom(10.0f);
+        st->directorsSection->addView(h);
+
+        st->directorsRow = new brls::Box();
+        st->directorsSection->addView(ui::strip(st->directorsRow, kPersonH + 22.0f, false));
+        body->addView(st->directorsSection);
+    }
+
+    void buildCast(brls::Box* body)
+    {
+        st->castSection = new brls::Box();
+        st->castSection->setAxis(brls::Axis::COLUMN);
+        st->castSection->setMarginTop(26.0f);
+        st->castSection->setVisibility(brls::Visibility::GONE);
+
+        auto* h = whiteLabel(tr("Actors"), 20.0f, 235);
+        h->setMarginBottom(10.0f);
+        st->castSection->addView(h);
+
+        st->castRow = new brls::Box();
+        st->castSection->addView(ui::strip(st->castRow, kPersonH + 22.0f, false));
+        body->addView(st->castSection);
+    }
+
+    void showDirectors()
+    {
+        if (st->d.directors.empty()) return;
+        st->directorsRow->clearViews();
+        for (const auto& d : st->d.directors)
+        {
+            std::string role = d.role == "Creator" ? tr("Creator") : tr("Director");
+            auto* card = ui::personCard(d.name, role, d.key(), d.profileUrl, alive,
+                                        [d, role]() {
+                                            openPersonCredits(d.name, role, d.id, true);
+                                        }, kPersonW);
+            st->directorsRow->addView(card);
+        }
+        st->directorsSection->setVisibility(brls::Visibility::VISIBLE);
+    }
+
+    void showCast()
+    {
+        if (st->d.cast.empty()) return;
+        st->castRow->clearViews();
+        for (const auto& c : st->d.cast)
+        {
+            auto* card = ui::personCard(c.name, c.role, c.key(), c.profileUrl, alive,
+                                        [c]() {
+                                            openPersonCredits(c.name, tr("Actor"), c.id, false);
+                                        }, kPersonW);
+            st->castRow->addView(card);
+        }
+        st->castSection->setVisibility(brls::Visibility::VISIBLE);
+    }
+
     // TMDB's recommendations under everything else, as on the home rows: A
     // opens that title's card on top of this one, Y bookmarks it.
     void buildSimilar(brls::Box* body)
@@ -558,16 +637,28 @@ class CardView : public brls::Box
 
             fillChips();
             s->overview->setText(trimmed(s->d.item.overview));
+
+            if (!s->d.directors.empty())
+            {
+                std::string d = s->d.item.isSeries() ? tr("Creators: ") : tr("Director: ");
+                for (size_t i = 0; i < s->d.directors.size() && i < 3; i++)
+                    d += (i ? ", " : "") + s->d.directors[i].name;
+                s->director->setText(d);
+                s->director->setVisibility(brls::Visibility::VISIBLE);
+            }
+
             if (!s->d.cast.empty())
             {
                 std::string c = tr("Starring: ");
                 for (size_t i = 0; i < s->d.cast.size() && i < 4; i++)
-                    c += (i ? ", " : "") + s->d.cast[i];
+                    c += (i ? ", " : "") + s->d.cast[i].name;
                 s->cast->setText(c);
                 s->cast->setVisibility(brls::Visibility::VISIBLE);
             }
             s->playBtn->setText(playLabel());
             if (s->d.item.isSeries() && !s->d.seasons.empty()) showSeasons();
+            showDirectors();
+            showCast();
             showSimilar();
             loadImdbRating();
         });
