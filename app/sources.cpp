@@ -23,6 +23,7 @@
 #include "release.hpp"
 #include "stremio.hpp"
 #include "theme.hpp"
+#include "tmdb.hpp"
 #include "torrent_play.hpp"
 #include "widgets.hpp"
 
@@ -664,7 +665,13 @@ class SourcesView : public brls::Box
         {
             auto q = [&](const std::string& t) {
                 if (t.empty()) return;
-                std::string s = t;
+                std::string target = t;
+                if (tmdb::hasUnsupportedGlyphs(target))
+                {
+                    target = tmdb::sanitizeRenderable(target);
+                    if (target.empty()) return;
+                }
+                std::string s = target;
                 if (!item.isSeries() && !item.year.empty()) s += " " + item.year;
                 if (std::find(queries.begin(), queries.end(), s) == queries.end())
                     queries.push_back(s);
@@ -679,8 +686,8 @@ class SourcesView : public brls::Box
         jackett::Category cat =
             item.isSeries() ? jackett::Category::SERIES : jackett::Category::MOVIES;
         jackett::TitleHint hint;
-        hint.title         = item.title;
-        hint.titleOriginal = item.originalTitle;
+        hint.title         = tmdb::hasUnsupportedGlyphs(item.title) ? tmdb::sanitizeRenderable(item.title) : item.title;
+        hint.titleOriginal = tmdb::hasUnsupportedGlyphs(item.originalTitle) ? tmdb::sanitizeRenderable(item.originalTitle) : item.originalTitle;
         hint.year          = item.year;
         hint.series        = item.isSeries();
         hint.anime         = item.originalLanguage == "ja";

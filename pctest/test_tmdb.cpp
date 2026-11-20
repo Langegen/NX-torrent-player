@@ -289,6 +289,88 @@ static void test_errors()
     std::printf("      PASSED\n");
 }
 
+static const char* kMovieWithTranslations = R"J({
+  "id": 1384528,
+  "title": "\u0B93.\u0BAE\u0BCD: Operation Mole",
+  "original_title": "\u0B93.\u0BAE\u0BCD: Operation Mole",
+  "original_language": "ta",
+  "overview": "",
+  "release_date": "2026-11-19",
+  "runtime": 178,
+  "vote_average": 0.0,
+  "translations": {
+    "translations": [
+      {
+        "iso_3166_1": "US",
+        "iso_639_1": "en",
+        "data": {
+          "title": "O.M: Operation Mole",
+          "overview": "An elite undercover operative infiltrates a syndicate."
+        }
+      }
+    ]
+  }
+})J";
+
+static const char* kTamilList = R"J({
+  "page": 1,
+  "results": [
+    {
+      "id": 1384528,
+      "title": "\u0B93.\u0BAE\u0BCD: Operation Mole",
+      "original_title": "\u0B93.\u0BAE\u0BCD: Operation Mole",
+      "original_language": "ta"
+    },
+    {
+      "id": 1310458,
+      "title": "\u0B9A\u0BBE\u0BAF\u0BBE\u0BB5\u0BA9\u0BAPropagation",
+      "original_title": "\u0B9A\u0BBE\u0BAF\u0BBE\u0BB5\u0BA9\u0BAE\u0BCD",
+      "original_language": "ta"
+    }
+  ],
+  "total_pages": 1
+})J";
+
+static void test_renderability()
+{
+    std::printf("[8/8] Unsupported glyph detection, sanitization and English translation fallback...\n");
+
+    // Latin, Cyrillic, CJK
+    CHECK(!tmdb::hasUnsupportedGlyphs("Spider-Man: No Way Home"));
+    CHECK(!tmdb::hasUnsupportedGlyphs("Человек-паук: Нет пути домой"));
+    CHECK(!tmdb::hasUnsupportedGlyphs("ゴジラ-0.0"));
+    CHECK(!tmdb::hasUnsupportedGlyphs("호프"));
+    CHECK(!tmdb::hasUnsupportedGlyphs("007: Казино Рояль"));
+
+    // Indic, Thai, Arabic
+    CHECK(tmdb::hasUnsupportedGlyphs("\xD0\x9E" /* О in Cyrillic */) == false);
+    CHECK(tmdb::hasUnsupportedGlyphs("\xE0\xAE\x93.\xE0\xAE\xAE\xE0\xAF\x8D: Operation Mole")); // Tamil: ஓ.ம்: Operation Mole
+    CHECK(tmdb::hasUnsupportedGlyphs("\xE0\xA4\xB0\xE0\xA4\xBE\xE0\xA4\xAE")); // Hindi: राम
+    CHECK(tmdb::hasUnsupportedGlyphs("\xE0\xB0\xB0\xE0\xB0\xA3")); // Telugu: రణ
+    CHECK(tmdb::hasUnsupportedGlyphs("\xD8\xA3\xD9\x88\xD8\xB3\xD9\x83\xD8\xA7\xD8\xB1")); // Arabic: أوسكار
+    CHECK(tmdb::hasUnsupportedGlyphs("\xE0\xB8\xA0\xE0\xB8\xB2\xE0\xB8\x9E")); // Thai: ภาพ
+
+    // Sanitization
+    CHECK(tmdb::sanitizeRenderable("\xE0\xAE\x93.\xE0\xAE\xAE\xE0\xAF\x8D: Operation Mole") == "Operation Mole");
+    CHECK(tmdb::sanitizeRenderable("\xE0\xAE\x9A\xE0\xAE\xBE\xE0\xAE\xAF\xE0\xAE\xBE") == "");
+    CHECK(tmdb::sanitizeRenderable("  -.: Operation Mole :.-  ") == "Operation Mole");
+    CHECK(tmdb::sanitizeRenderable("Dune: Part Two") == "Dune: Part Two");
+    CHECK(tmdb::sanitizeRenderable("Дюна: Часть вторая") == "Дюна: Часть вторая");
+
+    // Details parsing with translations
+    content::Details d;
+    CHECK(tmdb::parseDetails(kMovieWithTranslations, content::Kind::Movie, IMG, d));
+    CHECK(d.item.title == "O.M: Operation Mole");
+    CHECK(d.item.overview == "An elite undercover operative infiltrates a syndicate.");
+
+    // List parsing sanitizes titles with mixed unsupported glyphs
+    auto list = tmdb::parseList(kTamilList, IMG, 0);
+    CHECK(list.size() == 2);
+    CHECK(list[0].title == "Operation Mole"); // Cleaned from "ஓ.ம்: Operation Mole"
+
+    std::printf("      PASSED\n");
+}
+
 int main()
 {
     std::printf("=========================================\n");
@@ -301,6 +383,7 @@ int main()
     test_season();
     test_errors();
     test_queries();
+    test_renderability();
     std::printf("\nALL TESTS PASSED\n");
     return 0;
 }

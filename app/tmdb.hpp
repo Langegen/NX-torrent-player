@@ -54,6 +54,14 @@ std::string imageUrl(const std::string& imageBase, const char* size,
 // TMDB's own error text from an error body ("Invalid API key: ..."), or "".
 std::string errorMessage(const std::string& body);
 
+// Checks whether a UTF-8 string contains codepoints outside the standard system
+// font coverage (e.g. Indic, Arabic, Thai, Hebrew scripts that render as tofu on Switch).
+bool hasUnsupportedGlyphs(const std::string& utf8);
+
+// Strips characters outside the supported font ranges and cleans up dangling
+// punctuation and separators at either end.
+std::string sanitizeRenderable(const std::string& utf8);
+
 // Items of a list answer ("results": trending, popular, search...). kind -1
 // reads each item's media_type (people are skipped); 0 = all films, 1 = all
 // series.
