@@ -53,7 +53,7 @@ class GLFWVideoContext : public VideoContext
     NVGcontext* nvgContext = nullptr;
 
 #ifdef __SWITCH__
-    int oldWidth, oldHeight;
+    int oldWidth = 0, oldHeight = 0;
     GLFWmonitor* monitor = nullptr;
 #endif
 };

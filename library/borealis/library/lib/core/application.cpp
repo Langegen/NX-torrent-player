@@ -1192,6 +1192,19 @@ void Application::setWindowSize(int width, int height)
 
 void Application::onWindowResized(int width, int height)
 {
+#if defined(__SWITCH__)
+    // LOCAL PATCH (NX-torrent-player): On Nintendo Switch docking is an instant
+    // hardware mode switch. Applying the new window size immediately prevents
+    // a 100ms desync where the EGL surface is 1080p while Application::windowWidth/Height
+    // remain 720p (which breaks mpv FBO rendering and causes black letterboxing).
+    Application::setWindowSize(width, height);
+    Application::getWindowSizeChangedEvent()->fire();
+
+    Logger::info("Window size changed to {}x{}, content size: {}x{} windowScale: {}",
+        width, height, contentWidth, contentHeight, Application::windowScale);
+    brls::Logger::info("scale factor: {}",
+        Application::getPlatform()->getVideoContext()->getScaleFactor());
+#else
     // Trigger event when Window size is stable
     static size_t iter = 0;
     brls::cancelDelay(iter);
@@ -1205,6 +1218,7 @@ void Application::onWindowResized(int width, int height)
             brls::Logger::info("scale factor: {}",
                 Application::getPlatform()->getVideoContext()->getScaleFactor());
         });
+#endif
 }
 
 void Application::setWindowPosition(int x, int y)

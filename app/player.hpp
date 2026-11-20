@@ -380,6 +380,7 @@ class MpvView : public brls::Box
 
     // Bilinear scalers for video above 1080p (4K), mpv's own below.
     bool lightScalers = false;
+    int64_t lastVideoWidth = 0;
     void applyRenderLoad(int64_t width);
     // Sizes the engine's back window from the stream's bitrate (needs obsDur).
     void applyBackWindow();

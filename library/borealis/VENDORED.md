@@ -183,6 +183,14 @@ width first, and until then `reloadData()` did nothing for it. It is a member
 now (`lastWidth`). The player no longer uses Dropdown for its track lists
 (they are side lists in `app/player.cpp`). Marked `LOCAL PATCH`.
 
+### 12. `library/lib/platforms/glfw/glfw_video.cpp` (+ `glfw_video.hpp`) — safe Switch docking resolution switch
+
+In `GLFWVideoContext::beginFrame()`, initialized `oldWidth/oldHeight` (previously uninitialized garbage in heap), added null checks for `glfwGetVideoMode(monitor)` during docking transitions to avoid null pointer dereference (`SIGSEGV` / `Data Abort`), and added a `glFinish()` sync before calling `glfwSetWindowSize(window, r->width, r->height)` so the native window (`nwindowSetDimensions`) is never resized while graphics buffers are active in Mesa/Nouveau. Marked `LOCAL PATCH`.
+
+### 13. `library/lib/core/application.cpp` — immediate window resize on Switch
+
+In `Application::onWindowResized()`, bypassed the desktop 100ms debounce timer on `__SWITCH__`. Docking is a discrete hardware event: delaying `setWindowSize()` left `windowWidth/Height` at 1280x720 while the native surface was already 1920x1080, which broke mpv FBO bounds and letterboxing. Marked `LOCAL PATCH`.
+
 ## Updating
 
 Re-cloning upstream **drops the patch** — re-apply it, and check this file's

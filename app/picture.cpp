@@ -133,7 +133,7 @@ void applySaturation(mpv_handle* mpv, int want)
 {
     // change-list, not a plain set: a set splits the list on ':' (and on the
     // console every path has one, "sdmc:/").
-    const char* clr[] = { "change-list", "glsl-shaders", "clr", "", nullptr };
+    const char* clr[] = { "change-list", "glsl-shaders", "clr", nullptr };
     mpv_command(mpv, clr);
     if (want == 0) return;
     std::string path = saturationShader(want);

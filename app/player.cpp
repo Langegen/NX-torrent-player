@@ -619,7 +619,11 @@ bool MpvView::startMpv()
     bool hwDec = config::get().hwDecode;
     mpv_set_option_string(mpv, "hwdec", hwDec ? "auto" : "no");
     if (hwDec)
-        mpv_set_option_string(mpv, "hwdec-extra-frames", "32");
+        mpv_set_option_string(mpv, "hwdec-extra-frames", "8");
+    // Force 8-bit RGBA for intermediate FBOs. mpv defaults to rgba16hf
+    // (64 bits per pixel), which costs 16.6 MB per 1080p frame and starves the
+    // Tegra X1 memory bus when docked. The display output is 8-bit RGBA anyway.
+    mpv_set_option_string(mpv, "fbo-format", "rgba8");
     mpv_set_option_string(mpv, "config", "no");
     mpv_set_option_string(mpv, "terminal", "no");
     // Switch audio output is stereo; force a proper downmix or 5.1 dialogue
@@ -2975,6 +2979,11 @@ void MpvView::pumpEvents()
         brls::Logger::info("[audio] loudness boost {}", want ? "on" : "off");
     }
 
+    // Scalers follow the dock state too: docked, 1080p output needs bilinear
+    // to avoid overloading the GPU.
+    if (lastVideoWidth > 0)
+        applyRenderLoad(lastVideoWidth);
+
     // The picture settings, the same way: the user's in handheld, neutral
     // docked, and whatever a panel row just changed.
     picture::sync(mpv, eqApplied);
@@ -3181,11 +3190,20 @@ void MpvView::applyBackWindow()
 void MpvView::applyRenderLoad(int64_t width)
 {
     if (!mpv || width <= 0) return;
-    bool light = width > 1920;
+    lastVideoWidth = width;
+    bool docked = brls::Application::windowWidth >= 1920;
+#ifdef __SWITCH__
+    docked = docked || appletGetOperationMode() == AppletOperationMode_Console;
+#endif
+    // 4K video is always too heavy for Lanczos.
+    // Docked mode (1080p output): 2.25x the pixels of handheld; Lanczos upscaling
+    // (for <= 720p) or chroma scaling (for 1080p YUV 4:2:0) over 2 million pixels
+    // chokes the Tegra X1 GPU. Bilinear is hardware-accelerated for free.
+    bool light = (width > 1920) || docked;
     if (light == lightScalers) return;
     lightScalers = light;
-    brls::Logger::info("[player] {}px wide video: {} scalers", width,
-                       light ? "bilinear" : "default");
+    brls::Logger::info("[player] {}px wide video (docked: {}): {} scalers", width,
+                       docked ? "yes" : "no", light ? "bilinear" : "default");
     const char* up   = light ? "bilinear" : "lanczos";
     const char* down = light ? "bilinear" : "hermite";
     mpv_set_property_string(mpv, "scale", up);
