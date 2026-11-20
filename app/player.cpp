@@ -619,20 +619,27 @@ bool MpvView::startMpv()
     bool hwDec = config::get().hwDecode;
     mpv_set_option_string(mpv, "hwdec", hwDec ? "auto" : "no");
     if (hwDec)
-        mpv_set_option_string(mpv, "hwdec-extra-frames", "8");
+        mpv_set_option_string(mpv, "hwdec-extra-frames", "24");
     // Force 8-bit RGBA for intermediate FBOs. mpv defaults to rgba16hf
     // (64 bits per pixel), which costs 16.6 MB per 1080p frame and starves the
     // Tegra X1 memory bus when docked. The display output is 8-bit RGBA anyway.
     mpv_set_option_string(mpv, "fbo-format", "rgba8");
     mpv_set_option_string(mpv, "config", "no");
     mpv_set_option_string(mpv, "terminal", "no");
-    // Switch audio output is stereo; force a proper downmix or 5.1 dialogue
-    // (centre channel) is dropped.
+    // Switch audio output is strictly 48kHz stereo; resample all audio to 48kHz
+    // upfront to eliminate clock drift between media stream and the hardware audio driver.
+    mpv_set_option_string(mpv, "audio-samplerate", "48000");
     mpv_set_option_string(mpv, "audio-channels", "stereo");
     // Do NOT normalize the downmix: "yes" scales the 5.1->stereo matrix down to
     // avoid clipping, which was one reason 5.1 tracks played quiet. "no" keeps the
     // standard downmix levels so the centre (dialogue) folds in at full strength.
     mpv_set_option_string(mpv, "audio-normalize-downmix", "no");
+    // Time video strictly to audio, smoothly adjusting A/V sync over 30 frames
+    // to compensate for delay jitter without sudden freezes or frame drops.
+    // framedrop=vo drops frames at VO stage only, never dropping decoder reference frames.
+    mpv_set_option_string(mpv, "video-sync", "audio");
+    mpv_set_option_string(mpv, "autosync", "30");
+    mpv_set_option_string(mpv, "framedrop", "vo");
     // Even so a 5.1 master downmixed to stereo sits well below a native stereo
     // track on the Switch's own speakers, which is what the boost is for (see
     // audioBoostWanted -- handheld only, and switchable in Options). Kept in
@@ -718,7 +725,10 @@ bool MpvView::startMpv()
     // after mpv's render, glfwSwapBuffers can present before the video is drawn
     // (black frame). This is what the other Switch mpv players set too.
     mpv_set_option_string(mpv, "opengl-glfinish", "yes");
-    mpv_set_option_string(mpv, "vd-lavc-dr", "yes");
+    // Disable direct rendering: in libmpv without MPV_RENDER_PARAM_ADVANCED_CONTROL,
+    // vd-lavc-dr causes buffer reuse conflicts, macroblock corruption and artifacts
+    // during software decoding or decoder fallback.
+    mpv_set_option_string(mpv, "vd-lavc-dr", "no");
     // Rendering sized for the Switch's GPU. Since 0.37 mpv's defaults are its
     // old "gpu-hq": downscaling in linear light with a kernel widened to the
     // scale factor, sigmoidal upscaling, and an HDR peak measured by a compute
@@ -4944,7 +4954,11 @@ void renderMpvFrame(NVGcontext* vg, mpv_render_context* rctx)
     glClear(GL_COLOR_BUFFER_BIT);
     glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
 
-    mpv_render_context_report_swap(rctx);
+    // Note: Do NOT call mpv_render_context_report_swap here.
+    // In Borealis, draw() runs at 60 Hz regardless of video framerate, and runs
+    // before the actual glfwSwapBuffers at endFrame(). Calling report_swap here
+    // artificially increments flip_count 60 times/sec, confusing libmpv's vsync
+    // pacing and causing cumulative A/V desync during long playback sessions.
 
     // Resume the nanovg frame that we flushed above, matching the parameters
     // Application::frame() opened it with, so the loading overlay (and the outer
