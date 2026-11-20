@@ -467,6 +467,9 @@ const Entry kFr[] = {
     { "Contrast", "Contraste" },
     { "Gamma", "Gamma" },
     { "Saturation", "Saturation" },
+    { "Red", "Rouge" },
+    { "Green", "Vert" },
+    { "Blue", "Bleu" },
     { "Picture", "Image" },
     { "Pattern", "Mire" },
     { "Reset all", "Tout réinitialiser" },
@@ -488,7 +491,7 @@ const Entry kFr[] = {
     { "Docked: the TV sets the picture and these settings are off. The patterns still help to set up the TV.", "Sur le dock, la TV règle l'image et ces réglages sont désactivés. Les mires aident tout de même à régler la TV." },
     { "Picture in handheld", "Image en mode portable" },
     { "Picture and test patterns", "Image et mires" },
-    { "Brightness, contrast, gamma and saturation of the video on the console's screen. Docked they are off: the TV sets the picture.", "Luminosité, contraste, gamma et saturation de la vidéo sur l'écran de la console. Désactivés sur le dock : c'est la TV qui règle l'image." },
+    { "Brightness, contrast, gamma, saturation and RGB balance of the video on the console's screen. Docked they are off: the TV sets the picture.", "Luminosité, contraste, gamma, saturation et balance RVB de la vidéo sur l'écran de la console. Désactivés sur le dock : c'est la TV qui règle l'image." },
 };
 
 std::string g_lang = "en";

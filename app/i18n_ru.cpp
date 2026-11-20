@@ -791,6 +791,9 @@ const Pair kRu[] = {
     { "Contrast", "Контраст" },
     { "Gamma", "Гамма" },
     { "Saturation", "Насыщенность" },
+    { "Red", "Красный" },
+    { "Green", "Зелёный" },
+    { "Blue", "Синий" },
     { "Pattern", "Тест" },
     { "Reset all", "Сбросить всё" },
     { "Adjusted", "Настроена" },
@@ -811,7 +814,7 @@ const Pair kRu[] = {
     { "Docked: the TV sets the picture and these settings are off. The patterns still help to set up the TV.", "В доке картинку настраивает ТВ, эти настройки выключены. Картинки всё равно помогут настроить сам телевизор." },
     { "Picture in handheld", "Изображение в портативном режиме" },
     { "Picture and test patterns", "Изображение и тестовые картинки" },
-    { "Brightness, contrast, gamma and saturation of the video on the console's screen. Docked they are off: the TV sets the picture.", "Яркость, контраст, гамма и насыщенность видео на экране консоли. В доке выключены: картинку настраивает ТВ." },
+    { "Brightness, contrast, gamma, saturation and RGB balance of the video on the console's screen. Docked they are off: the TV sets the picture.", "Яркость, контраст, гамма, насыщенность и баланс RGB видео на экране консоли. В доке выключены: картинку настраивает ТВ." },
 };
 
 const size_t kRuCount = sizeof(kRu) / sizeof(kRu[0]);

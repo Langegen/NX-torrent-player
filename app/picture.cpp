@@ -36,8 +36,7 @@ namespace picture
 namespace
 {
 
-const char* const kMpvNames[PROP_COUNT] = { "brightness", "contrast", "gamma",
-                                            "saturation" };
+const char* const kMpvNames[SATURATION] = { "brightness", "contrast", "gamma" };
 
 } // namespace
 
@@ -48,7 +47,11 @@ std::string label(int prop)
         case BRIGHTNESS: return tr("Brightness");
         case CONTRAST:   return tr("Contrast");
         case GAMMA:      return tr("Gamma");
-        default:         return tr("Saturation");
+        case SATURATION: return tr("Saturation");
+        case RED:        return tr("Red");
+        case GREEN:      return tr("Green");
+        case BLUE:       return tr("Blue");
+        default:         return "";
     }
 }
 
@@ -60,7 +63,11 @@ int& value(int prop)
         case BRIGHTNESS: return c.picBrightness;
         case CONTRAST:   return c.picContrast;
         case GAMMA:      return c.picGamma;
-        default:         return c.picSaturation;
+        case SATURATION: return c.picSaturation;
+        case RED:        return c.picRed;
+        case GREEN:      return c.picGreen;
+        case BLUE:       return c.picBlue;
+        default:         return c.picBrightness;
     }
 }
 
@@ -92,54 +99,77 @@ bool handheld()
 
 namespace
 {
-// Saturation through a user shader of ours, not mpv's equalizer: that one
-// scales only a YCbCr source's chroma while converting it, so on an RGB
-// picture -- the patterns, the hardware decoder's frames -- -30 and +30 looked
-// the same. The shader works on the final image (the OUTPUT hook: at the
-// screen's size, no extra pass over a 4K frame) and is loaded only while the
-// value is not 0.
+// Saturation and RGB channel gains through a user shader of ours, not mpv's
+// equalizer: mpv's equalizer has no RGB properties, and its saturation scales
+// only a YCbCr source's chroma while converting it (so on an RGB picture --
+// the patterns, the hardware decoder's frames -- -30 and +30 looked the same).
+// The shader works on the final image (the OUTPUT hook: at the screen's size,
+// no extra pass over a 4K frame) and is loaded only while any value is not 0.
 //
-// One file per value, with the factor written into it: libmpv renders with
-// vo_gpu, which knows no //!PARAM (that is gpu-next), and caches a shader by
-// its path for the renderer's life -- rewriting one file would not be seen.
-// They are a few hundred bytes, written once and reused.
-std::string saturationShader(int v)
+// One file per unique combination, with the factors written into it: libmpv
+// renders with vo_gpu, which knows no //!PARAM (that is gpu-next), and caches
+// a shader by its path for the renderer's life -- rewriting one file would not
+// be seen. They are a few hundred bytes, written once and reused.
+std::string colorShader(int sat, int r, int g, int b)
 {
-    char name[48];
-    std::snprintf(name, sizeof(name), "/sat_%d.glsl", 100 + v);
+    char name[64];
+    std::snprintf(name, sizeof(name), "/color_%d_%d_%d_%d.glsl",
+                  100 + sat, 100 + r, 100 + g, 100 + b);
     std::string path = std::string(APPDATA_SHADERS) + name;
     std::string have;
-    if (fsutil::readFile(path, have) && fsutil::looksComplete(have)) return path;
-    char body[640];
+    if (fsutil::readFile(path, have) && fsutil::looksComplete(have, '}')) return path;
+
+    std::string ops;
+    if (sat != 0)
+    {
+        char satLine[128];
+        std::snprintf(satLine, sizeof(satLine),
+                      "    float l = dot(c.rgb, vec3(0.2126, 0.7152, 0.0722));\n"
+                      "    c.rgb = mix(vec3(l), c.rgb, %.3f);\n",
+                      1.0 + sat / 100.0);
+        ops += satLine;
+    }
+    if (r != 0 || g != 0 || b != 0)
+    {
+        char rgbLine[192];
+        std::snprintf(rgbLine, sizeof(rgbLine),
+                      "    c.r *= %.3f;\n"
+                      "    c.g *= %.3f;\n"
+                      "    c.b *= %.3f;\n",
+                      1.0 + r / 100.0, 1.0 + g / 100.0, 1.0 + b / 100.0);
+        ops += rgbLine;
+    }
+
+    char body[768];
     std::snprintf(body, sizeof(body),
-                  "// NX Torrent Player: saturation %+d (app/picture.cpp)\n"
+                  "// NX Torrent Player: color sat %+d, rgb %+d %+d %+d (app/picture.cpp)\n"
                   "//!HOOK OUTPUT\n"
                   "//!BIND HOOKED\n"
-                  "//!DESC saturation\n"
+                  "//!DESC color\n"
                   "vec4 hook()\n"
                   "{\n"
                   "    vec4 c = HOOKED_tex(HOOKED_pos);\n"
-                  "    float l = dot(c.rgb, vec3(0.2126, 0.7152, 0.0722));\n"
-                  "    c.rgb = clamp(mix(vec3(l), c.rgb, %.3f), 0.0, 1.0);\n"
+                  "%s"
+                  "    c.rgb = clamp(c.rgb, 0.0, 1.0);\n"
                   "    return c;\n"
                   "}\n",
-                  v, 1.0 + v / 100.0);
+                  sat, r, g, b, ops.c_str());
     mkdir(APPDATA_SHADERS, 0777);
     if (!fsutil::writeAtomic(path, body)) return "";
     return path;
 }
 
-void applySaturation(mpv_handle* mpv, int want)
+void applyColorShader(mpv_handle* mpv, int sat, int r, int g, int b)
 {
     // change-list, not a plain set: a set splits the list on ':' (and on the
     // console every path has one, "sdmc:/").
     const char* clr[] = { "change-list", "glsl-shaders", "clr", nullptr };
     mpv_command(mpv, clr);
-    if (want == 0) return;
-    std::string path = saturationShader(want);
+    if (sat == 0 && r == 0 && g == 0 && b == 0) return;
+    std::string path = colorShader(sat, r, g, b);
     const char* add[] = { "change-list", "glsl-shaders", "append", path.c_str(), nullptr };
     if (path.empty() || mpv_command(mpv, add) < 0)
-        brls::Logger::error("[picture] saturation shader did not load ({})", path);
+        brls::Logger::error("[picture] color shader did not load ({})", path);
 }
 } // namespace
 
@@ -147,19 +177,34 @@ void sync(mpv_handle* mpv, Eq& applied)
 {
     if (!mpv) return;
     const bool on = handheld();
-    for (int p = 0; p < PROP_COUNT; p++)
+
+    // mpv equalizer properties: brightness, contrast, gamma
+    for (int p = 0; p < SATURATION; p++)
     {
         int want = on ? value(p) : 0;
         if (want == applied.v[p]) continue;
-        if (p == SATURATION)
-            applySaturation(mpv, want);
-        else
-        {
-            char s[8];
-            std::snprintf(s, sizeof(s), "%d", want);
-            mpv_set_property_string(mpv, kMpvNames[p], s);
-        }
+        char s[8];
+        std::snprintf(s, sizeof(s), "%d", want);
+        mpv_set_property_string(mpv, kMpvNames[p], s);
         applied.v[p] = want;
+    }
+
+    // Shader-based color properties: saturation, red, green, blue
+    int wantSat = on ? value(SATURATION) : 0;
+    int wantR   = on ? value(RED) : 0;
+    int wantG   = on ? value(GREEN) : 0;
+    int wantB   = on ? value(BLUE) : 0;
+
+    if (wantSat != applied.v[SATURATION] ||
+        wantR   != applied.v[RED] ||
+        wantG   != applied.v[GREEN] ||
+        wantB   != applied.v[BLUE])
+    {
+        applyColorShader(mpv, wantSat, wantR, wantG, wantB);
+        applied.v[SATURATION] = wantSat;
+        applied.v[RED]        = wantR;
+        applied.v[GREEN]      = wantG;
+        applied.v[BLUE]       = wantB;
     }
 }
 
@@ -501,13 +546,27 @@ void CalibrationView::draw(NVGcontext* vg, float x, float y, float width, float 
 class CalibrationActivity : public brls::Activity
 {
   public:
+    explicit CalibrationActivity(std::function<void()> onGone = nullptr)
+        : onGone(std::move(onGone))
+    {
+    }
+    ~CalibrationActivity() override
+    {
+        if (onGone) onGone();
+    }
     brls::View* createContentView() override { return new CalibrationView(); }
     // Opaque, like the player: nothing behind may be composited over mpv.
     bool isTranslucent() override { return false; }
+
+  private:
+    std::function<void()> onGone;
 };
 
 } // namespace
 
-void openCalibration() { brls::Application::pushActivity(new CalibrationActivity()); }
+void openCalibration(std::function<void()> onClose)
+{
+    brls::Application::pushActivity(new CalibrationActivity(std::move(onClose)));
+}
 
 } // namespace picture

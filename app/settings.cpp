@@ -361,13 +361,21 @@ brls::View* playbackPane()
 
     auto* pic = new brls::DetailCell();
     pic->setText(tr("Picture and test patterns"));
-    pic->registerClickAction([](brls::View*) {
-        picture::openCalibration();
+    auto showValue = [pic]() {
+        bool changed = false;
+        for (int p = 0; p < picture::PROP_COUNT; p++)
+            if (picture::value(p) != 0) changed = true;
+        pic->setDetailText(changed ? tr("Adjusted") : tr("Default"));
+        pic->setDetailTextColor(changed ? theme::accentText() : theme::textMuted());
+    };
+    showValue();
+    pic->registerClickAction([showValue](brls::View*) {
+        picture::openCalibration(showValue);
         return true;
     });
     list->addView(pic);
     list->addView(caption(
-        tr("Brightness, contrast, gamma and saturation of the video on the console's "
+        tr("Brightness, contrast, gamma, saturation and RGB balance of the video on the console's "
            "screen. Docked they are off: the TV sets the picture.")));
 
     return pane;

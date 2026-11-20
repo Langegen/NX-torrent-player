@@ -1,12 +1,13 @@
 #pragma once
 
-// The picture on the console's own screen: brightness, contrast, gamma and
-// saturation, through mpv's video equalizer (saturation through a shader of
-// ours, see picture.cpp). Handheld only -- docked, the TV
+// The picture on the console's own screen: brightness, contrast, gamma,
+// saturation and RGB balance, through mpv's video equalizer and a custom
+// color shader (see picture.cpp). Handheld only -- docked, the TV
 // has its own picture settings and is the one to calibrate, so the player
 // sends neutral values there and swaps them live when the console goes in or
 // out of the dock. The values live in config (picBrightness...).
 
+#include <functional>
 #include <string>
 
 struct mpv_handle;
@@ -20,6 +21,9 @@ enum Prop
     CONTRAST,
     GAMMA,
     SATURATION,
+    RED,
+    GREEN,
+    BLUE,
     PROP_COUNT,
 };
 
@@ -49,6 +53,6 @@ void sync(mpv_handle* mpv, Eq& applied);
 
 // The calibration screen: test patterns drawn by mpv, so the settings act on
 // them exactly as they act on a film, with the settings beside them.
-void openCalibration();
+void openCalibration(std::function<void()> onClose = nullptr);
 
 } // namespace picture
