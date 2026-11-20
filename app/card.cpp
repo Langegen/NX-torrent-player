@@ -83,6 +83,7 @@ struct CardState
     brls::Label* cast          = nullptr;
     brls::Button* playBtn      = nullptr;
     brls::Button* markBtn      = nullptr;  // the bookmark status
+    brls::Button* folderBtn    = nullptr;  // the bookmark folder/category
     brls::Box* seasonsSection  = nullptr;
     brls::Box* seasonBar       = nullptr;
     std::vector<brls::Button*> seasonBtns;
@@ -257,6 +258,12 @@ class CardView : public brls::Box
             if (auto s = weak.lock()) pickStatus(s);
         }, true);
         actions->addView(st->markBtn);
+
+        // Folders / categories
+        st->folderBtn = ui::actionButton(folderLabel(), false, [weak]() {
+            if (auto s = weak.lock()) pickFolder(s);
+        }, true);
+        actions->addView(st->folderBtn);
         info->addView(actions);
 
         top->addView(info);
@@ -346,6 +353,65 @@ class CardView : public brls::Box
         brls::Application::pushActivity(new brls::Activity(dd));
     }
 
+    std::string folderLabel() const
+    {
+        library::Entry en;
+        if (library::find(st->d.item.key(), en) && !en.folders.empty())
+        {
+            if (en.folders.size() == 1)
+                return "\xF0\x9F\x93\x81 " + en.folders[0];
+            return "\xF0\x9F\x93\x81 " + en.folders[0] + " (+" + std::to_string(en.folders.size() - 1) + ")";
+        }
+        return std::string("+  ") + tr("Folder");
+    }
+
+    static void pickFolder(std::shared_ptr<CardState> s)
+    {
+        std::vector<std::string> custom = library::customFolders();
+        library::Entry en;
+        bool hasEntry = library::find(s->d.item.key(), en);
+
+        std::vector<std::string> labels;
+        for (const auto& f : custom)
+        {
+            bool inThis = hasEntry && en.inFolder(f);
+            labels.push_back((inThis ? "[\xE2\x9C\x93]  " : "[   ]  ") + f);
+        }
+        labels.push_back(std::string("+  ") + tr("New folder..."));
+        if (hasEntry && !en.folders.empty())
+            labels.push_back(tr("Remove from all folders"));
+
+        std::weak_ptr<CardState> weak = s;
+        auto* dd = new brls::Dropdown(tr("Folders"), labels, [weak, custom](int i) {
+            auto c = weak.lock();
+            if (!c || i < 0) return;
+            if (i < (int)custom.size())
+            {
+                library::toggleFolder(c->d.item, custom[i]);
+            }
+            else if (i == (int)custom.size())
+            {
+                brls::Application::getImeManager()->openForText(
+                    [weak](std::string text) {
+                        auto c2 = weak.lock();
+                        if (!c2) return;
+                        while (!text.empty() && (text.front() == ' ' || text.front() == '\t')) text.erase(0, 1);
+                        while (!text.empty() && (text.back() == ' ' || text.back() == '\t')) text.pop_back();
+                        if (text.empty()) return;
+                        library::createFolder(text);
+                        library::toggleFolder(c2->d.item, text);
+                        brls::Application::notify(tr("Folder created"));
+                    },
+                    tr("New folder"), "", 64, "");
+            }
+            else
+            {
+                library::setFolders(c->d.item, {});
+            }
+        });
+        brls::Application::pushActivity(new brls::Activity(dd));
+    }
+
     // Library changes (a status picked, an episode watched): relabel. Polled:
     // the player writes the library from its own screen, on top of this one.
     uint32_t seenGen = 0;
@@ -359,6 +425,7 @@ class CardView : public brls::Box
             seenGen = gen;
             if (st->playBtn) st->playBtn->setText(playLabel());
             if (st->markBtn) st->markBtn->setText(markLabel());
+            if (st->folderBtn) st->folderBtn->setText(folderLabel());
             refreshEpisodes();
         }
         brls::Box::draw(vg, x, y, w, h, style, ctx);

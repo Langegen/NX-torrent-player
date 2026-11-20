@@ -66,6 +66,15 @@ struct Entry
     std::string packTitle, packLink, packMagnet;
     int packSeason = 0, packSeasonTo = 0;
 
+    // Custom folders/categories this title belongs to.
+    std::vector<std::string> folders;
+    bool inFolder(const std::string& name) const
+    {
+        for (const auto& f : folders)
+            if (f == name) return true;
+        return false;
+    }
+
     std::string key() const { return item.key(); }
     const EpisodeProgress* episode(int s, int e) const;
 };
@@ -74,8 +83,8 @@ std::string episodeKey(int season, int episode);
 
 // ---- pure -------------------------------------------------------------------
 
-std::string toJson(const std::vector<Entry>& entries);
-std::vector<Entry> fromJson(const std::string& json);
+std::string toJson(const std::vector<Entry>& entries, const std::vector<std::string>& folders = {});
+std::vector<Entry> fromJson(const std::string& json, std::vector<std::string>* foldersOut = nullptr);
 
 // What "Continue" means for an entry right now.
 struct Next
@@ -93,7 +102,9 @@ Next nextOf(const Entry& e);
 
 // Merges `incoming` into `into` (an import): new titles added, for a title
 // both have the newer status and progress win. Returns how many were added.
-int merge(std::vector<Entry>& into, const std::vector<Entry>& incoming);
+int merge(std::vector<Entry>& into, const std::vector<Entry>& incoming,
+          std::vector<std::string>* intoFolders = nullptr,
+          const std::vector<std::string>* incomingFolders = nullptr);
 
 // ---- the store (UI thread; saves run in the background) ---------------------
 
@@ -110,6 +121,16 @@ std::vector<Entry> withStatus(Status s);
 std::vector<Entry> continueWatching();
 
 void setStatus(const content::Item& item, Status s);
+
+// Custom folders (categories)
+std::vector<std::string> customFolders();
+bool createFolder(const std::string& name);
+bool renameFolder(const std::string& oldName, const std::string& newName);
+bool deleteFolder(const std::string& name);
+
+std::vector<Entry> withFolder(const std::string& folderName);
+void setFolders(const content::Item& item, const std::vector<std::string>& folders);
+void toggleFolder(const content::Item& item, const std::string& folderName);
 
 // Takes a title out of "Continue watching" (X on its card) without touching
 // its bookmark or the per-episode marks: the film's position, or which

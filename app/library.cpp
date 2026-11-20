@@ -75,9 +75,20 @@ Status statusOf(const std::string& s)
 }
 } // namespace
 
-std::string toJson(const std::vector<Entry>& entries)
+std::string toJson(const std::vector<Entry>& entries, const std::vector<std::string>& folders)
 {
-    std::string o = "{\"version\":1,\"entries\":[\n";
+    std::string o = "{\"version\":1";
+    if (!folders.empty())
+    {
+        o += ",\"folders\":[";
+        for (size_t f = 0; f < folders.size(); f++)
+        {
+            if (f > 0) o += ",";
+            o += str(clean(folders[f]));
+        }
+        o += "]";
+    }
+    o += ",\"entries\":[\n";
     for (size_t i = 0; i < entries.size(); i++)
     {
         const Entry& e = entries[i];
@@ -95,6 +106,16 @@ std::string toJson(const std::vector<Entry>& entries)
         o += ",\"rating\":" + num(it.rating);
         o += "}";
         o += ",\"status\":" + str(statusName(e.status));
+        if (!e.folders.empty())
+        {
+            o += ",\"folders\":[";
+            for (size_t f = 0; f < e.folders.size(); f++)
+            {
+                if (f > 0) o += ",";
+                o += str(clean(e.folders[f]));
+            }
+            o += "]";
+        }
         o += ",\"added\":" + std::to_string(e.added);
         o += ",\"changed\":" + std::to_string(e.changed);
         o += ",\"pos\":" + num(e.pos) + ",\"dur\":" + num(e.dur);
@@ -133,8 +154,17 @@ std::string toJson(const std::vector<Entry>& entries)
     return o;
 }
 
-std::vector<Entry> fromJson(const std::string& body)
+std::vector<Entry> fromJson(const std::string& body, std::vector<std::string>* foldersOut)
 {
+    if (foldersOut)
+    {
+        foldersOut->clear();
+        for (const auto& f : json::strings(body, "folders"))
+        {
+            if (!f.empty() && std::find(foldersOut->begin(), foldersOut->end(), f) == foldersOut->end())
+                foldersOut->push_back(f);
+        }
+    }
     std::vector<Entry> out;
     for (const auto& obj : json::objects(body, "entries"))
     {
@@ -158,6 +188,15 @@ std::vector<Entry> fromJson(const std::string& body)
         if (it.tmdbId <= 0) continue;
 
         e.status      = statusOf(json::str(top, "status"));
+        for (const auto& f : json::strings(obj, "folders"))
+        {
+            if (!f.empty() && std::find(e.folders.begin(), e.folders.end(), f) == e.folders.end())
+            {
+                e.folders.push_back(f);
+                if (foldersOut && std::find(foldersOut->begin(), foldersOut->end(), f) == foldersOut->end())
+                    foldersOut->push_back(f);
+            }
+        }
         e.added       = json::integer(top, "added", 0);
         e.changed     = json::integer(top, "changed", 0);
         e.pos         = json::number(top, "pos", 0);
@@ -238,8 +277,16 @@ Next nextOf(const Entry& e)
     return n;
 }
 
-int merge(std::vector<Entry>& into, const std::vector<Entry>& incoming)
+int merge(std::vector<Entry>& into, const std::vector<Entry>& incoming,
+          std::vector<std::string>* intoFolders,
+          const std::vector<std::string>* incomingFolders)
 {
+    if (intoFolders && incomingFolders)
+    {
+        for (const auto& f : *incomingFolders)
+            if (!f.empty() && std::find(intoFolders->begin(), intoFolders->end(), f) == intoFolders->end())
+                intoFolders->push_back(f);
+    }
     int added = 0;
     for (const auto& in : incoming)
     {
@@ -248,9 +295,19 @@ int merge(std::vector<Entry>& into, const std::vector<Entry>& incoming)
         if (it == into.end())
         {
             into.push_back(in);
+            if (intoFolders)
+            {
+                for (const auto& f : in.folders)
+                    if (!f.empty() && std::find(intoFolders->begin(), intoFolders->end(), f) == intoFolders->end())
+                        intoFolders->push_back(f);
+            }
             added++;
             continue;
         }
+        // Merge folders: union
+        for (const auto& f : in.folders)
+            if (!f.empty() && std::find(it->folders.begin(), it->folders.end(), f) == it->folders.end())
+                it->folders.push_back(f);
         if (in.changed > it->changed)
         {
             it->status  = in.status;
@@ -261,9 +318,14 @@ int merge(std::vector<Entry>& into, const std::vector<Entry>& incoming)
             Status keep = it->status;
             int64_t ch  = it->changed;
             auto eps    = it->episodes;
+            auto flds   = it->folders;
             *it         = in;
             it->status  = keep;
             it->changed = ch;
+            // keep any folders we already had
+            for (const auto& f : flds)
+                if (std::find(it->folders.begin(), it->folders.end(), f) == it->folders.end())
+                    it->folders.push_back(f);
             for (const auto& kv : eps)
                 if (!it->episodes.count(kv.first)) it->episodes[kv.first] = kv.second;
         }
@@ -287,6 +349,7 @@ namespace
 {
 std::mutex g_lock;
 std::vector<Entry> g_entries;
+std::vector<std::string> g_folders;
 uint32_t g_gen = 0;
 
 int64_t now() { return (int64_t)std::time(nullptr); }
@@ -320,7 +383,7 @@ void saveAsync()
     uint32_t gen;
     {
         std::lock_guard<std::mutex> g(g_lock);
-        data = toJson(g_entries);
+        data = toJson(g_entries, g_folders);
         gen  = ++g_gen;
     }
     brls::async([data, gen]() { writeGen(data, gen); });
@@ -357,8 +420,9 @@ void load()
         return fsutil::looksComplete(b);
     });
     std::lock_guard<std::mutex> g(g_lock);
-    g_entries = ok ? fromJson(body) : std::vector<Entry>();
-    brls::Logger::info("[library] {} titles", g_entries.size());
+    g_folders.clear();
+    g_entries = ok ? fromJson(body, &g_folders) : std::vector<Entry>();
+    brls::Logger::info("[library] {} titles, {} folders", g_entries.size(), g_folders.size());
 }
 
 void flush()
@@ -372,7 +436,7 @@ void flush()
             std::lock_guard<std::mutex> w(g_writeLock);
             if (gen == g_writtenGen) return;  // nothing pending
         }
-        data = toJson(g_entries);
+        data = toJson(g_entries, g_folders);
     }
     writeGen(data, gen);
 }
@@ -434,6 +498,116 @@ void setStatus(const content::Item& item, Status s)
         std::lock_guard<std::mutex> g(g_lock);
         Entry& e  = ensure(item);
         e.status  = s;
+        if (s == Status::None) e.folders.clear();
+        e.changed = now();
+    }
+    saveAsync();
+}
+
+std::vector<std::string> customFolders()
+{
+    std::lock_guard<std::mutex> g(g_lock);
+    return g_folders;
+}
+
+bool createFolder(const std::string& rawName)
+{
+    std::string name = rawName;
+    while (!name.empty() && (name.front() == ' ' || name.front() == '\t')) name.erase(0, 1);
+    while (!name.empty() && (name.back() == ' ' || name.back() == '\t')) name.pop_back();
+    if (name.empty()) return false;
+    {
+        std::lock_guard<std::mutex> g(g_lock);
+        for (const auto& f : g_folders)
+            if (f == name) return false;
+        g_folders.push_back(name);
+    }
+    saveAsync();
+    return true;
+}
+
+bool renameFolder(const std::string& oldName, const std::string& rawNewName)
+{
+    std::string newName = rawNewName;
+    while (!newName.empty() && (newName.front() == ' ' || newName.front() == '\t')) newName.erase(0, 1);
+    while (!newName.empty() && (newName.back() == ' ' || newName.back() == '\t')) newName.pop_back();
+    if (newName.empty() || oldName == newName) return false;
+    {
+        std::lock_guard<std::mutex> g(g_lock);
+        for (const auto& f : g_folders)
+            if (f == newName) return false;
+        auto it = std::find(g_folders.begin(), g_folders.end(), oldName);
+        if (it == g_folders.end()) return false;
+        *it = newName;
+        for (auto& e : g_entries)
+        {
+            for (auto& f : e.folders)
+                if (f == oldName) f = newName;
+        }
+    }
+    saveAsync();
+    return true;
+}
+
+bool deleteFolder(const std::string& name)
+{
+    {
+        std::lock_guard<std::mutex> g(g_lock);
+        auto it = std::find(g_folders.begin(), g_folders.end(), name);
+        if (it == g_folders.end()) return false;
+        g_folders.erase(it);
+        for (auto& e : g_entries)
+        {
+            auto fit = std::find(e.folders.begin(), e.folders.end(), name);
+            if (fit != e.folders.end()) e.folders.erase(fit);
+        }
+    }
+    saveAsync();
+    return true;
+}
+
+std::vector<Entry> withFolder(const std::string& folderName)
+{
+    std::vector<Entry> out;
+    {
+        std::lock_guard<std::mutex> g(g_lock);
+        for (const auto& e : g_entries)
+            if (e.inFolder(folderName)) out.push_back(e);
+    }
+    std::sort(out.begin(), out.end(), [](const Entry& a, const Entry& b) {
+        return std::max(a.changed, a.watchedAt) > std::max(b.changed, b.watchedAt);
+    });
+    return out;
+}
+
+void setFolders(const content::Item& item, const std::vector<std::string>& folders)
+{
+    {
+        std::lock_guard<std::mutex> g(g_lock);
+        Entry& e = ensure(item);
+        e.folders = folders;
+        if (e.status == Status::None && !e.folders.empty())
+            e.status = Status::Planned;
+        e.changed = now();
+    }
+    saveAsync();
+}
+
+void toggleFolder(const content::Item& item, const std::string& folderName)
+{
+    if (folderName.empty()) return;
+    {
+        std::lock_guard<std::mutex> g(g_lock);
+        Entry& e = ensure(item);
+        auto it = std::find(e.folders.begin(), e.folders.end(), folderName);
+        if (it != e.folders.end())
+            e.folders.erase(it);
+        else
+        {
+            e.folders.push_back(folderName);
+            if (e.status == Status::None)
+                e.status = Status::Planned;
+        }
         e.changed = now();
     }
     saveAsync();
@@ -546,7 +720,7 @@ bool exportTo(const std::string& path, std::string& err)
     std::string data;
     {
         std::lock_guard<std::mutex> g(g_lock);
-        data = toJson(g_entries);
+        data = toJson(g_entries, g_folders);
     }
     if (!writeFile(path, data))
     {
@@ -564,7 +738,8 @@ bool importFrom(const std::string& path, int& added, std::string& err)
         err = "cannot read " + path;
         return false;
     }
-    std::vector<Entry> in = fromJson(body);
+    std::vector<std::string> inFolders;
+    std::vector<Entry> in = fromJson(body, &inFolders);
     if (in.empty() && body.find("\"entries\"") == std::string::npos)
     {
         err = "not a library file";
@@ -572,7 +747,7 @@ bool importFrom(const std::string& path, int& added, std::string& err)
     }
     {
         std::lock_guard<std::mutex> g(g_lock);
-        added = merge(g_entries, in);
+        added = merge(g_entries, in, &g_folders, &inFolders);
     }
     saveAsync();
     return true;
