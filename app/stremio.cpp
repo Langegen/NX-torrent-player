@@ -3162,8 +3162,7 @@ void StremioTab::openSection(std::string title,
             }
             if (!st->line || st->inLine >= perRow)
             {
-                st->line = new brls::Box();
-                st->line->setAxis(brls::Axis::ROW);
+                st->line = new ui::NearestRow();
                 // The cards carry their own left margin.
                 st->line->setMarginLeft(kPosterInset - 8.0f);
                 st->line->setMarginBottom(16.0f);

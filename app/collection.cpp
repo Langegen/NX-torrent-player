@@ -116,8 +116,7 @@ void PosterGrid::add(const content::Item& it)
 {
     if (!row || (int)row->getChildren().size() >= columns)
     {
-        row = new brls::Box();
-        row->setAxis(brls::Axis::ROW);
+        row = new ui::NearestRow();
         row->setPaddingLeft(kInset);
         row->setMarginBottom(kGap);
         addView(row);

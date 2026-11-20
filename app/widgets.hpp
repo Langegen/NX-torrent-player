@@ -44,6 +44,16 @@ class NearestStrip : public brls::HScrollingFrame
   public:
     brls::View* getDefaultFocus() override;
 };
+
+// A horizontal box (row in a grid) that, when focus enters it from outside
+// (moving up or down from an adjacent row or control), selects the child nearest in X
+// to the view being left, rather than resetting to the first child.
+class NearestRow : public brls::Box
+{
+  public:
+    NearestRow();
+    brls::View* getDefaultFocus() override;
+};
 } // namespace ui
 
 // A strip that fades its cards out at whichever edge still has content beyond

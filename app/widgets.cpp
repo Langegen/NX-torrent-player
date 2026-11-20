@@ -205,6 +205,39 @@ brls::View* NearestStrip::getDefaultFocus()
     return best ? best : brls::HScrollingFrame::getDefaultFocus();
 }
 
+NearestRow::NearestRow()
+{
+    setAxis(brls::Axis::ROW);
+}
+
+brls::View* NearestRow::getDefaultFocus()
+{
+    brls::View* cur = brls::Application::getCurrentFocus();
+    const auto& kids = getChildren();
+    if (!cur || kids.empty()) return brls::Box::getDefaultFocus();
+
+    // Inside already: normal borealis behavior.
+    for (brls::View* v = cur; v; v = v->getParent())
+        if (v == this) return brls::Box::getDefaultFocus();
+
+    const float cx   = cur->getFrame().getMidX();
+    brls::View* best = nullptr;
+    float bestD      = 0.0f;
+    for (brls::View* c : kids)
+    {
+        if (c->getVisibility() != brls::Visibility::VISIBLE) continue;
+        brls::View* f = c->getDefaultFocus();
+        if (!f) continue;
+        float d = std::fabs(c->getFrame().getMidX() - cx);
+        if (!best || d < bestD)
+        {
+            best  = f;
+            bestD = d;
+        }
+    }
+    return best ? best : brls::Box::getDefaultFocus();
+}
+
 brls::View* strip(brls::Box* row, float height, bool fade)
 {
     row->setAxis(brls::Axis::ROW);
