@@ -80,7 +80,10 @@ struct CardState
     brls::Image* poster        = nullptr;
     brls::Label* title         = nullptr;
     brls::Box* chips           = nullptr;
+    brls::Box* overviewBox     = nullptr;
     brls::Label* overview      = nullptr;
+    brls::Label* expandHint    = nullptr;
+    bool overviewExpanded      = false;
     brls::Label* director      = nullptr;
     brls::Label* cast          = nullptr;
     brls::Button* playBtn      = nullptr;
@@ -231,9 +234,35 @@ class CardView : public brls::Box
         info->addView(st->chips);
         fillChips();
 
-        st->overview = whiteLabel(trimmed(it.overview), 17.0f, 225);
-        st->overview->setMarginTop(18.0f);
-        info->addView(st->overview);
+        st->overviewBox = new brls::Box();
+        st->overviewBox->setAxis(brls::Axis::COLUMN);
+        st->overviewBox->setMarginTop(14.0f);
+        st->overviewBox->setCornerRadius(8.0f);
+        st->overviewBox->setPadding(4.0f, 8.0f, 6.0f, 8.0f);
+        st->overviewBox->setMarginLeft(-8.0f);
+        st->overviewBox->setHighlightCornerRadius(
+            8.0f + brls::Application::getStyle()["brls/highlight/stroke_width"] / 2.0f);
+
+        st->overview = whiteLabel("", 17.0f, 225);
+        st->overviewBox->addView(st->overview);
+
+        st->expandHint = whiteLabel("", 14.0f, 180);
+        st->expandHint->setTextColor(theme::accentText());
+        st->expandHint->setMarginTop(6.0f);
+        st->overviewBox->addView(st->expandHint);
+
+        auto weakState = std::weak_ptr<CardState>(st);
+        st->overviewBox->registerAction(
+            tr("Expand"), brls::BUTTON_A,
+            [this, weakState](brls::View*) {
+                if (auto s = weakState.lock()) toggleOverview(s);
+                return true;
+            },
+            false, false, brls::SOUND_CLICK);
+        st->overviewBox->addGestureRecognizer(new brls::TapGestureRecognizer(st->overviewBox));
+
+        info->addView(st->overviewBox);
+        updateOverview(st);
 
         st->director = whiteLabel("", 16.0f, 215);
         st->director->setMarginTop(12.0f);
@@ -283,16 +312,71 @@ class CardView : public brls::Box
         body->addView(top);
     }
 
+    static const size_t kOverviewTrimMax = 300;
+
+    static bool isOverviewLong(const std::string& s)
+    {
+        return s.size() > kOverviewTrimMax;
+    }
+
     static std::string trimmed(const std::string& s)
     {
         // A synopsis can run to a page; the card has room for a paragraph.
-        const size_t kMax = 300;
-        if (s.size() <= kMax) return s;
-        size_t cut = s.rfind(' ', kMax);
-        if (cut == std::string::npos) cut = kMax;
+        if (s.size() <= kOverviewTrimMax) return s;
+        size_t cut = s.rfind(' ', kOverviewTrimMax);
+        if (cut == std::string::npos) cut = kOverviewTrimMax;
         // Don't split a UTF-8 sequence.
         while (cut > 0 && ((unsigned char)s[cut] & 0xC0) == 0x80) cut--;
         return s.substr(0, cut) + "...";
+    }
+
+    static void updateOverview(std::shared_ptr<CardState> s)
+    {
+        if (!s || !s->overviewBox || !s->overview || !s->expandHint) return;
+        const std::string& full = s->d.item.overview;
+        if (full.empty())
+        {
+            s->overviewBox->setVisibility(brls::Visibility::GONE);
+            s->overviewBox->setFocusable(false);
+            return;
+        }
+
+        s->overviewBox->setVisibility(brls::Visibility::VISIBLE);
+        bool isLong = isOverviewLong(full);
+
+        if (!isLong)
+        {
+            s->overview->setText(full);
+            s->expandHint->setVisibility(brls::Visibility::GONE);
+            s->overviewBox->setFocusable(false);
+            return;
+        }
+
+        s->overviewBox->setFocusable(true);
+        if (s->overviewExpanded)
+        {
+            s->overview->setText(full);
+            s->expandHint->setText(tr("Collapse \xE2\x86\x91"));
+            s->expandHint->setVisibility(brls::Visibility::VISIBLE);
+            s->overviewBox->updateActionHint(brls::BUTTON_A, tr("Collapse"));
+        }
+        else
+        {
+            s->overview->setText(trimmed(full));
+            s->expandHint->setText(tr("Expand \xE2\x86\x93"));
+            s->expandHint->setVisibility(brls::Visibility::VISIBLE);
+            s->overviewBox->updateActionHint(brls::BUTTON_A, tr("Expand"));
+        }
+        brls::Application::getGlobalHintsUpdateEvent()->fire();
+    }
+
+    static void toggleOverview(std::shared_ptr<CardState> s)
+    {
+        if (!s) return;
+        const std::string& full = s->d.item.overview;
+        if (!isOverviewLong(full)) return;
+        s->overviewExpanded = !s->overviewExpanded;
+        updateOverview(s);
     }
 
     // The main button says what it will do: continue where the library left
@@ -636,7 +720,7 @@ class CardView : public brls::Box
                               s->alive, true);
 
             fillChips();
-            s->overview->setText(trimmed(s->d.item.overview));
+            updateOverview(s);
 
             if (!s->d.directors.empty())
             {

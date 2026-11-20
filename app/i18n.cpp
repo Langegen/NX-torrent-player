@@ -64,6 +64,10 @@ const Entry kFr[] = {
       "Impossible de le retirer de votre bibliothèque." },
     { "Loading...", "Chargement..." },
     { "Show", "Série" },
+    { "Expand", "Développer" },
+    { "Collapse", "Réduire" },
+    { "Expand \xE2\x86\x93", "Développer \xE2\x86\x93" },
+    { "Collapse \xE2\x86\x91", "Réduire \xE2\x86\x91" },
 
     // ---- the Local tab ----------------------------------------------------
     { "This torrent has no video file to stream.",
@@ -166,6 +170,7 @@ const Entry kFr[] = {
     { "Subtitle could not be loaded", "Le sous-titre n'a pas pu être chargé" },
 
     // ---- Options ----------------------------------------------------------
+    { "Section", "Section" },
     { " (default)", " (par défaut)" },
     { "General", "Général" },
     { "About", "À propos" },
