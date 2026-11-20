@@ -6,6 +6,27 @@ The text under a version heading is the GitHub release description, which the
 app also shows in About → View changelog. So a section holds plain text and
 lists only, no headings or emphasis.
 
+## 1.2 — 20 November 2026
+
+Folders and categories in bookmarks, actor and director filtering, RGB color balance in screen settings, L/R tab navigation, expandable synopsis, and major stability fixes for docking and long playback sessions.
+
+Interface & Navigation
+- Folders and categories in bookmarks: create, rename, and delete custom folders in bookmarks to easily organize your movies and TV shows.
+- Creator and cast filtering (Lampa style): movie and TV cards now feature clickable rows of directors, creators, and cast members with direct access to their filmographies.
+- L/R tab switching: quickly navigate between main menu sections using the L and R shoulder buttons on the gamepad.
+- Expandable synopsis: long overviews and descriptions for films and series can now be expanded and collapsed.
+- Improved gamepad navigation to the "See all" section on catalog tabs, along with grid navigation and focus preservation in search and Stremio.
+- Fixed encoding issues and missing glyphs in movie titles without Russian translations.
+
+Picture & Player
+- RGB balance: added independent Red, Green, and Blue adjustment sliders in handheld picture settings and within the player.
+- Fixed subtitle toggle pop-up hint clipping off-screen.
+
+Stability & Performance
+- Fixed crashes and stutter when docking and undocking the console: eliminated 100ms debounce resize delay, synchronized graphics buffer state, and switched to bilinear filtering in docked mode (1080p).
+- Fixed video artifacts (gray screen) and cumulative audio desync during long playback sessions: increased NVDEC hardware surface pool and synchronized audio clock with hardware Audren (48 kHz).
+- Fixed freezes and memory issues when scrolling long movie catalogs: implemented off-screen culling, background poster decoding in worker threads, and rate-limited GPU texture uploads.
+
 ## 1.1 — 14 November 2026
 
 Instant rewind, sleep timer, quick subtitle toggle, side panels for audio and subtitles, battery indicator in player, and unified search.
