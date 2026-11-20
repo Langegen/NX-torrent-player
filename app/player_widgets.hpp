@@ -63,6 +63,8 @@ class Chip : public brls::Box
     void draw(NVGcontext* vg, float x, float y, float width, float height,
               brls::Style style, brls::FrameContext* ctx) override;
 
+    float measureWidth(NVGcontext* vg = nullptr) const;
+
     std::string text;
     bool focused = false;
 };

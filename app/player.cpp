@@ -1356,7 +1356,15 @@ void MpvView::refreshButtons()
             chip = placeSubChip();
         }
         auto vis = chip ? brls::Visibility::VISIBLE : brls::Visibility::GONE;
-        if (subChip->getVisibility() != vis) subChip->setVisibility(vis);
+        if (subChip->getVisibility() != vis)
+        {
+            subChip->setVisibility(vis);
+            if (vis == brls::Visibility::GONE)
+            {
+                subChipLeft = -1.0f;
+                subChipTop  = -1.0f;
+            }
+        }
     }
     for (int b = 0; b < BTN_COUNT; b++)
     {
@@ -1374,11 +1382,17 @@ bool MpvView::placeSubChip()
     player_ui::Button* b = buttons[BTN_SUBS];
     // Not laid out yet (the panel was just shown): updateControls retries.
     if (!subChip || !b || b->getWidth() <= 0.0f) return false;
-    float left = b->getX() + b->getWidth() / 2.0f - subChip->getWidth() / 2.0f - getX();
-    float top  = b->getY() - subChip->getHeight() - 8.0f - getY();
-    float maxLeft = getWidth() - subChip->getWidth();
+    float chipW = subChip->measureWidth();
+    float chipH = 32.0f;
+    subChip->setWidth(chipW);
+    subChip->setHeight(chipH);
+
+    float left = b->getX() + b->getWidth() / 2.0f - chipW / 2.0f - getX();
+    float top  = b->getY() - chipH - 8.0f - getY();
+    constexpr float kScreenMargin = 16.0f;
+    float maxLeft = getWidth() - chipW - kScreenMargin;
     if (left > maxLeft) left = maxLeft;
-    if (left < 0.0f) left = 0.0f;
+    if (left < kScreenMargin) left = kScreenMargin;
     if (left == subChipLeft && top == subChipTop) return true;
     subChipLeft = left;
     subChipTop  = top;
@@ -4847,6 +4861,8 @@ void MpvView::updateControls()
         const char* want = !subsOn() ? tr("Turn subtitles on") : tr("Turn subtitles off");
         if (subChip->getVisibility() != brls::Visibility::VISIBLE || subChip->text != want)
             refreshButtons();
+        else
+            placeSubChip();
     }
 
     // The clock, and when the film will end at this speed: once a second.
