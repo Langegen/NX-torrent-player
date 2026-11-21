@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=1920, height=1080, initial-scale=1.0, user-scalable=no" />
+  <title>NX Torrent Player</title>
+  <link rel="stylesheet" href="src/styles.css" />
+</head>
+<body>
+  <!-- Header Bar -->
+  <header class="app-header">
+    <div class="brand-group">
+      <img class="app-logo" src="icon.png" alt="NX" />
+      <span class="brand-title">NX Torrent Player</span>
+    </div>
+
+    <nav class="nav-tabs">
+      <button class="nav-tab focusable active" data-tab="home" tabindex="0">Главная</button>
+      <button class="nav-tab focusable" data-tab="bookmarks" tabindex="0">Закладки</button>
+      <button class="nav-tab focusable" data-tab="history" tabindex="0">История</button>
+      <button class="nav-tab focusable" data-tab="torrents" tabindex="0">Торренты</button>
+      <button class="nav-tab focusable" data-tab="settings" tabindex="0">Настройки</button>
+    </nav>
+
+    <div class="header-status">
+      <span class="header-clock">00:00</span>
+    </div>
+  </header>
+
+  <!-- App Views Container -->
+  <main class="app-content"></main>
+
+  <script type="module" src="src/app.js"></script>
+</body>
+</html>

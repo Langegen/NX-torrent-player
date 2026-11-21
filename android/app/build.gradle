@@ -1,0 +1,64 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace = "com.nxtorrent.player"
+    compileSdkVersion 34
+    defaultConfig {
+        applicationId = "com.nxtorrent.player"
+        minSdkVersion 21
+        targetSdkVersion 34
+        versionCode 1
+        versionName "1.0.0"
+        ndkVersion "25.2.9519653"
+        externalNativeBuild {
+            cmake {
+                arguments "-DANDROID_PLATFORM=android-21", "-DANDROID_STL=c++_shared", "-DCMAKE_WARN_DEPRECATED=FALSE"
+                abiFilters 'armeabi-v7a', 'arm64-v8a'
+                version = '3.16.0+'
+            }
+        }
+    }
+    signingConfigs {
+        release {
+            // keytool -genkey -alias borealis -keyalg RSA -keypass password -keystore borealis.jks -storepass password -validity 100000
+            storeFile file("borealis.jks")
+            storePassword 'password'
+            keyAlias 'borealis'
+            keyPassword 'password'
+            // Optional, specify signing versions used
+            v1SigningEnabled true
+            v2SigningEnabled true
+        }
+    }
+    buildTypes {
+        release {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+            signingConfig signingConfigs.release
+        }
+    }
+    applicationVariants.all { variant ->
+        tasks["merge${variant.name.capitalize()}Assets"]
+            .dependsOn("externalNativeBuild${variant.name.capitalize()}")
+    }
+    if (!project.hasProperty('EXCLUDE_NATIVE_LIBS')) {
+        sourceSets.main {
+            jniLibs.srcDir 'libs'
+        }
+        externalNativeBuild {
+            cmake {
+                path 'jni/CMakeLists.txt'
+                version = '3.16.0+'
+            }
+        }
+    }
+    lint {
+        abortOnError = false
+    }
+}
+
+dependencies {
+    implementation fileTree(include: ['*.jar'], dir: 'libs')
+}

@@ -24,6 +24,11 @@
 #include "update.hpp"
 #include "stremio.hpp"
 
+#include "sync/sync_manager.hpp"
+#include "sync/sync_dialog.hpp"
+#include "sync/sync_webdav.hpp"
+#include "sync/sync_gdrive.hpp"
+
 extern "C" {
 #include "torrentfs.h"
 }
@@ -77,6 +82,7 @@ brls::View* playbackPane();
 brls::View* streamingPane();
 brls::View* stremioPane();
 brls::View* jackettPane();
+brls::View* syncPane();
 brls::View* networkPane();
 brls::View* aboutPane();
 
@@ -589,6 +595,228 @@ brls::View* jackettPane()
     return pane;
 }
 
+brls::View* syncPane()
+{
+    brls::Box* list = nullptr;
+    auto* pane      = newPane(&list);
+    config::Config& cfg = config::get();
+
+    auto* hdr = new brls::Header();
+    hdr->setTitle(tr("Cloud synchronization"));
+    list->addView(hdr);
+
+    auto* providerCell = new brls::SelectorCell();
+    std::vector<std::string> providerLabels = { tr("Disabled"), "Google Drive", "WebDAV" };
+    int curProvIdx = (cfg.syncProvider == "gdrive") ? 1 :
+                     (cfg.syncProvider == "webdav") ? 2 : 0;
+    providerCell->init(tr("Service"), providerLabels, curProvIdx, [](int sel) {
+        config::get().syncProvider = (sel == 1) ? "gdrive" : (sel == 2) ? "webdav" : "none";
+        config::save();
+    });
+    list->addView(providerCell);
+
+    auto* autoSync = new brls::BooleanCell();
+    autoSync->init(tr("Automatic sync"), cfg.syncAuto, [](bool on) {
+        config::get().syncAuto = on;
+        config::save();
+    });
+    list->addView(autoSync);
+    list->addView(caption(tr("Sync bookmarks and history on startup and when finishing a video.")));
+
+    if (cfg.syncProvider == "gdrive")
+    {
+        auto* ghdr = new brls::Header();
+        ghdr->setTitle("Google Drive");
+        list->addView(ghdr);
+
+        if (!cfg.syncGdriveRefreshToken.empty())
+        {
+            auto* accCell = new brls::DetailCell();
+            accCell->setText(tr("Account"));
+            accCell->setDetailText(cfg.syncGdriveUserEmail.empty() ? tr("Connected") : cfg.syncGdriveUserEmail);
+            list->addView(accCell);
+
+            auto* logoutBtn = new brls::Button();
+            logoutBtn->setText(tr("Sign out"));
+            logoutBtn->setMargins(10.0f, 20.0f, 10.0f, 20.0f);
+            logoutBtn->registerClickAction([](brls::View*) {
+                sync::Manager::instance().gdriveProvider()->disconnect();
+                note(tr("Signed out of Google Drive"));
+                return true;
+            });
+            list->addView(logoutBtn);
+        }
+        else
+        {
+            auto* loginBtn = new brls::Button();
+            loginBtn->setText(tr("Sign in to Google Drive"));
+            loginBtn->setMargins(14.0f, 20.0f, 14.0f, 20.0f);
+            loginBtn->registerClickAction([](brls::View*) {
+                sync::showGoogleAuthDialog([](bool ok) {
+                    if (ok)
+                    {
+                        note(tr("Google Drive connected successfully!"));
+                        sync::syncNow();
+                    }
+                });
+                return true;
+            });
+            list->addView(loginBtn);
+            list->addView(caption(tr("Sign in with your phone or PC by scanning the QR code or entering the device code.")));
+        }
+    }
+    else if (cfg.syncProvider == "webdav")
+    {
+        auto* whdr = new brls::Header();
+        whdr->setTitle("WebDAV");
+        list->addView(whdr);
+
+        auto* preset = new brls::SelectorCell();
+        std::vector<std::string> presets = { tr("Custom"), "Яндекс Диск", "Облако Mail.ru" };
+        int curPreset = (cfg.syncWebdavUrl == "https://webdav.yandex.ru") ? 1 :
+                        (cfg.syncWebdavUrl == "https://webdav.cloud.mail.ru") ? 2 : 0;
+        preset->init(tr("Preset"), presets, curPreset, [](int sel) {
+            if (sel == 1) config::get().syncWebdavUrl = "https://webdav.yandex.ru";
+            else if (sel == 2) config::get().syncWebdavUrl = "https://webdav.cloud.mail.ru";
+            config::save();
+        });
+        list->addView(preset);
+
+        auto* urlCell = new brls::DetailCell();
+        urlCell->setText(tr("Server URL"));
+        urlCell->setDetailText(cfg.syncWebdavUrl.empty() ? tr("Not set") : cfg.syncWebdavUrl);
+        urlCell->registerClickAction([urlCell](brls::View*) {
+            brls::Application::getImeManager()->openForText(
+                [urlCell](std::string out) {
+                    out = sync::WebdavProvider::normalizeUrl(out);
+                    config::get().syncWebdavUrl = out;
+                    config::save();
+                    urlCell->setDetailText(out.empty() ? tr("Not set") : out);
+                },
+                tr("WebDAV Server URL"), "https://webdav.yandex.ru", 256,
+                config::get().syncWebdavUrl);
+            return true;
+        });
+        list->addView(urlCell);
+
+        auto* userCell = new brls::DetailCell();
+        userCell->setText(tr("Username / Email"));
+        userCell->setDetailText(cfg.syncWebdavUser.empty() ? tr("Not set") : cfg.syncWebdavUser);
+        userCell->registerClickAction([userCell](brls::View*) {
+            brls::Application::getImeManager()->openForText(
+                [userCell](std::string out) {
+                    while (!out.empty() && out.back() == ' ') out.pop_back();
+                    while (!out.empty() && out.front() == ' ') out.erase(0, 1);
+                    config::get().syncWebdavUser = out;
+                    config::save();
+                    userCell->setDetailText(out.empty() ? tr("Not set") : out);
+                },
+                tr("Username / Email"), tr("Your cloud login"), 128,
+                config::get().syncWebdavUser);
+            return true;
+        });
+        list->addView(userCell);
+
+        auto* passCell = new brls::DetailCell();
+        passCell->setText(tr("App password"));
+        passCell->setDetailText(cfg.syncWebdavPass.empty() ? tr("Not set") : "********");
+        passCell->registerClickAction([passCell](brls::View*) {
+            brls::Application::getImeManager()->openForText(
+                [passCell](std::string out) {
+                    while (!out.empty() && out.back() == ' ') out.pop_back();
+                    while (!out.empty() && out.front() == ' ') out.erase(0, 1);
+                    config::get().syncWebdavPass = out;
+                    config::save();
+                    passCell->setDetailText(out.empty() ? tr("Not set") : "********");
+                },
+                tr("App password / token"), tr("Generated in cloud security settings"), 128,
+                config::get().syncWebdavPass);
+            return true;
+        });
+        list->addView(passCell);
+        list->addView(caption(tr("For Yandex Disk or Mail.ru, create and use an App Password.")));
+
+        auto* testBtn = new AsyncButton();
+        testBtn->setText(tr("Test connection"));
+        testBtn->setMargins(12.0f, 20.0f, 12.0f, 20.0f);
+        testBtn->registerClickAction([testBtn](brls::View*) {
+            testBtn->setState(brls::ButtonState::DISABLED);
+            testBtn->setText(tr("Testing..."));
+            std::thread([testBtn, live = testBtn->alive]() {
+                std::string err;
+                bool ok = sync::Manager::instance().webdavProvider()->testConnection(err);
+                brls::async([testBtn, live, ok, err]() {
+                    if (*live)
+                    {
+                        testBtn->setState(brls::ButtonState::ENABLED);
+                        testBtn->setText(tr("Test connection"));
+                    }
+                    note(ok ? tr("WebDAV connection successful!") : tr("Connection failed: ") + err);
+                });
+            }).detach();
+            return true;
+        });
+        list->addView(testBtn);
+    }
+
+    if (cfg.syncProvider != "none")
+    {
+        auto* shdr = new brls::Header();
+        shdr->setTitle(tr("Actions & Status"));
+        list->addView(shdr);
+
+        auto* timeCell = new brls::DetailCell();
+        timeCell->setText(tr("Last synced"));
+        if (cfg.syncLastTime > 0)
+        {
+            char buf[64];
+            std::time_t t = (std::time_t)cfg.syncLastTime;
+            std::strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M", std::localtime(&t));
+            timeCell->setDetailText(buf);
+        }
+        else
+        {
+            timeCell->setDetailText(tr("Never"));
+        }
+        list->addView(timeCell);
+
+        if (!cfg.syncLastError.empty())
+        {
+            auto* errCell = new brls::DetailCell();
+            errCell->setText(tr("Last error"));
+            errCell->setDetailText(cfg.syncLastError);
+            list->addView(errCell);
+        }
+
+        auto* syncBtn = new AsyncButton();
+        syncBtn->setText(tr("Sync now"));
+        syncBtn->setMargins(14.0f, 20.0f, 20.0f, 20.0f);
+        syncBtn->registerClickAction([syncBtn, timeCell](brls::View*) {
+            syncBtn->setState(brls::ButtonState::DISABLED);
+            syncBtn->setText(tr("Syncing..."));
+            sync::syncNow([syncBtn, timeCell, live = syncBtn->alive](bool ok, const std::string& msg) {
+                if (*live)
+                {
+                    syncBtn->setState(brls::ButtonState::ENABLED);
+                    syncBtn->setText(tr("Sync now"));
+                    if (ok)
+                    {
+                        char buf[64];
+                        std::time_t t = (std::time_t)config::get().syncLastTime;
+                        std::strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M", std::localtime(&t));
+                        timeCell->setDetailText(buf);
+                    }
+                }
+                note(ok ? tr("Synchronization complete!") : tr("Sync failed: ") + msg);
+            });
+            return true;
+        });
+        list->addView(syncBtn);
+    }
+
+    return pane;
+}
+
 brls::View* networkPane()
 {
     brls::Box* list = nullptr;
@@ -943,6 +1171,7 @@ brls::View* SettingsActivity::createContentView()
     tabs->addTab(tr("Streaming"), [] { return streamingPane(); });
     tabs->addTab("Stremio", [] { return stremioPane(); });
     tabs->addTab("Jackett", [] { return jackettPane(); });
+    tabs->addTab(tr("Sync"), [] { return syncPane(); });
     tabs->addTab(tr("Network"), [] { return networkPane(); });
     tabs->addTab(tr("About"), [] { return aboutPane(); });
 

@@ -42,6 +42,7 @@
 #include "player_widgets.hpp"
 #include "release.hpp"  // episodeOfFile: which episode a file of a pack is
 #include "torrent_play.hpp"  // videoFilesOf, for the episode list
+#include "sync/sync_manager.hpp"
 
 extern "C" {
 #include "torrentfs.h"
@@ -2921,6 +2922,7 @@ MpvView::~MpvView()
     // and the push itself runs on a background thread with no reference to us.
     maybePushWatchState(true);
     maybeUpdateHistory(true);
+    sync::triggerAutoSync();
     if (pictureDirty) config::save();  // the panel closes with the player
 
     // Tell any in-flight startEngine() that we are gone, so it closes the engine

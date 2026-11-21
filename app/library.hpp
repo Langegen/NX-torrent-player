@@ -159,4 +159,8 @@ void rememberPack(const content::Item& item, const std::string& title,
 bool exportTo(const std::string& path, std::string& err);
 bool importFrom(const std::string& path, int& added, std::string& err);
 
+// Synchronization helpers
+std::string getJson();
+int mergeJson(const std::string& json);
+
 } // namespace library

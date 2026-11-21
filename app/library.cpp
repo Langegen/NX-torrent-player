@@ -753,6 +753,29 @@ bool importFrom(const std::string& path, int& added, std::string& err)
     return true;
 }
 
+std::string getJson()
+{
+    std::lock_guard<std::mutex> g(g_lock);
+    return toJson(g_entries, g_folders);
+}
+
+int mergeJson(const std::string& body)
+{
+    std::vector<std::string> inFolders;
+    std::vector<Entry> in = fromJson(body, &inFolders);
+    if (in.empty() && body.find("\"entries\"") == std::string::npos)
+        return 0;
+
+    int added = 0;
+    {
+        std::lock_guard<std::mutex> g(g_lock);
+        added = merge(g_entries, in, &g_folders, &inFolders);
+    }
+    if (added > 0)
+        saveAsync();
+    return added;
+}
+
 #endif  // LIBRARY_NO_UI
 
 } // namespace library

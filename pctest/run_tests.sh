@@ -98,6 +98,16 @@ ${CXX:-g++} -O1 -g -Wall -std=c++17 \
     pctest/test_jackett.cpp \
     -o "$out/test_jackett"
 
+${CXX:-g++} -O1 -g -Wall -std=c++17 \
+    -DLIBRARY_NO_UI -DHISTORY_NO_UI -Iapp \
+    app/history.cpp \
+    app/library.cpp \
+    app/json.cpp \
+    app/sync/qrcodegen.cpp \
+    app/sync/sync_webdav.cpp \
+    pctest/test_sync.cpp \
+    -o "$out/test_sync"
+
 "$out/test_suite"
 echo
 # Streaming: head/tail = mpv's probe (container header, then the index at the
@@ -128,3 +138,5 @@ echo
 "$out/test_library"
 echo
 "$out/test_jackett"
+echo
+"$out/test_sync"

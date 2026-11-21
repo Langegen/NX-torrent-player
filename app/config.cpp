@@ -374,6 +374,18 @@ void load()
     {
         cfg.tmdbProxyUrl.clear();
     }
+    cfg.syncProvider = readStr(body, "syncProvider", cfg.syncProvider);
+    cfg.syncAuto     = readBool(body, "syncAuto", cfg.syncAuto);
+    cfg.syncLastTime = (int64_t)readInt(body, "syncLastTime", (int)cfg.syncLastTime);
+    cfg.syncLastError = readStr(body, "syncLastError", cfg.syncLastError);
+    cfg.syncWebdavUrl = readStr(body, "syncWebdavUrl", cfg.syncWebdavUrl);
+    cfg.syncWebdavUser = readStr(body, "syncWebdavUser", cfg.syncWebdavUser);
+    cfg.syncWebdavPass = readStr(body, "syncWebdavPass", cfg.syncWebdavPass);
+    cfg.syncGdriveClientId = readStr(body, "syncGdriveClientId", cfg.syncGdriveClientId);
+    cfg.syncGdriveClientSecret = readStr(body, "syncGdriveClientSecret", cfg.syncGdriveClientSecret);
+    cfg.syncGdriveRefreshToken = readStr(body, "syncGdriveRefreshToken", cfg.syncGdriveRefreshToken);
+    cfg.syncGdriveUserEmail = readStr(body, "syncGdriveUserEmail", cfg.syncGdriveUserEmail);
+
     cfg.logging = readBool(body, "logging", cfg.logging);
     cfg.hide4k  = readBool(body, "hide4k", cfg.hide4k);
     cfg.rateGovernor = readBool(body, "rateGovernor", cfg.rateGovernor);
@@ -467,6 +479,18 @@ bool save()
     // Only a choice the user made is kept: otherwise the proxy keeps following
     // the UI language.
     if (cfg.tmdbProxyUserSet) kv("tmdbProxyEnabled", b(cfg.tmdbProxyEnabled));
+    kv("syncProvider", jsonStr(cfg.syncProvider));
+    kv("syncAuto", b(cfg.syncAuto));
+    kv("syncLastTime", n(cfg.syncLastTime));
+    kv("syncLastError", jsonStr(cfg.syncLastError));
+    kv("syncWebdavUrl", jsonStr(cfg.syncWebdavUrl));
+    kv("syncWebdavUser", jsonStr(cfg.syncWebdavUser));
+    kv("syncWebdavPass", jsonStr(cfg.syncWebdavPass));
+    kv("syncGdriveClientId", jsonStr(cfg.syncGdriveClientId));
+    kv("syncGdriveClientSecret", jsonStr(cfg.syncGdriveClientSecret));
+    kv("syncGdriveRefreshToken", jsonStr(cfg.syncGdriveRefreshToken));
+    kv("syncGdriveUserEmail", jsonStr(cfg.syncGdriveUserEmail));
+
     kv("logging", b(cfg.logging));
     kv("hide4k", b(cfg.hide4k));
     kv("rateGovernor", b(cfg.rateGovernor));
