@@ -34,3 +34,5 @@ google-services.json
 
 # libromfs generator
 libromfs-generator
+libromfs-generator.exe
+*.exe

@@ -1,10 +1,13 @@
 cmake_minimum_required(VERSION 3.15)
 project(NX-torrent-player)
 
+get_filename_component(ROOT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../.." ABSOLUTE)
 set(BUILD_SHARED_LIBS ON CACHE BOOL "")
 set(PLATFORM_ANDROID ON CACHE BOOL "")
+set(LIBROMFS_PREBUILT_GENERATOR "${CMAKE_CURRENT_SOURCE_DIR}/libromfs-generator.exe" CACHE FILEPATH "" FORCE)
+set(LIBROMFS_PROJECT_NAME "NX-torrent-player" CACHE STRING "" FORCE)
+set(LIBROMFS_RESOURCE_LOCATION "${ROOT_DIR}/library/borealis/resources" CACHE PATH "" FORCE)
 
-set(ROOT_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../..)
 set(BOREALIS_LIBRARY ${ROOT_DIR}/library/borealis/library)
 set(SDL_DIR ${BOREALIS_LIBRARY}/lib/extern/SDL)
 

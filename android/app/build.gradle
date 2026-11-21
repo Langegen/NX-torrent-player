@@ -39,11 +39,11 @@ android {
             signingConfig signingConfigs.release
         }
     }
-    applicationVariants.all { variant ->
-        tasks["merge${variant.name.capitalize()}Assets"]
-            .dependsOn("externalNativeBuild${variant.name.capitalize()}")
-    }
     if (!project.hasProperty('EXCLUDE_NATIVE_LIBS')) {
+        applicationVariants.all { variant ->
+            tasks["merge${variant.name.capitalize()}Assets"]
+                .dependsOn("externalNativeBuild${variant.name.capitalize()}")
+        }
         sourceSets.main {
             jniLibs.srcDir 'libs'
         }
