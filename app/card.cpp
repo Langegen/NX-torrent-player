@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <memory>
 
+#include "collection.hpp"
 #include "config.hpp"
 #include "i18n.hpp"
 #include "library.hpp"
@@ -79,10 +80,15 @@ struct CardState
     brls::Image* poster        = nullptr;
     brls::Label* title         = nullptr;
     brls::Box* chips           = nullptr;
+    brls::Box* overviewBox     = nullptr;
     brls::Label* overview      = nullptr;
+    brls::Label* expandHint    = nullptr;
+    bool overviewExpanded      = false;
+    brls::Label* director      = nullptr;
     brls::Label* cast          = nullptr;
     brls::Button* playBtn      = nullptr;
     brls::Button* markBtn      = nullptr;  // the bookmark status
+    brls::Button* folderBtn    = nullptr;  // the bookmark folder/category
     brls::Box* seasonsSection  = nullptr;
     brls::Box* seasonBar       = nullptr;
     std::vector<brls::Button*> seasonBtns;
@@ -90,6 +96,10 @@ struct CardState
     // The season on show, kept so its cards can be redrawn with fresh
     // progress when the library changes (an episode watched from here).
     std::vector<content::Episode> eps;
+    brls::Box* directorsSection = nullptr;
+    brls::Box* directorsRow    = nullptr;
+    brls::Box* castSection     = nullptr;
+    brls::Box* castRow         = nullptr;
     brls::Box* similarSection  = nullptr;  // "More like this"
     brls::Box* similarRow      = nullptr;
 };
@@ -139,6 +149,8 @@ class CardView : public brls::Box
         body->setPadding(34.0f, 60.0f, 40.0f, 60.0f);
         buildTop(body);
         buildSeasons(body);
+        buildDirectors(body);
+        buildCast(body);
         buildSimilar(body);
         scroll->setContentView(body);
         addView(scroll);
@@ -222,12 +234,43 @@ class CardView : public brls::Box
         info->addView(st->chips);
         fillChips();
 
-        st->overview = whiteLabel(trimmed(it.overview), 17.0f, 225);
-        st->overview->setMarginTop(18.0f);
-        info->addView(st->overview);
+        st->overviewBox = new brls::Box();
+        st->overviewBox->setAxis(brls::Axis::COLUMN);
+        st->overviewBox->setMarginTop(14.0f);
+        st->overviewBox->setCornerRadius(8.0f);
+        st->overviewBox->setPadding(4.0f, 8.0f, 6.0f, 8.0f);
+        st->overviewBox->setMarginLeft(-8.0f);
+        st->overviewBox->setHighlightCornerRadius(
+            8.0f + brls::Application::getStyle()["brls/highlight/stroke_width"] / 2.0f);
 
-        st->cast = whiteLabel("", 16.0f, 165);
-        st->cast->setMarginTop(10.0f);
+        st->overview = whiteLabel("", 17.0f, 225);
+        st->overviewBox->addView(st->overview);
+
+        st->expandHint = whiteLabel("", 14.0f, 180);
+        st->expandHint->setTextColor(theme::accentText());
+        st->expandHint->setMarginTop(6.0f);
+        st->overviewBox->addView(st->expandHint);
+
+        auto weakState = std::weak_ptr<CardState>(st);
+        st->overviewBox->registerAction(
+            tr("Expand"), brls::BUTTON_A,
+            [this, weakState](brls::View*) {
+                if (auto s = weakState.lock()) toggleOverview(s);
+                return true;
+            },
+            false, false, brls::SOUND_CLICK);
+        st->overviewBox->addGestureRecognizer(new brls::TapGestureRecognizer(st->overviewBox));
+
+        info->addView(st->overviewBox);
+        updateOverview(st);
+
+        st->director = whiteLabel("", 16.0f, 215);
+        st->director->setMarginTop(12.0f);
+        st->director->setVisibility(brls::Visibility::GONE);
+        info->addView(st->director);
+
+        st->cast = whiteLabel("", 15.0f, 165);
+        st->cast->setMarginTop(4.0f);
         st->cast->setVisibility(brls::Visibility::GONE);
         info->addView(st->cast);
 
@@ -257,22 +300,83 @@ class CardView : public brls::Box
             if (auto s = weak.lock()) pickStatus(s);
         }, true);
         actions->addView(st->markBtn);
+
+        // Folders / categories
+        st->folderBtn = ui::actionButton(folderLabel(), false, [weak]() {
+            if (auto s = weak.lock()) pickFolder(s);
+        }, true);
+        actions->addView(st->folderBtn);
         info->addView(actions);
 
         top->addView(info);
         body->addView(top);
     }
 
+    static const size_t kOverviewTrimMax = 300;
+
+    static bool isOverviewLong(const std::string& s)
+    {
+        return s.size() > kOverviewTrimMax;
+    }
+
     static std::string trimmed(const std::string& s)
     {
         // A synopsis can run to a page; the card has room for a paragraph.
-        const size_t kMax = 300;
-        if (s.size() <= kMax) return s;
-        size_t cut = s.rfind(' ', kMax);
-        if (cut == std::string::npos) cut = kMax;
+        if (s.size() <= kOverviewTrimMax) return s;
+        size_t cut = s.rfind(' ', kOverviewTrimMax);
+        if (cut == std::string::npos) cut = kOverviewTrimMax;
         // Don't split a UTF-8 sequence.
         while (cut > 0 && ((unsigned char)s[cut] & 0xC0) == 0x80) cut--;
         return s.substr(0, cut) + "...";
+    }
+
+    static void updateOverview(std::shared_ptr<CardState> s)
+    {
+        if (!s || !s->overviewBox || !s->overview || !s->expandHint) return;
+        const std::string& full = s->d.item.overview;
+        if (full.empty())
+        {
+            s->overviewBox->setVisibility(brls::Visibility::GONE);
+            s->overviewBox->setFocusable(false);
+            return;
+        }
+
+        s->overviewBox->setVisibility(brls::Visibility::VISIBLE);
+        bool isLong = isOverviewLong(full);
+
+        if (!isLong)
+        {
+            s->overview->setText(full);
+            s->expandHint->setVisibility(brls::Visibility::GONE);
+            s->overviewBox->setFocusable(false);
+            return;
+        }
+
+        s->overviewBox->setFocusable(true);
+        if (s->overviewExpanded)
+        {
+            s->overview->setText(full);
+            s->expandHint->setText(tr("Collapse \xE2\x86\x91"));
+            s->expandHint->setVisibility(brls::Visibility::VISIBLE);
+            s->overviewBox->updateActionHint(brls::BUTTON_A, tr("Collapse"));
+        }
+        else
+        {
+            s->overview->setText(trimmed(full));
+            s->expandHint->setText(tr("Expand \xE2\x86\x93"));
+            s->expandHint->setVisibility(brls::Visibility::VISIBLE);
+            s->overviewBox->updateActionHint(brls::BUTTON_A, tr("Expand"));
+        }
+        brls::Application::getGlobalHintsUpdateEvent()->fire();
+    }
+
+    static void toggleOverview(std::shared_ptr<CardState> s)
+    {
+        if (!s) return;
+        const std::string& full = s->d.item.overview;
+        if (!isOverviewLong(full)) return;
+        s->overviewExpanded = !s->overviewExpanded;
+        updateOverview(s);
     }
 
     // The main button says what it will do: continue where the library left
@@ -346,6 +450,65 @@ class CardView : public brls::Box
         brls::Application::pushActivity(new brls::Activity(dd));
     }
 
+    std::string folderLabel() const
+    {
+        library::Entry en;
+        if (library::find(st->d.item.key(), en) && !en.folders.empty())
+        {
+            if (en.folders.size() == 1)
+                return "\xF0\x9F\x93\x81 " + en.folders[0];
+            return "\xF0\x9F\x93\x81 " + en.folders[0] + " (+" + std::to_string(en.folders.size() - 1) + ")";
+        }
+        return std::string("+  ") + tr("Folder");
+    }
+
+    static void pickFolder(std::shared_ptr<CardState> s)
+    {
+        std::vector<std::string> custom = library::customFolders();
+        library::Entry en;
+        bool hasEntry = library::find(s->d.item.key(), en);
+
+        std::vector<std::string> labels;
+        for (const auto& f : custom)
+        {
+            bool inThis = hasEntry && en.inFolder(f);
+            labels.push_back((inThis ? "[\xE2\x9C\x93]  " : "[   ]  ") + f);
+        }
+        labels.push_back(std::string("+  ") + tr("New folder..."));
+        if (hasEntry && !en.folders.empty())
+            labels.push_back(tr("Remove from all folders"));
+
+        std::weak_ptr<CardState> weak = s;
+        auto* dd = new brls::Dropdown(tr("Folders"), labels, [weak, custom](int i) {
+            auto c = weak.lock();
+            if (!c || i < 0) return;
+            if (i < (int)custom.size())
+            {
+                library::toggleFolder(c->d.item, custom[i]);
+            }
+            else if (i == (int)custom.size())
+            {
+                brls::Application::getImeManager()->openForText(
+                    [weak](std::string text) {
+                        auto c2 = weak.lock();
+                        if (!c2) return;
+                        while (!text.empty() && (text.front() == ' ' || text.front() == '\t')) text.erase(0, 1);
+                        while (!text.empty() && (text.back() == ' ' || text.back() == '\t')) text.pop_back();
+                        if (text.empty()) return;
+                        library::createFolder(text);
+                        library::toggleFolder(c2->d.item, text);
+                        brls::Application::notify(tr("Folder created"));
+                    },
+                    tr("New folder"), "", 64, "");
+            }
+            else
+            {
+                library::setFolders(c->d.item, {});
+            }
+        });
+        brls::Application::pushActivity(new brls::Activity(dd));
+    }
+
     // Library changes (a status picked, an episode watched): relabel. Polled:
     // the player writes the library from its own screen, on top of this one.
     uint32_t seenGen = 0;
@@ -359,6 +522,7 @@ class CardView : public brls::Box
             seenGen = gen;
             if (st->playBtn) st->playBtn->setText(playLabel());
             if (st->markBtn) st->markBtn->setText(markLabel());
+            if (st->folderBtn) st->folderBtn->setText(folderLabel());
             refreshEpisodes();
         }
         brls::Box::draw(vg, x, y, w, h, style, ctx);
@@ -418,6 +582,72 @@ class CardView : public brls::Box
         // 300 wide at 16:9, plus room for the focus glow.
         st->seasonsSection->addView(ui::strip(st->episodes, 236.0f * 9.0f / 16.0f + 22.0f, false));
         body->addView(st->seasonsSection);
+    }
+
+    static constexpr float kPersonW = 120.0f;
+    static constexpr float kPersonH = 120.0f * 1.35f + 52.0f;
+
+    void buildDirectors(brls::Box* body)
+    {
+        st->directorsSection = new brls::Box();
+        st->directorsSection->setAxis(brls::Axis::COLUMN);
+        st->directorsSection->setMarginTop(26.0f);
+        st->directorsSection->setVisibility(brls::Visibility::GONE);
+
+        auto* h = whiteLabel(st->d.item.isSeries() ? tr("Creators") : tr("Directors"), 20.0f, 235);
+        h->setMarginBottom(10.0f);
+        st->directorsSection->addView(h);
+
+        st->directorsRow = new brls::Box();
+        st->directorsSection->addView(ui::strip(st->directorsRow, kPersonH + 22.0f, false));
+        body->addView(st->directorsSection);
+    }
+
+    void buildCast(brls::Box* body)
+    {
+        st->castSection = new brls::Box();
+        st->castSection->setAxis(brls::Axis::COLUMN);
+        st->castSection->setMarginTop(26.0f);
+        st->castSection->setVisibility(brls::Visibility::GONE);
+
+        auto* h = whiteLabel(tr("Actors"), 20.0f, 235);
+        h->setMarginBottom(10.0f);
+        st->castSection->addView(h);
+
+        st->castRow = new brls::Box();
+        st->castSection->addView(ui::strip(st->castRow, kPersonH + 22.0f, false));
+        body->addView(st->castSection);
+    }
+
+    void showDirectors()
+    {
+        if (st->d.directors.empty()) return;
+        st->directorsRow->clearViews();
+        for (const auto& d : st->d.directors)
+        {
+            std::string role = d.role == "Creator" ? tr("Creator") : tr("Director");
+            auto* card = ui::personCard(d.name, role, d.key(), d.profileUrl, alive,
+                                        [d, role]() {
+                                            openPersonCredits(d.name, role, d.id, true);
+                                        }, kPersonW);
+            st->directorsRow->addView(card);
+        }
+        st->directorsSection->setVisibility(brls::Visibility::VISIBLE);
+    }
+
+    void showCast()
+    {
+        if (st->d.cast.empty()) return;
+        st->castRow->clearViews();
+        for (const auto& c : st->d.cast)
+        {
+            auto* card = ui::personCard(c.name, c.role, c.key(), c.profileUrl, alive,
+                                        [c]() {
+                                            openPersonCredits(c.name, tr("Actor"), c.id, false);
+                                        }, kPersonW);
+            st->castRow->addView(card);
+        }
+        st->castSection->setVisibility(brls::Visibility::VISIBLE);
     }
 
     // TMDB's recommendations under everything else, as on the home rows: A
@@ -490,17 +720,29 @@ class CardView : public brls::Box
                               s->alive, true);
 
             fillChips();
-            s->overview->setText(trimmed(s->d.item.overview));
+            updateOverview(s);
+
+            if (!s->d.directors.empty())
+            {
+                std::string d = s->d.item.isSeries() ? tr("Creators: ") : tr("Director: ");
+                for (size_t i = 0; i < s->d.directors.size() && i < 3; i++)
+                    d += (i ? ", " : "") + s->d.directors[i].name;
+                s->director->setText(d);
+                s->director->setVisibility(brls::Visibility::VISIBLE);
+            }
+
             if (!s->d.cast.empty())
             {
                 std::string c = tr("Starring: ");
                 for (size_t i = 0; i < s->d.cast.size() && i < 4; i++)
-                    c += (i ? ", " : "") + s->d.cast[i];
+                    c += (i ? ", " : "") + s->d.cast[i].name;
                 s->cast->setText(c);
                 s->cast->setVisibility(brls::Visibility::VISIBLE);
             }
             s->playBtn->setText(playLabel());
             if (s->d.item.isSeries() && !s->d.seasons.empty()) showSeasons();
+            showDirectors();
+            showCast();
             showSimilar();
             loadImdbRating();
         });

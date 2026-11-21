@@ -3162,8 +3162,7 @@ void StremioTab::openSection(std::string title,
             }
             if (!st->line || st->inLine >= perRow)
             {
-                st->line = new brls::Box();
-                st->line->setAxis(brls::Axis::ROW);
+                st->line = new ui::NearestRow();
                 // The cards carry their own left margin.
                 st->line->setMarginLeft(kPosterInset - 8.0f);
                 st->line->setMarginBottom(16.0f);
@@ -3234,10 +3233,9 @@ void StremioTab::openSection(std::string title,
                 size_t from = st->items.size();
                 for (const auto& it : r.items)
                     if (st->ids.insert(it.id).second) st->items.push_back(it);
-                if (st->items.size() == from)
+                if (st->items.size() == from || st->items.size() >= 300)
                 {
-                    st->exhausted = true;  // a whole page of things we had
-                    return;
+                    st->exhausted = true;  // a whole page of things we had, or safety ceiling reached
                 }
                 appendFrom(from);
             });
@@ -3649,7 +3647,7 @@ void StremioTab::attachPoster(brls::Image* art, const stremio::LibItem& it)
     auto alive = artToken ? artToken : rowsAlive;
     stremio::fetchPosterAsync(it.id, it.poster, [art, alive](std::string path) {
         if (!*alive || path.empty()) return;
-        art->setImageFromFile(path);
+        ui::loadImageAsync(art, path, alive);
     });
 }
 

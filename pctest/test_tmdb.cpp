@@ -81,10 +81,25 @@ static const char* kMovie = R"J({"backdrop_path":"/bd.jpg","genres":[{"id":878,"
  "poster_path":"/p.jpg","release_date":"2024-02-27","runtime":166,"title":"Дюна: Часть вторая",
  "vote_average":8.1,"belongs_to_collection":{"id":726871,"name":"Дюна (Коллекция)"},
  "external_ids":{"imdb_id":"tt15239678"},
+ "credits":{"cast":[{"id":1190668,"name":"Тимоти Шаламе","character":"Пол Атрейдес","profile_path":"/tc.jpg"}],
+            "crew":[{"id":137427,"name":"Дени Вильнёв","job":"Director","profile_path":"/dv.jpg"}]},
  "recommendations":{"page":1,"results":[
   {"id":438631,"title":"Дюна","original_title":"Dune","media_type":"movie","poster_path":"/r1.jpg",
    "release_date":"2021-09-15","genre_ids":[878,12],"vote_average":7.8},
   {"id":0,"title":"broken"}],"total_pages":2}})J";
+
+static const char* kCombinedCredits = R"J({
+  "id": 137427,
+  "cast": [
+    {"id": 999,"title":"Камео","media_type":"movie","popularity":5.0,"vote_average":6.0,"character":"Self","poster_path":"/c.jpg","release_date":"2010-01-01"}
+  ],
+  "crew": [
+    {"id": 693134,"title":"Дюна: Часть вторая","media_type":"movie","popularity":90.0,"vote_average":8.2,"job":"Director","poster_path":"/d2.jpg","release_date":"2024-02-27"},
+    {"id": 438631,"title":"Дюна","media_type":"movie","popularity":80.0,"vote_average":7.9,"job":"Director","poster_path":"/d1.jpg","release_date":"2021-09-15"},
+    {"id": 693134,"title":"Дюна: Часть вторая","media_type":"movie","popularity":90.0,"vote_average":8.2,"job":"Writer","poster_path":"/d2.jpg","release_date":"2024-02-27"},
+    {"id": 555,"name":"Бегущий по лезвию 2099","media_type":"tv","popularity":70.0,"vote_average":8.0,"job":"Producer","poster_path":"/b.jpg","first_air_date":"2025-01-01"}
+  ]
+})J";
 
 static const char* kSeason = R"J({"_id":"x","air_date":"2023-11-09","episodes":[
  {"air_date":"2023-11-09","episode_number":1,"name":"Пришиться","overview":"o1","runtime":53,
@@ -200,7 +215,10 @@ static void test_details()
     CHECK(d.seasons.size() == 2);
     CHECK(d.seasons[0].number == 1 && d.seasons[0].episodeCount == 8);
     CHECK(d.seasons[1].number == 0);  // specials moved to the end
-    CHECK(d.cast.size() == 2 && d.cast[0] == "Леон Кемстач");
+    CHECK(d.cast.size() == 2 && d.cast[0].name == "Леон Кемстач");
+    CHECK(d.cast[0].role == "Андрей");
+    CHECK(d.directors.size() == 1 && d.directors[0].name == "Жора Крыжовников");
+    CHECK(d.directors[0].role == "Creator");
 
     content::Details m;
     CHECK(tmdb::parseDetails(kMovie, content::Kind::Movie, IMG, m));
@@ -208,6 +226,10 @@ static void test_details()
     CHECK(m.item.imdbId == "tt15239678");
     CHECK(m.item.runtimeMin == 166);
     CHECK(m.item.posterUrlLarge == "https://image.tmdb.org/t/p/w342/p.jpg");
+    CHECK(m.cast.size() == 1 && m.cast[0].name == "Тимоти Шаламе");
+    CHECK(m.cast[0].role == "Пол Атрейдес");
+    CHECK(m.directors.size() == 1 && m.directors[0].name == "Дени Вильнёв");
+    CHECK(m.directors[0].role == "Director");
     // Recommendations: their ids and titles don't leak into the film's own.
     CHECK(m.item.tmdbId == 693134);
     CHECK(m.similar.size() == 1);
@@ -216,6 +238,23 @@ static void test_details()
     CHECK(m.similar[0].posterUrl == "https://image.tmdb.org/t/p/w185/r1.jpg");
     CHECK(d.similar.empty());
     CHECK(!tmdb::parseDetails("{}", content::Kind::Movie, IMG, m));
+    std::printf("      PASSED\n");
+}
+
+static void test_person_credits()
+{
+    std::printf("[4b/7] Person combined credits (director and actor filtering, popularity sort)...\n");
+    auto directed = tmdb::parsePersonCredits(kCombinedCredits, IMG, true);
+    CHECK(directed.size() == 2); // 693134 (deduplicated between Director and Writer) and 438631
+    CHECK(directed[0].tmdbId == 693134); // popularity 90 > 80
+    CHECK(directed[0].title == "Дюна: Часть вторая");
+    CHECK(directed[1].tmdbId == 438631);
+    CHECK(directed[1].title == "Дюна");
+
+    auto acted = tmdb::parsePersonCredits(kCombinedCredits, IMG, false);
+    CHECK(acted.size() == 1);
+    CHECK(acted[0].tmdbId == 999);
+    CHECK(acted[0].title == "Камео");
     std::printf("      PASSED\n");
 }
 
@@ -289,6 +328,88 @@ static void test_errors()
     std::printf("      PASSED\n");
 }
 
+static const char* kMovieWithTranslations = R"J({
+  "id": 1384528,
+  "title": "\u0B93.\u0BAE\u0BCD: Operation Mole",
+  "original_title": "\u0B93.\u0BAE\u0BCD: Operation Mole",
+  "original_language": "ta",
+  "overview": "",
+  "release_date": "2026-11-19",
+  "runtime": 178,
+  "vote_average": 0.0,
+  "translations": {
+    "translations": [
+      {
+        "iso_3166_1": "US",
+        "iso_639_1": "en",
+        "data": {
+          "title": "O.M: Operation Mole",
+          "overview": "An elite undercover operative infiltrates a syndicate."
+        }
+      }
+    ]
+  }
+})J";
+
+static const char* kTamilList = R"J({
+  "page": 1,
+  "results": [
+    {
+      "id": 1384528,
+      "title": "\u0B93.\u0BAE\u0BCD: Operation Mole",
+      "original_title": "\u0B93.\u0BAE\u0BCD: Operation Mole",
+      "original_language": "ta"
+    },
+    {
+      "id": 1310458,
+      "title": "\u0B9A\u0BBE\u0BAF\u0BBE\u0BB5\u0BA9\u0BAPropagation",
+      "original_title": "\u0B9A\u0BBE\u0BAF\u0BBE\u0BB5\u0BA9\u0BAE\u0BCD",
+      "original_language": "ta"
+    }
+  ],
+  "total_pages": 1
+})J";
+
+static void test_renderability()
+{
+    std::printf("[8/8] Unsupported glyph detection, sanitization and English translation fallback...\n");
+
+    // Latin, Cyrillic, CJK
+    CHECK(!tmdb::hasUnsupportedGlyphs("Spider-Man: No Way Home"));
+    CHECK(!tmdb::hasUnsupportedGlyphs("Человек-паук: Нет пути домой"));
+    CHECK(!tmdb::hasUnsupportedGlyphs("ゴジラ-0.0"));
+    CHECK(!tmdb::hasUnsupportedGlyphs("호프"));
+    CHECK(!tmdb::hasUnsupportedGlyphs("007: Казино Рояль"));
+
+    // Indic, Thai, Arabic
+    CHECK(tmdb::hasUnsupportedGlyphs("\xD0\x9E" /* О in Cyrillic */) == false);
+    CHECK(tmdb::hasUnsupportedGlyphs("\xE0\xAE\x93.\xE0\xAE\xAE\xE0\xAF\x8D: Operation Mole")); // Tamil: ஓ.ம்: Operation Mole
+    CHECK(tmdb::hasUnsupportedGlyphs("\xE0\xA4\xB0\xE0\xA4\xBE\xE0\xA4\xAE")); // Hindi: राम
+    CHECK(tmdb::hasUnsupportedGlyphs("\xE0\xB0\xB0\xE0\xB0\xA3")); // Telugu: రణ
+    CHECK(tmdb::hasUnsupportedGlyphs("\xD8\xA3\xD9\x88\xD8\xB3\xD9\x83\xD8\xA7\xD8\xB1")); // Arabic: أوسكار
+    CHECK(tmdb::hasUnsupportedGlyphs("\xE0\xB8\xA0\xE0\xB8\xB2\xE0\xB8\x9E")); // Thai: ภาพ
+
+    // Sanitization
+    CHECK(tmdb::sanitizeRenderable("\xE0\xAE\x93.\xE0\xAE\xAE\xE0\xAF\x8D: Operation Mole") == "Operation Mole");
+    CHECK(tmdb::sanitizeRenderable("\xE0\xAE\x9A\xE0\xAE\xBE\xE0\xAE\xAF\xE0\xAE\xBE") == "");
+    CHECK(tmdb::sanitizeRenderable("  -.: Operation Mole :.-  ") == "Operation Mole");
+    CHECK(tmdb::sanitizeRenderable("Dune: Part Two") == "Dune: Part Two");
+    CHECK(tmdb::sanitizeRenderable("Дюна: Часть вторая") == "Дюна: Часть вторая");
+
+    // Details parsing with translations
+    content::Details d;
+    CHECK(tmdb::parseDetails(kMovieWithTranslations, content::Kind::Movie, IMG, d));
+    CHECK(d.item.title == "O.M: Operation Mole");
+    CHECK(d.item.overview == "An elite undercover operative infiltrates a syndicate.");
+
+    // List parsing sanitizes titles with mixed unsupported glyphs
+    auto list = tmdb::parseList(kTamilList, IMG, 0);
+    CHECK(list.size() == 2);
+    CHECK(list[0].title == "Operation Mole"); // Cleaned from "ஓ.ம்: Operation Mole"
+
+    std::printf("      PASSED\n");
+}
+
 int main()
 {
     std::printf("=========================================\n");
@@ -298,9 +419,11 @@ int main()
     test_urls();
     test_list();
     test_details();
+    test_person_credits();
     test_season();
     test_errors();
     test_queries();
+    test_renderability();
     std::printf("\nALL TESTS PASSED\n");
     return 0;
 }

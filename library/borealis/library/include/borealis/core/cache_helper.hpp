@@ -82,15 +82,26 @@ class LRUCache
 
     void set(K key, T value)
     {
+        // LOCAL PATCH: safe update instead of logic_error throw on duplicate key
         if (isCacheHit(key))
         {
-            throw std::logic_error("Can not cache the same key twice.");
+            auto it = cacheMap[key];
+            if (it->value != value)
+            {
+                auto vg = brls::Application::getNVGContext();
+                nvgDeleteImage(vg, it->value);
+                valueMap.erase(it->value);
+                it->value = value;
+                valueMap[value] = it;
+            }
+            it->dirty = false;
+            return;
         }
 
         // Check capacity limits
         if (cacheList.size() >= capacity)
         {
-            deleteCache(cacheList.size() - capacity);
+            deleteCache(cacheList.size() - capacity + 1);
         }
         // Add new cache
         cacheList.push_front(Node<K, T>(key, value));
@@ -204,17 +215,21 @@ class LRUCache
         if (num <= 0)
             return 0;
         auto vg = brls::Application::getNVGContext();
-        for (auto i = cacheList.rbegin(); i != cacheList.rend(); i++)
+        // LOCAL PATCH: safely update reverse iterator when erasing nodes to avoid use-after-free
+        auto it = cacheList.rbegin();
+        while (it != cacheList.rend() && num > 0)
         {
-            if (i->count <= 0)
+            if (it->count <= 0)
             {
                 num--;
-                nvgDeleteImage(vg, i->value);
-                cacheMap.erase(i->key);
-                valueMap.erase(i->value);
-                cacheList.erase(std::next(i).base());
-                if (num == 0)
-                    break;
+                nvgDeleteImage(vg, it->value);
+                cacheMap.erase(it->key);
+                valueMap.erase(it->value);
+                it = std::make_reverse_iterator(cacheList.erase(std::next(it).base()));
+            }
+            else
+            {
+                ++it;
             }
         }
         return num;

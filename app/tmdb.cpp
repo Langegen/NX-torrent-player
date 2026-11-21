@@ -1,9 +1,11 @@
 #include "tmdb.hpp"
 
+#include <algorithm>
 #include <cctype>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <set>
 
 #include "http.hpp"
 #include "json.hpp"
@@ -111,6 +113,113 @@ std::string errorMessage(const std::string& body)
 
 namespace
 {
+uint32_t nextUtf8(const std::string& s, size_t& i)
+{
+    if (i >= s.size()) return 0;
+    unsigned char c = s[i++];
+    if (c < 0x80) return c;
+    if ((c & 0xE0) == 0xC0)
+    {
+        if (i < s.size() && (s[i] & 0xC0) == 0x80)
+            return ((c & 0x1F) << 6) | (s[i++] & 0x3F);
+        return 0xFFFD;
+    }
+    if ((c & 0xF0) == 0xE0)
+    {
+        if (i + 1 < s.size() && (s[i] & 0xC0) == 0x80 && (s[i + 1] & 0xC0) == 0x80)
+        {
+            uint32_t cp = ((c & 0x0F) << 12) | ((s[i] & 0x3F) << 6) | (s[i + 1] & 0x3F);
+            i += 2;
+            return cp;
+        }
+        return 0xFFFD;
+    }
+    if ((c & 0xF8) == 0xF0)
+    {
+        if (i + 2 < s.size() && (s[i] & 0xC0) == 0x80 && (s[i + 1] & 0xC0) == 0x80 && (s[i + 2] & 0xC0) == 0x80)
+        {
+            uint32_t cp = ((c & 0x07) << 18) | ((s[i] & 0x3F) << 12) | ((s[i + 1] & 0x3F) << 6) | (s[i + 2] & 0x3F);
+            i += 3;
+            return cp;
+        }
+        return 0xFFFD;
+    }
+    return 0xFFFD;
+}
+
+bool isRenderableCodepoint(uint32_t cp)
+{
+    // ASCII, Latin-1, Latin Extended-A & B
+    if (cp <= 0x024F) return true;
+    // Spacing Modifier Letters, Combining Diacritical Marks
+    if (cp >= 0x02B0 && cp <= 0x036F) return true;
+    // Greek & Coptic
+    if (cp >= 0x0370 && cp <= 0x03FF) return true;
+    // Cyrillic & Cyrillic Supplement
+    if (cp >= 0x0400 && cp <= 0x052F) return true;
+    // General Punctuation, Superscripts & Subscripts, Currency Symbols
+    if (cp >= 0x2000 && cp <= 0x20CF) return true;
+    // Letterlike, Number Forms, Arrows, Math, Misc Technical
+    if (cp >= 0x2100 && cp <= 0x23FF) return true;
+    // Enclosed Alphanumerics, Box Drawing, Geometric Shapes, Misc Symbols
+    if (cp >= 0x2460 && cp <= 0x27BF) return true;
+    // CJK Radicals, Symbols/Punctuation, Hiragana, Katakana, Bopomofo, Hangul, CJK Ideographs
+    if (cp >= 0x2E80 && cp <= 0x9FFF) return true;
+    // Hangul Syllables
+    if (cp >= 0xAC00 && cp <= 0xD7AF) return true;
+    // CJK Compatibility Ideographs
+    if (cp >= 0xF900 && cp <= 0xFAFF) return true;
+    // Fullwidth & Halfwidth Forms
+    if (cp >= 0xFF00 && cp <= 0xFFEF) return true;
+    return false;
+}
+
+bool isTrimPunct(unsigned char c)
+{
+    return c <= 0x20 || c == ':' || c == '.' || c == '-' || c == ',' ||
+           c == ';' || c == '~' || c == '/' || c == '\\' || c == '|' ||
+           c == '_' || c == '(' || c == ')' || c == '[' || c == ']';
+}
+} // namespace
+
+bool hasUnsupportedGlyphs(const std::string& utf8)
+{
+    size_t i = 0;
+    while (i < utf8.size())
+    {
+        uint32_t cp = nextUtf8(utf8, i);
+        if (cp == 0xFFFD || !isRenderableCodepoint(cp))
+            return true;
+    }
+    return false;
+}
+
+std::string sanitizeRenderable(const std::string& utf8)
+{
+    std::string out;
+    size_t i = 0;
+    while (i < utf8.size())
+    {
+        size_t start = i;
+        uint32_t cp = nextUtf8(utf8, i);
+        if (cp != 0xFFFD && isRenderableCodepoint(cp))
+        {
+            out.append(utf8, start, i - start);
+        }
+    }
+    // Trim leading punctuation and whitespace
+    size_t first = 0;
+    while (first < out.size() && isTrimPunct((unsigned char)out[first]))
+        first++;
+    // Trim trailing punctuation and whitespace
+    size_t last = out.size();
+    while (last > first && isTrimPunct((unsigned char)out[last - 1]))
+        last--;
+    return out.substr(first, last - first);
+}
+
+namespace
+{
 std::string yearOf(const std::string& date)
 {
     return date.size() >= 4 && std::isdigit((unsigned char)date[0]) ? date.substr(0, 4)
@@ -127,14 +236,21 @@ void readCommon(const std::string& top, content::Kind kind,
     it.title         = json::str(top, tv ? "name" : "title");
     it.originalTitle = json::str(top, tv ? "original_name" : "original_title");
     if (it.title.empty()) it.title = it.originalTitle;
+    if (hasUnsupportedGlyphs(it.title))
+    {
+        std::string clean = sanitizeRenderable(it.title);
+        if (!clean.empty()) it.title = clean;
+    }
     it.date     = json::str(top, tv ? "first_air_date" : "release_date");
     it.year     = yearOf(it.date);
     it.overview = json::str(top, "overview");
+    if (hasUnsupportedGlyphs(it.overview)) it.overview.clear();
     std::string poster = json::str(top, "poster_path");
     it.posterUrl      = imageUrl(imageBase, "w185", poster);
     it.posterUrlLarge = imageUrl(imageBase, "w342", poster);
     it.backdropUrl    = imageUrl(imageBase, "w1280", json::str(top, "backdrop_path"));
     it.rating         = json::number(top, "vote_average", 0.0);
+    it.popularity     = json::number(top, "popularity", 0.0);
     it.originalLanguage = json::str(top, "original_language");
 }
 } // namespace
@@ -174,6 +290,43 @@ bool parseDetails(const std::string& body, content::Kind kind,
     out = content::Details();
     readCommon(top, kind, imageBase, out.item);
     if (out.item.tmdbId <= 0) return false;
+
+    bool tv = kind == content::Kind::Series;
+    std::string rawTitle = json::str(top, tv ? "name" : "title");
+    if (rawTitle.empty()) rawTitle = json::str(top, tv ? "original_name" : "original_title");
+    bool hadBadGlyphs = hasUnsupportedGlyphs(rawTitle) || hasUnsupportedGlyphs(out.item.title);
+
+    // If translations are present, resolve to English title/overview when native script has no font support
+    std::string transObj = json::object(body, "translations");
+    if (!transObj.empty())
+    {
+        for (const auto& t : json::objects(transObj, "translations"))
+        {
+            if (json::str(t, "iso_639_1") == "en")
+            {
+                std::string dataObj = json::object(t, "data");
+                std::string enTitle = json::str(dataObj, tv ? "name" : "title");
+                if (enTitle.empty()) enTitle = json::str(dataObj, "title");
+                if (enTitle.empty()) enTitle = json::str(dataObj, "name");
+                std::string enOverview = json::str(dataObj, "overview");
+
+                if (hadBadGlyphs && !enTitle.empty() && !hasUnsupportedGlyphs(enTitle))
+                {
+                    out.item.title = enTitle;
+                }
+                if (out.item.overview.empty() && !enOverview.empty() && !hasUnsupportedGlyphs(enOverview))
+                {
+                    out.item.overview = enOverview;
+                }
+                break;
+            }
+        }
+    }
+    if (hasUnsupportedGlyphs(out.item.title))
+    {
+        std::string clean = sanitizeRenderable(out.item.title);
+        if (!clean.empty()) out.item.title = clean;
+    }
 
     // A film carries imdb_id itself; a series only inside external_ids.
     out.item.imdbId = json::str(top, "imdb_id");
@@ -215,12 +368,56 @@ bool parseDetails(const std::string& body, content::Kind kind,
         for (auto& s : specials) out.seasons.push_back(s);
     }
 
+    // For series, creators may be in root-level "created_by"
+    if (kind == content::Kind::Series)
+    {
+        for (const auto& c : json::objects(body, "created_by"))
+        {
+            content::Person p;
+            p.id = (int)json::integer(c, "id", 0);
+            p.name = json::str(c, "name");
+            p.role = "Creator";
+            p.profileUrl = imageUrl(imageBase, "w185", json::str(c, "profile_path"));
+            if (!p.name.empty())
+                out.directors.push_back(std::move(p));
+        }
+    }
+
     std::string credits = json::object(body, "credits");
+    for (const auto& c : json::objects(credits, "crew"))
+    {
+        if (json::str(c, "job") == "Director")
+        {
+            int pid = (int)json::integer(c, "id", 0);
+            std::string n = json::str(c, "name");
+            if (n.empty()) continue;
+            bool dup = false;
+            for (const auto& d : out.directors)
+            {
+                if (pid > 0 && d.id == pid) { dup = true; break; }
+                if (d.name == n) { dup = true; break; }
+            }
+            if (dup) continue;
+
+            content::Person p;
+            p.id = pid;
+            p.name = n;
+            p.role = "Director";
+            p.profileUrl = imageUrl(imageBase, "w185", json::str(c, "profile_path"));
+            out.directors.push_back(std::move(p));
+        }
+    }
+
     for (const auto& c : json::objects(credits, "cast"))
     {
-        std::string n = json::str(c, "name");
-        if (!n.empty()) out.cast.push_back(n);
-        if (out.cast.size() >= 6) break;
+        content::Person p;
+        p.id = (int)json::integer(c, "id", 0);
+        p.name = json::str(c, "name");
+        p.role = json::str(c, "character");
+        p.profileUrl = imageUrl(imageBase, "w185", json::str(c, "profile_path"));
+        if (!p.name.empty())
+            out.cast.push_back(std::move(p));
+        if (out.cast.size() >= 20) break;
     }
 
     // "recommendations": a list answer of its own, nested. Its titles are of
@@ -232,6 +429,66 @@ bool parseDetails(const std::string& body, content::Kind kind,
         if (out.similar.size() > 20) out.similar.resize(20);
     }
     return true;
+}
+
+std::vector<content::Item> parsePersonCredits(const std::string& body,
+                                              const std::string& imageBase,
+                                              bool isDirector)
+{
+    std::vector<content::Item> out;
+    std::set<std::pair<int, int>> seen;
+
+    auto addObj = [&](const std::string& obj, bool matchDirector) {
+        std::string top = json::topLevel(obj);
+        if (matchDirector)
+        {
+            std::string job = json::str(top, "job");
+            std::string dept = json::str(top, "department");
+            if (job != "Director" && dept != "Directing" && job != "Creator")
+                return;
+        }
+        std::string mt = json::str(top, "media_type");
+        content::Kind k = (mt == "tv") ? content::Kind::Series : content::Kind::Movie;
+        content::Item it;
+        readCommon(top, k, imageBase, it);
+        for (long g : json::integers(obj, "genre_ids")) it.genreIds.push_back((int)g);
+        if (it.tmdbId <= 0 || it.title.empty()) return;
+
+        auto key = std::make_pair(it.isSeries() ? 1 : 0, it.tmdbId);
+        if (seen.insert(key).second)
+        {
+            out.push_back(std::move(it));
+        }
+    };
+
+    if (isDirector)
+    {
+        for (const auto& obj : json::objects(body, "crew"))
+            addObj(obj, true);
+        if (out.empty())
+        {
+            for (const auto& obj : json::objects(body, "cast"))
+                addObj(obj, false);
+        }
+    }
+    else
+    {
+        for (const auto& obj : json::objects(body, "cast"))
+            addObj(obj, false);
+        if (out.empty())
+        {
+            for (const auto& obj : json::objects(body, "crew"))
+                addObj(obj, false);
+        }
+    }
+
+    std::sort(out.begin(), out.end(), [](const content::Item& a, const content::Item& b) {
+        if (a.popularity != b.popularity)
+            return a.popularity > b.popularity;
+        return a.date > b.date;
+    });
+
+    return out;
 }
 
 std::vector<content::Episode> parseSeason(const std::string& body,
@@ -545,6 +802,31 @@ void fetchList(const std::string& path,
             r.totalPages = (int)json::integer(body, "total_pages", 1);
             // TMDB serves at most 500 pages, whatever it says the total is.
             if (r.totalPages > 500) r.totalPages = 500;
+
+            for (auto& it : r.items)
+            {
+                if (hasUnsupportedGlyphs(it.title) || hasUnsupportedGlyphs(it.originalTitle))
+                {
+                    std::string itemPath = std::string(it.isSeries() ? "/tv/" : "/movie/") +
+                                           std::to_string(it.tmdbId);
+                    Settings enSettings = s;
+                    enSettings.language = "en-US";
+                    std::string enUrl = requestUrl(enSettings, itemPath);
+                    std::string enBody, enErr;
+                    if (fetchCached(enSettings, enUrl, kDetailsTtl, enBody, enErr))
+                    {
+                        std::string enTop = json::topLevel(enBody);
+                        std::string enTitle = json::str(enTop, it.isSeries() ? "name" : "title");
+                        if (!enTitle.empty() && !hasUnsupportedGlyphs(enTitle))
+                            it.title = enTitle;
+                    }
+                    if (hasUnsupportedGlyphs(it.title))
+                    {
+                        std::string clean = sanitizeRenderable(it.title);
+                        if (!clean.empty()) it.title = clean;
+                    }
+                }
+            }
         }
         brls::sync([done, r]() { done(r); });
     });
@@ -621,7 +903,7 @@ void fetchDetailsAsync(content::Kind kind, int id,
     Settings s = settings();
     std::string path = std::string(kind == content::Kind::Series ? "/tv/" : "/movie/") +
                        std::to_string(id);
-    std::string url = requestUrl(s, path, { { "append_to_response", "external_ids,credits,recommendations" } });
+    std::string url = requestUrl(s, path, { { "append_to_response", "external_ids,credits,recommendations,translations" } });
     workers::run([s, url, kind, done]() {
         DetailsResult r;
         std::string body;
@@ -631,6 +913,57 @@ void fetchDetailsAsync(content::Kind kind, int id,
         {
             r.ok = parseDetails(body, kind, s.imageBase, r.details);
             if (!r.ok) r.error = "unexpected answer from TMDB";
+        }
+        brls::sync([done, r]() { done(r); });
+    });
+}
+
+void fetchPersonCreditsAsync(int personId, bool isDirector,
+                             std::function<void(ListResult)> done)
+{
+    Settings s = settings();
+    if (s.apiKey.empty())
+    {
+        ListResult r;
+        r.error = "no TMDB key";
+        done(r);
+        return;
+    }
+    std::string url = requestUrl(s, "/person/" + std::to_string(personId) + "/combined_credits");
+    workers::run([s, url, isDirector, done]() {
+        ListResult r;
+        std::string body;
+        if (fetchCached(s, url, kListTtl, body, r.error))
+        {
+            r.items      = parsePersonCredits(body, s.imageBase, isDirector);
+            r.ok         = true;
+            r.page       = 1;
+            r.totalPages = 1;
+
+            for (auto& it : r.items)
+            {
+                if (hasUnsupportedGlyphs(it.title) || hasUnsupportedGlyphs(it.originalTitle))
+                {
+                    std::string itemPath = std::string(it.isSeries() ? "/tv/" : "/movie/") +
+                                           std::to_string(it.tmdbId);
+                    Settings enSettings = s;
+                    enSettings.language = "en-US";
+                    std::string enUrl = requestUrl(enSettings, itemPath);
+                    std::string enBody, enErr;
+                    if (fetchCached(enSettings, enUrl, kDetailsTtl, enBody, enErr))
+                    {
+                        std::string enTop = json::topLevel(enBody);
+                        std::string enTitle = json::str(enTop, it.isSeries() ? "name" : "title");
+                        if (!enTitle.empty() && !hasUnsupportedGlyphs(enTitle))
+                            it.title = enTitle;
+                    }
+                    if (hasUnsupportedGlyphs(it.title))
+                    {
+                        std::string clean = sanitizeRenderable(it.title);
+                        if (!clean.empty()) it.title = clean;
+                    }
+                }
+            }
         }
         brls::sync([done, r]() { done(r); });
     });

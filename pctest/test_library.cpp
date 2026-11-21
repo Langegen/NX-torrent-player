@@ -204,6 +204,61 @@ static void test_files()
     std::printf("      PASSED\n");
 }
 
+static void test_folders()
+{
+    std::printf("[6/6] Custom folders / categories round trip & merge...\n");
+    Entry a = film(101, "Movie In Folders");
+    a.status = Status::Planned;
+    a.folders = { "Anime", "Favorites" };
+
+    Entry b = show(202, "Show No Folders");
+    b.status = Status::Watching;
+
+    std::vector<std::string> globalFolders = { "Anime", "Favorites", "EmptyFolder" };
+    std::string json = library::toJson({ a, b }, globalFolders);
+
+    std::vector<std::string> loadedFolders;
+    auto back = library::fromJson(json, &loadedFolders);
+
+    CHECK(back.size() == 2);
+    CHECK(loadedFolders.size() == 3);
+    CHECK(loadedFolders[0] == "Anime");
+    CHECK(loadedFolders[1] == "Favorites");
+    CHECK(loadedFolders[2] == "EmptyFolder");
+
+    CHECK(back[0].folders.size() == 2);
+    CHECK(back[0].inFolder("Anime"));
+    CHECK(back[0].inFolder("Favorites"));
+    CHECK(!back[0].inFolder("NonExistent"));
+
+    CHECK(back[1].folders.empty());
+    CHECK(!back[1].inFolder("Anime"));
+
+    // Backward compatibility: old JSON without folders parses cleanly
+    std::string oldJson = "{\"version\":1,\"entries\":[{\"item\":{\"kind\":\"movie\",\"tmdbId\":303,\"title\":\"Old\"},\"status\":\"planned\"}]}";
+    std::vector<std::string> oldFolders;
+    auto oldBack = library::fromJson(oldJson, &oldFolders);
+    CHECK(oldBack.size() == 1);
+    CHECK(oldBack[0].folders.empty());
+    CHECK(oldFolders.empty());
+
+    // Merge: combines folders from entries and global lists
+    std::vector<Entry> dest = { a };
+    std::vector<std::string> destFolders = { "Anime", "Favorites" };
+
+    Entry aUpdate = film(101, "Movie In Folders");
+    aUpdate.folders = { "To Watch" };
+    std::vector<std::string> incomingFolders = { "To Watch", "NewCat" };
+
+    int added = library::merge(dest, { aUpdate }, &destFolders, &incomingFolders);
+    CHECK(added == 0); // already existed
+    CHECK(dest[0].folders.size() == 3); // Anime, Favorites, To Watch
+    CHECK(dest[0].inFolder("Anime") && dest[0].inFolder("Favorites") && dest[0].inFolder("To Watch"));
+    CHECK(destFolders.size() == 4); // Anime, Favorites, To Watch, NewCat
+
+    std::printf("      PASSED\n");
+}
+
 int main()
 {
     std::printf("=========================================\n");
@@ -214,6 +269,7 @@ int main()
     test_merge();
     test_keys();
     test_files();
+    test_folders();
     std::printf("\nALL TESTS PASSED\n");
     return 0;
 }

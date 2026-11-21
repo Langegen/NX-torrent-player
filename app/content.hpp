@@ -34,6 +34,7 @@ struct Item
     std::vector<int> genreIds;        // TMDB genre ids; lists only
     int runtimeMin = 0;               // film length or a typical episode
     int seasonCount = 0;              // series only
+    double popularity = 0.0;
 
     bool isSeries() const { return kind == Kind::Series; }
     // "movie" / "series": Stremio's names for the two.
@@ -73,12 +74,22 @@ struct Episode
     }
 };
 
+struct Person
+{
+    int id = 0;
+    std::string name;
+    std::string role;        // character name for actors, or job/role for crew ("Director", "Creator")
+    std::string profileUrl;  // TMDB image URL
+    std::string key() const { return "tmdb_person_" + std::to_string(id); }
+};
+
 // A film or a show with everything the card needs.
 struct Details
 {
     Item item;
     std::vector<Season> seasons;     // series only, specials last
-    std::vector<std::string> cast;   // a few names, top billing first
+    std::vector<Person> directors;   // directors / creators
+    std::vector<Person> cast;        // actors
     std::vector<Item> similar;       // TMDB's recommendations, same kind
 };
 

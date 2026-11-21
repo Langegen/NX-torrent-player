@@ -402,22 +402,38 @@ GLFWVideoContext::GLFWVideoContext(const std::string& windowTitle, uint32_t wind
     }
 
 #ifdef __SWITCH__
-    this->monitor    = glfwGetPrimaryMonitor();
-    const char* name = glfwGetMonitorName(monitor);
-    brls::Logger::info("glfw: Monitor: {}", name);
+    this->monitor = glfwGetPrimaryMonitor();
+    if (this->monitor)
+    {
+        const char* name = glfwGetMonitorName(this->monitor);
+        brls::Logger::info("glfw: Monitor: {}", name ? name : "unknown");
+        const GLFWvidmode* r = glfwGetVideoMode(this->monitor);
+        if (r)
+        {
+            this->oldWidth  = r->width;
+            this->oldHeight = r->height;
+        }
+    }
 #endif
 }
 
 void GLFWVideoContext::beginFrame()
 {
 #ifdef __SWITCH__
-    const GLFWvidmode* r = glfwGetVideoMode(monitor);
+    if (!this->monitor)
+        this->monitor = glfwGetPrimaryMonitor();
 
-    if (oldWidth != r->width || oldHeight != r->height)
+    const GLFWvidmode* r = this->monitor ? glfwGetVideoMode(this->monitor) : nullptr;
+
+    if (r && r->width > 0 && r->height > 0 && (oldWidth != r->width || oldHeight != r->height))
     {
         oldWidth  = r->width;
         oldHeight = r->height;
 
+        // LOCAL PATCH (NX-torrent-player): flush pending GPU commands before
+        // resizing the native Switch window (nwindowSetDimensions), preventing
+        // driver crashes while buffers are active in Mesa/Nouveau.
+        glFinish();
         glfwSetWindowSize(window, r->width, r->height);
     }
 #elif defined(BOREALIS_USE_D3D11)

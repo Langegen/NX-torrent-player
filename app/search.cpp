@@ -230,8 +230,7 @@ class SearchScreen : public brls::Box
         {
             if (!row || (int)row->getChildren().size() >= cols)
             {
-                row = new brls::Box();
-                row->setAxis(brls::Axis::ROW);
+                row = new ui::NearestRow();
                 row->setPaddingLeft(kInset);
                 row->setMarginBottom(kGap);
                 tiles->addView(row);

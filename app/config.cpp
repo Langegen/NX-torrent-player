@@ -393,6 +393,9 @@ void load()
     cfg.picContrast   = eq("picContrast", cfg.picContrast);
     cfg.picGamma      = eq("picGamma", cfg.picGamma);
     cfg.picSaturation = eq("picSaturation", cfg.picSaturation);
+    cfg.picRed        = eq("picRed", cfg.picRed);
+    cfg.picGreen      = eq("picGreen", cfg.picGreen);
+    cfg.picBlue       = eq("picBlue", cfg.picBlue);
 
     cfg.language     = readStr(body, "language", cfg.language);
     cfg.accent       = readStr(body, "accent", cfg.accent);
@@ -478,6 +481,9 @@ bool save()
     kv("picContrast", n(cfg.picContrast));
     kv("picGamma", n(cfg.picGamma));
     kv("picSaturation", n(cfg.picSaturation));
+    kv("picRed", n(cfg.picRed));
+    kv("picGreen", n(cfg.picGreen));
+    kv("picBlue", n(cfg.picBlue));
     kv("dockedUiWidth", n(cfg.dockedUiWidth));
     kv("handheldUiWidth", n(cfg.handheldUiWidth));
     kv("language", jsonStr(cfg.language));

@@ -115,6 +115,86 @@ RowSpec animeOf(const char* title, content::Kind kind, tmdb::Discover::Sort sort
     return { title, tmdb::discoverQuery(d) };
 }
 
+class MoreButton : public brls::Box
+{
+  public:
+    MoreButton(const std::string& text, std::function<void()> onClick)
+        : action(std::move(onClick))
+    {
+        setFocusable(true);
+        setCornerRadius(6.0f);
+        setHighlightCornerRadius(
+            6.0f + brls::Application::getStyle()["brls/highlight/stroke_width"] / 2.0f);
+        setPadding(3.0f, 8.0f, 3.0f, 8.0f);
+        setMargins(0.0f, 0.0f, 4.0f, 10.0f);
+
+        label = textLabel(text, 15.0f, theme::textMuted());
+        addView(label);
+
+        getFocusEvent()->subscribe([this](bool focused) {
+            if (label)
+                label->setTextColor(focused ? nvgRGB(255, 255, 255) : theme::textMuted());
+        });
+
+        registerAction(
+            tr("Open"), brls::BUTTON_A,
+            [this](brls::View*) {
+                if (action) action();
+                return true;
+            },
+            false, false, brls::SOUND_CLICK);
+
+        addGestureRecognizer(new brls::TapGestureRecognizer(
+            this, [this]() { if (action) action(); }));
+    }
+
+    void setTargetRow(brls::View* r) { targetRow = r; }
+
+    brls::View* getNextFocus(brls::FocusDirection direction, brls::View* currentView) override
+    {
+        if (direction == brls::FocusDirection::DOWN || direction == brls::FocusDirection::RIGHT)
+        {
+            if (targetRow)
+            {
+                brls::View* f = targetRow->getDefaultFocus();
+                if (f) return f;
+            }
+        }
+        return brls::Box::getNextFocus(direction, currentView);
+    }
+
+  private:
+    std::function<void()> action;
+    brls::Label* label = nullptr;
+    brls::View* targetRow = nullptr;
+};
+
+class CatalogRow : public brls::Box
+{
+  public:
+    CatalogRow() { setAxis(brls::Axis::ROW); }
+
+    void setMoreButton(brls::View* btn) { moreButton = btn; }
+
+    brls::View* getNextFocus(brls::FocusDirection direction, brls::View* currentView) override
+    {
+        if (direction == brls::FocusDirection::LEFT && moreButton && !getChildren().empty())
+        {
+            bool isFirst = false;
+            for (brls::View* v = currentView; v; v = v->getParent())
+            {
+                if (v == getChildren()[0]) { isFirst = true; break; }
+                if (v == this) break;
+            }
+            if (isFirst)
+                return moreButton;
+        }
+        return brls::Box::getNextFocus(direction, currentView);
+    }
+
+  private:
+    brls::View* moreButton = nullptr;
+};
 
 class HomeRoot : public brls::Box
 {
@@ -171,6 +251,19 @@ class HomeRoot : public brls::Box
         brls::Box::draw(vg, x, y, w, h, style, ctx);
     }
 
+    brls::View* getDefaultFocus() override
+    {
+        if (hero && hero->getVisibility() == brls::Visibility::VISIBLE && heroWatch)
+            return heroWatch;
+        if (continueRow && !continueRow->getChildren().empty() &&
+            continueRow->getChildren()[0]->isFocusable())
+            return continueRow->getChildren()[0];
+        if (firstRow && !firstRow->getChildren().empty() &&
+            firstRow->getChildren()[0]->isFocusable())
+            return firstRow->getChildren()[0];
+        return brls::Box::getDefaultFocus();
+    }
+
   private:
     std::shared_ptr<bool> alive = std::make_shared<bool>(true);
     // The Continue row's cards only: rebuilt (freed) while the screen lives,
@@ -181,6 +274,7 @@ class HomeRoot : public brls::Box
     brls::Box* hero = nullptr;
     brls::Button* heroWatch = nullptr;   // somewhere safe to park the focus
     brls::Box* firstRow = nullptr;       // ... or here
+    brls::View* firstRowMore = nullptr;
     brls::View* continueSection[2] = { nullptr, nullptr };  // heading, strip
     brls::Box* continueRow = nullptr;
     uint32_t seenGen = 0;
@@ -270,8 +364,8 @@ class HomeRoot : public brls::Box
     }
 
     // A titled strip, with a "Loading..." placeholder until fillRow. The
-    // heading opens the whole collection on a touch ("See all" at the row's
-    // end does it from the controller).
+    // heading opens the whole collection on touch or gamepad ("See all" button
+    // in the header and at the row's end, or pressing X on any card).
     brls::Box* addRow(const RowSpec& spec)
     {
         std::string title = tr(spec.title);
@@ -282,24 +376,34 @@ class HomeRoot : public brls::Box
         head->setAlignItems(brls::AlignItems::FLEX_END);
         auto* h = ui::heading(title, kInset);
         head->addView(h);
-        auto* more = textLabel(std::string(tr("See all")) + "  >", 15.0f, theme::textMuted());
-        more->setMargins(0.0f, 0.0f, 6.0f, 14.0f);
-        head->addView(more);
+
+        auto* moreBtn = new MoreButton(std::string(tr("See all")) + "  >",
+                                       [title, q]() { openCollection(title, q); });
+        head->addView(moreBtn);
+
         head->addGestureRecognizer(new brls::TapGestureRecognizer(
             head, [title, q]() { openCollection(title, q); }));
         list->addView(head);
 
-        auto* row = new brls::Box();
+        auto* row = new CatalogRow();
+        row->setMoreButton(moreBtn);
+        moreBtn->setTargetRow(row);
+
         auto* wait = textLabel(tr("Loading..."), 17.0f, theme::textMuted());
         wait->setMarginLeft(kInset);
         row->addView(wait);
         list->addView(ui::strip(row, kPosterW * 1.5f + kGlow));
-        if (!firstRow) firstRow = row;
+        if (!firstRow)
+        {
+            firstRow     = row;
+            firstRowMore = moreBtn;
+        }
         return row;
     }
 
     void fillRow(brls::Box* row, const tmdb::ListResult& r, const RowSpec& spec)
     {
+        bool hadFocusOnMore = (firstRowMore && brls::Application::getCurrentFocus() == firstRowMore);
         // Only the placeholder is in there: nothing focusable is freed.
         row->clearViews();
         if (!r.ok || r.items.empty())
@@ -310,17 +414,30 @@ class HomeRoot : public brls::Box
             row->addView(l);
             return;
         }
+        std::string title = tr(spec.title);
+        tmdb::ListQuery q = spec.query;
         for (const auto& it : r.items)
         {
             auto* card = catalogCard(it, alive);
             if (row->getChildren().empty()) card->setMarginLeft(kInset);
+            card->registerAction(
+                tr("See all"), brls::BUTTON_X,
+                [title, q](brls::View*) {
+                    openCollection(title, q);
+                    return true;
+                },
+                false, false, brls::SOUND_CLICK);
             row->addView(card);
         }
         // The rest of the collection, one press past the last poster.
-        std::string title = tr(spec.title);
-        tmdb::ListQuery q = spec.query;
         row->addView(ui::moreTile(tr("See all"), kPosterW,
                                   [title, q]() { openCollection(title, q); }));
+
+        if (row == firstRow && (hadFocusOnMore || !brls::Application::getCurrentFocus()))
+        {
+            if (!row->getChildren().empty() && row->getChildren()[0]->isFocusable())
+                brls::Application::giveFocus(row->getChildren()[0]);
+        }
     }
 
     // The mock-up's banner: the backdrop darkened from the left, the title,

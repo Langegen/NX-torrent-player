@@ -211,7 +211,21 @@ void Button::draw(NVGcontext* vg, float x, float y, float w, float h, brls::Styl
 
 Chip::Chip()
 {
-    setDimensions(320.0f, 34.0f);
+    setDimensions(180.0f, 32.0f);
+}
+
+float Chip::measureWidth(NVGcontext* vg) const
+{
+    if (text.empty()) return 60.0f;
+    if (!vg) vg = brls::Application::getNVGContext();
+    if (!vg) return 180.0f;
+    int font = brls::Application::getFont(brls::FONT_REGULAR);
+    if (font == brls::FONT_INVALID) return 180.0f;
+    nvgFontFaceId(vg, font);
+    nvgFontSize(vg, 16.0f);
+    float b[4];
+    nvgTextBounds(vg, 0, 0, text.c_str(), nullptr, b);
+    return (b[2] - b[0]) + 28.0f;
 }
 
 void Chip::draw(NVGcontext* vg, float x, float y, float w, float h, brls::Style style,
@@ -220,11 +234,11 @@ void Chip::draw(NVGcontext* vg, float x, float y, float w, float h, brls::Style 
     int font = brls::Application::getFont(brls::FONT_REGULAR);
     if (font == brls::FONT_INVALID || text.empty()) return;
     nvgFontFaceId(vg, font);
-    nvgFontSize(vg, 18.0f);
+    nvgFontSize(vg, 16.0f);
     nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
     float b[4];
     nvgTextBounds(vg, 0, 0, text.c_str(), nullptr, b);
-    float pw = (b[2] - b[0]) + 32.0f;
+    float pw = (b[2] - b[0]) + 28.0f;
     if (pw > w) pw = w;
     float cx = x + w / 2.0f, cy = y + h / 2.0f;
     nvgBeginPath(vg);

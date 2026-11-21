@@ -51,6 +51,57 @@ void PosterGrid::load(const tmdb::ListQuery& q, brls::ScrollingFrame* frame)
     next();
 }
 
+void PosterGrid::loadPersonCredits(int personId, bool isDirector, brls::ScrollingFrame* frame)
+{
+    for (brls::View* v = brls::Application::getCurrentFocus(); v; v = v->getParent())
+        if (v == this)
+        {
+            if (parkTarget) brls::Application::giveFocus(parkTarget);
+            break;
+        }
+    *alive = false;
+    alive  = std::make_shared<bool>(true);
+    clearViews();
+    row    = nullptr;
+    status = nullptr;
+    firstCard = nullptr;
+    shown  = 0;
+    page   = 0;
+    totalPages = 1;
+    loading    = true;
+    query  = tmdb::ListQuery();
+    scroll = frame;
+
+    status = new brls::Label();
+    status->setFontSize(17.0f);
+    status->setTextColor(theme::textMuted());
+    status->setMargins(14.0f, 0.0f, 0.0f, kInset);
+    status->setText(tr("Loading..."));
+    addView(status);
+
+    tmdb::fetchPersonCreditsAsync(personId, isDirector, [this, a = alive](tmdb::ListResult r) {
+        if (!*a) return;
+        loading = false;
+        if (!r.ok)
+        {
+            status->setText(r.error);
+            totalPages = page;
+            return;
+        }
+        page = 1;
+        totalPages = 1;
+        removeView(status, false);
+        for (const auto& it : r.items)
+            if (!filter || filter(it)) add(it);
+        addView(status);
+        if (shown > 0) focusFirstIfLost();
+        if (shown == 0)
+            status->setText(tr("Nothing here"));
+        else
+            status->setVisibility(brls::Visibility::GONE);
+    });
+}
+
 void PosterGrid::next()
 {
     if (loading || exhausted()) return;
@@ -116,8 +167,7 @@ void PosterGrid::add(const content::Item& it)
 {
     if (!row || (int)row->getChildren().size() >= columns)
     {
-        row = new brls::Box();
-        row->setAxis(brls::Axis::ROW);
+        row = new ui::NearestRow();
         row->setPaddingLeft(kInset);
         row->setMarginBottom(kGap);
         addView(row);
@@ -166,6 +216,46 @@ void openCollection(const std::string& title, const tmdb::ListQuery& q)
     auto* frame = new ui::FieldFrame(root);
     frame->setTitle("");
     // The heading is the collection's name: no empty title bar above it.
+    frame->setHeaderVisibility(brls::Visibility::GONE);
+    brls::Application::pushActivity(new brls::Activity(frame));
+}
+
+void openPersonCredits(const std::string& name, const std::string& role, int personId, bool isDirector)
+{
+    auto* root = new brls::Box();
+    root->setAxis(brls::Axis::COLUMN);
+    root->setGrow(1.0f);
+
+    auto* headerBox = new brls::Box();
+    headerBox->setAxis(brls::Axis::ROW);
+    headerBox->setAlignItems(brls::AlignItems::BASELINE);
+    headerBox->setMargins(34.0f, 0.0f, 6.0f, kInset);
+
+    auto* head = new brls::Label();
+    head->setText(name);
+    head->setFontSize(28.0f);
+    headerBox->addView(head);
+
+    if (!role.empty())
+    {
+        auto* sub = new brls::Label();
+        sub->setText("  \xC2\xB7  " + role);
+        sub->setFontSize(18.0f);
+        sub->setTextColor(theme::textMuted());
+        headerBox->addView(sub);
+    }
+    root->addView(headerBox);
+
+    auto* scroll = new brls::ScrollingFrame();
+    scroll->setGrow(1.0f);
+    scroll->setScrollingBehavior(brls::ScrollingBehavior::CENTERED);
+    auto* grid = new PosterGrid();
+    scroll->setContentView(grid);
+    root->addView(scroll);
+    grid->loadPersonCredits(personId, isDirector, scroll);
+
+    auto* frame = new ui::FieldFrame(root);
+    frame->setTitle("");
     frame->setHeaderVisibility(brls::Visibility::GONE);
     brls::Application::pushActivity(new brls::Activity(frame));
 }

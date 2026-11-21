@@ -122,36 +122,46 @@ void Box::draw(NVGcontext* vg, float x, float y, float width, float height, Styl
 {
     for (View* child : this->children)
     {
+        // LOCAL PATCH: allow culling of Box children (e.g. offscreen grid rows/cards)
         // Ensure that the child is in bounds of all parents before drawing it
-        // Only do that check for leaf views, as nested boxes will do that check themselves
-        if (!dynamic_cast<Box*>(child) && child->isCulled())
+        if (child->isCulled())
         {
-            float childTop    = child->getY();
-            float childLeft   = child->getX();
-            float childRight  = childLeft + child->getWidth();
-            float childBottom = childTop + child->getHeight();
-
-            bool draw = true;
-
-            for (Box* bounds = this; bounds != nullptr; bounds = bounds->getParent())
+            View* curFocus = Application::getCurrentFocus();
+            bool hasFocus = false;
+            for (View* v = curFocus; v; v = v->getParent())
             {
-                float top, right, bottom, left;
-                bounds->getCullingBounds(&top, &right, &bottom, &left);
-
-                if (
-                    childBottom < top || // too high
-                    childRight < left || // too far left
-                    childLeft > right || // too far right
-                    childTop > bottom // too low
-                )
-                {
-                    draw = false;
-                    break;
-                }
+                if (v == child) { hasFocus = true; break; }
             }
 
-            if (!draw)
-                continue;
+            if (!hasFocus && child->getWidth() > 0.0f && child->getHeight() > 0.0f)
+            {
+                float childTop    = child->getY();
+                float childLeft   = child->getX();
+                float childRight  = childLeft + child->getWidth();
+                float childBottom = childTop + child->getHeight();
+
+                bool draw = true;
+
+                for (Box* bounds = this; bounds != nullptr; bounds = bounds->getParent())
+                {
+                    float top, right, bottom, left;
+                    bounds->getCullingBounds(&top, &right, &bottom, &left);
+
+                    if (
+                        childBottom < top || // too high
+                        childRight < left || // too far left
+                        childLeft > right || // too far right
+                        childTop > bottom // too low
+                    )
+                    {
+                        draw = false;
+                        break;
+                    }
+                }
+
+                if (!draw)
+                    continue;
+            }
         }
 
         child->frame(ctx);

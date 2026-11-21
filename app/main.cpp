@@ -1366,7 +1366,7 @@ void setStremioViewKeys(brls::AppletFrame* frame, bool on)
     if (on == registered) return;
     if (on)
     {
-        lb = frame->registerAction(std::string("  ") + tr("View"), brls::BUTTON_LB,
+        lb = frame->registerAction(std::string("\xEE\x83\xA5  ") + tr("View"), brls::BUTTON_LB,
                                    [](brls::View*) {
                                        stremio::cycleActiveView(-1);
                                        return true;
@@ -1378,6 +1378,48 @@ void setStremioViewKeys(brls::AppletFrame* frame, bool on)
                                        return true;
                                    },
                                    true, false, brls::SOUND_NONE);
+    }
+    else
+    {
+        frame->unregisterAction(lb);
+        frame->unregisterAction(rb);
+        lb = rb = -1;
+    }
+}
+
+// Live menu tab cycler, wired to the top tab bar.
+static std::function<void(int)> g_menuTabCycler;
+
+void setMenuTabCycler(std::function<void(int)> cycler)
+{
+    g_menuTabCycler = std::move(cycler);
+}
+
+// L / R cycle the catalog / menu tabs (Home, Movies, Shows, Anime, Bookmarks, History).
+// Registered while on any non-Stremio tab so L/R seamlessly switch sections from
+// both the header and content. One combined chip "L R  Section".
+void setMenuTabKeys(brls::AppletFrame* frame, bool on)
+{
+    static brls::AppletFrame* owner = nullptr;
+    static brls::ActionIdentifier lb = -1, rb = -1;
+    if (owner && owner != frame) lb = rb = -1;  // a new frame: nothing on it yet
+    owner = frame;
+    bool registered = lb >= 0;
+    if (on == registered) return;
+    if (on)
+    {
+        lb = frame->registerAction(std::string("\xEE\x83\xA5  ") + tr("Section"), brls::BUTTON_LB,
+                                   [](brls::View*) {
+                                       if (g_menuTabCycler) g_menuTabCycler(-1);
+                                       return true;
+                                   },
+                                   false, false, brls::SOUND_CLICK);
+        rb = frame->registerAction(tr("Section"), brls::BUTTON_RB,
+                                   [](brls::View*) {
+                                       if (g_menuTabCycler) g_menuTabCycler(+1);
+                                       return true;
+                                   },
+                                   true, false, brls::SOUND_CLICK);
     }
     else
     {
@@ -1474,8 +1516,9 @@ void attachTopTabBar(brls::AppletFrame* frame, brls::Box* content)
                    isSource](config::Tab tab) {
         *curTab = tab;
         restyleTabs();
-        // L and R cycle the Stremio views: their footer chip exists only there.
+        // L and R cycle the Stremio views or the top menu tabs depending on active tab.
         setStremioViewKeys(frame, tab == config::Tab::STREMIO);
+        setMenuTabKeys(frame, tab != config::Tab::STREMIO);
         content->clearViews();  // deletes the previous tab
         brls::View* v = buildTab(tab);
         v->setGrow(1.0f);
@@ -1498,6 +1541,29 @@ void attachTopTabBar(brls::AppletFrame* frame, brls::Box* content)
             },
             false, false, brls::SOUND_BACK);
     };
+
+    auto cycleMenuTabs = [select, tabButtons, curTab](int dir) {
+        int curIdx = -1;
+        for (size_t i = 0; i < tabButtons.size(); i++)
+        {
+            if (tabButtons[i].tab == *curTab)
+            {
+                curIdx = (int)i;
+                break;
+            }
+        }
+        int n = (int)tabButtons.size();
+        int nextIdx = 0;
+        if (curIdx >= 0)
+            nextIdx = ((curIdx + dir) % n + n) % n;
+        else
+            nextIdx = dir > 0 ? 0 : n - 1;
+
+        config::Tab nextTab = tabButtons[nextIdx].tab;
+        select(nextTab);
+        brls::Application::giveFocus(tabButtons[nextIdx].btn);
+    };
+    setMenuTabCycler(cycleMenuTabs);
 
     const char* tabNames[] = { "Home", "Movies", "Shows", "Anime", "Bookmarks", "History" };
     for (size_t i = 0; i < tabButtons.size(); i++)
@@ -1861,7 +1927,7 @@ brls::View* buildBrowser()
     // No X shortcut for Options: the header carries a gear now, and a chip in
     // the footer for something already on screen is noise.
 
-    // The Stremio L/R "View" keys come and go with the tab: setStremioViewKeys,
+    // The L/R keys come and go with the tab: setStremioViewKeys and setMenuTabKeys,
     // called by select() (already for the startup tab, in attachTopTabBar).
 
     return frame;

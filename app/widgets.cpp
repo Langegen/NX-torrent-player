@@ -9,6 +9,7 @@
 #include <stb_image.h>
 
 #include <cmath>
+#include <deque>
 
 namespace ui
 {
@@ -98,6 +99,84 @@ int cachedTexture(const std::string& path)
     if (tex > 0) cache.removeCache(tex);
     return tex;
 }
+
+struct PendingTexture
+{
+    brls::Image* img;
+    std::string path;
+    std::shared_ptr<bool> alive;
+    unsigned char* rgba;
+    int w, h;
+};
+
+static std::deque<PendingTexture> s_pendingUploads;
+static bool s_uploadPumpScheduled = false;
+static bool s_exitSubscribed = false;
+
+static void pumpUploads();
+
+static void ensureExitSubscribed()
+{
+    if (s_exitSubscribed) return;
+    s_exitSubscribed = true;
+    brls::Application::getExitEvent()->subscribe([]() {
+        for (auto& item : s_pendingUploads)
+        {
+            if (item.rgba) stbi_image_free(item.rgba);
+        }
+        s_pendingUploads.clear();
+        s_uploadPumpScheduled = false;
+    });
+}
+
+static void pumpUploads()
+{
+    s_uploadPumpScheduled = false;
+    constexpr int kMaxUploadsPerTick = 4;
+    int processed = 0;
+
+    while (!s_pendingUploads.empty() && processed < kMaxUploadsPerTick)
+    {
+        PendingTexture item = std::move(s_pendingUploads.front());
+        s_pendingUploads.pop_front();
+        processed++;
+
+        if (!item.rgba) continue;
+
+        if (!*item.alive)
+        {
+            stbi_image_free(item.rgba);
+            continue;
+        }
+
+        if (cachedTexture(item.path) > 0)
+        {
+            stbi_image_free(item.rgba);
+            item.img->setImageFromFile(item.path);
+            continue;
+        }
+
+        if (item.img->getTexture() > 0 && !item.img->getFreeTexture())
+            brls::TextureCache::instance().removeCache(item.img->getTexture());
+        item.img->setFreeTexture(false);
+
+        int tex = nvgCreateImageRGBA(brls::Application::getNVGContext(), item.w, item.h, 0,
+                                     item.rgba);
+        stbi_image_free(item.rgba);
+
+        if (tex > 0)
+        {
+            item.img->innerSetImage(tex);
+            brls::TextureCache::instance().addCache(item.path, tex);
+        }
+    }
+
+    if (!s_pendingUploads.empty())
+    {
+        s_uploadPumpScheduled = true;
+        brls::delay(1, pumpUploads);
+    }
+}
 } // namespace
 
 void loadImageAsync(brls::Image* img, const std::string& path, std::shared_ptr<bool> alive)
@@ -112,31 +191,50 @@ void loadImageAsync(brls::Image* img, const std::string& path, std::shared_ptr<b
         [img, path, alive]() {
             int w = 0, h = 0, n = 0;
             unsigned char* rgba = stbi_load(path.c_str(), &w, &h, &n, 4);
+            if (rgba && (w > 512 || h > 768))
+            {
+                int scale = 1;
+                while ((w / (scale * 2) >= 300) && (h / (scale * 2) >= 450))
+                    scale *= 2;
+                if (scale > 1)
+                {
+                    int nw = w / scale;
+                    int nh = h / scale;
+                    unsigned char* downsampled = (unsigned char*)malloc(nw * nh * 4);
+                    if (downsampled)
+                    {
+                        for (int dy = 0; dy < nh; dy++)
+                        {
+                            const unsigned char* srcRow = rgba + (dy * scale) * (w * 4);
+                            unsigned char* dstRow = downsampled + dy * (nw * 4);
+                            for (int dx = 0; dx < nw; dx++)
+                            {
+                                const unsigned char* sp = srcRow + (dx * scale) * 4;
+                                unsigned char* dp = dstRow + dx * 4;
+                                dp[0] = sp[0]; dp[1] = sp[1]; dp[2] = sp[2]; dp[3] = sp[3];
+                            }
+                        }
+                        stbi_image_free(rgba);
+                        rgba = downsampled;
+                        w = nw;
+                        h = nh;
+                    }
+                }
+            }
+
             brls::sync([img, path, alive, rgba, w, h]() {
                 if (!*alive || !rgba)
                 {
                     if (rgba) stbi_image_free(rgba);
                     return;
                 }
-                // Another card may have loaded the same file meanwhile.
-                if (cachedTexture(path) > 0)
+                ensureExitSubscribed();
+                s_pendingUploads.push_back({ img, path, alive, rgba, w, h });
+                if (!s_uploadPumpScheduled)
                 {
-                    stbi_image_free(rgba);
-                    img->setImageFromFile(path);
-                    return;
+                    s_uploadPumpScheduled = true;
+                    pumpUploads();
                 }
-                // What Image::setImageFromFile does, minus the decoding: the
-                // previous cached texture loses this reference, and the new
-                // one is TextureCache's to free.
-                if (img->getTexture() > 0 && !img->getFreeTexture())
-                    brls::TextureCache::instance().removeCache(img->getTexture());
-                img->setFreeTexture(false);
-                int tex = nvgCreateImageRGBA(brls::Application::getNVGContext(), w, h, 0,
-                                             rgba);
-                stbi_image_free(rgba);
-                if (tex <= 0) return;
-                img->innerSetImage(tex);
-                brls::TextureCache::instance().addCache(path, tex);
             });
         },
         workers::Priority::Low);
@@ -205,6 +303,39 @@ brls::View* NearestStrip::getDefaultFocus()
     return best ? best : brls::HScrollingFrame::getDefaultFocus();
 }
 
+NearestRow::NearestRow()
+{
+    setAxis(brls::Axis::ROW);
+}
+
+brls::View* NearestRow::getDefaultFocus()
+{
+    brls::View* cur = brls::Application::getCurrentFocus();
+    const auto& kids = getChildren();
+    if (!cur || kids.empty()) return brls::Box::getDefaultFocus();
+
+    // Inside already: normal borealis behavior.
+    for (brls::View* v = cur; v; v = v->getParent())
+        if (v == this) return brls::Box::getDefaultFocus();
+
+    const float cx   = cur->getFrame().getMidX();
+    brls::View* best = nullptr;
+    float bestD      = 0.0f;
+    for (brls::View* c : kids)
+    {
+        if (c->getVisibility() != brls::Visibility::VISIBLE) continue;
+        brls::View* f = c->getDefaultFocus();
+        if (!f) continue;
+        float d = std::fabs(c->getFrame().getMidX() - cx);
+        if (!best || d < bestD)
+        {
+            best  = f;
+            bestD = d;
+        }
+    }
+    return best ? best : brls::Box::getDefaultFocus();
+}
+
 brls::View* strip(brls::Box* row, float height, bool fade)
 {
     row->setAxis(brls::Axis::ROW);
@@ -257,6 +388,65 @@ brls::Box* posterCard(const std::string& title, const std::string& artId,
         b->addView(t);
         card->addView(b);
     }
+    return card;
+}
+
+brls::Box* personCard(const std::string& name, const std::string& role,
+                      const std::string& artId, const std::string& artUrl,
+                      std::shared_ptr<bool> alive,
+                      std::function<void()> onClick, float w)
+{
+    const float imgH = w * 1.35f;
+    const float h = imgH + 52.0f;
+
+    auto* card = new brls::Box();
+    card->setAxis(brls::Axis::COLUMN);
+    card->setWidth(w);
+    card->setHeight(h);
+    card->setCornerRadius(kRadius);
+    card->setBackgroundColor(theme::scrim(25));
+    card->setMargins(0.0f, 14.0f, 0.0f, 0.0f);
+    card->setClipsToBounds(true);
+    makeFocusable(card, std::move(onClick));
+
+    auto* imgBox = new brls::Box();
+    imgBox->setWidth(w);
+    imgBox->setHeight(imgH);
+    imgBox->setCornerRadius(kRadius);
+    imgBox->setClipsToBounds(true);
+    imgBox->setBackgroundColor(theme::scrim(40));
+
+    auto* img = new brls::Image();
+    img->setDimensions(w, imgH);
+    img->setScalingType(brls::ImageScalingType::FILL);
+    img->setClipsToBounds(true);
+    if (!artUrl.empty())
+        attachArt(img, artId, artUrl, alive);
+    imgBox->addView(img);
+    card->addView(imgBox);
+
+    auto* text = new brls::Box();
+    text->setAxis(brls::Axis::COLUMN);
+    text->setPadding(4.0f, 6.0f, 4.0f, 6.0f);
+
+    auto* nameLbl = new brls::Label();
+    nameLbl->setText(name);
+    nameLbl->setFontSize(13.0f);
+    nameLbl->setTextColor(nvgRGBA(255, 255, 255, 245));
+    nameLbl->setSingleLine(true);
+    text->addView(nameLbl);
+
+    if (!role.empty())
+    {
+        auto* roleLbl = new brls::Label();
+        roleLbl->setText(role);
+        roleLbl->setFontSize(11.0f);
+        roleLbl->setTextColor(nvgRGBA(255, 255, 255, 150));
+        roleLbl->setSingleLine(true);
+        text->addView(roleLbl);
+    }
+    card->addView(text);
+
     return card;
 }
 
