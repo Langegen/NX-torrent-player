@@ -74,6 +74,16 @@ class Storage {
     localStorage.setItem(STORAGE_KEYS.HISTORY, JSON.stringify(hist));
   }
 
+  get libraryEntries() {
+    const lib = this.loadLibrary();
+    return Array.isArray(lib) ? lib : (Array.isArray(lib.entries) ? lib.entries : []);
+  }
+
+  get historyList() {
+    const hist = this.loadHistory();
+    return Array.isArray(hist) ? hist : (Array.isArray(hist.history) ? hist.history : []);
+  }
+
   recordHistory(item) {
     const hist = this.loadHistory();
     const now = Math.floor(Date.now() / 1000);

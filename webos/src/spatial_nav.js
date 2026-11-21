@@ -1,16 +1,21 @@
 /**
- * Spatial Navigation engine for webOS TV and D-pad remotes.
+ * Spatial Navigation engine for webOS TV and D-pad remotes with Nintendo Switch button mapping.
  */
 class SpatialNavigator {
   constructor() {
     this.currentFocus = null;
     this.backHandlers = [];
+    this.actionHandlers = {}; // { 'tabLeft', 'tabRight', 'search', 'bookmark', 'options' }
     this.enabled = true;
     this.init();
   }
 
   init() {
     window.addEventListener('keydown', (e) => this.handleKeyDown(e));
+  }
+
+  onAction(action, handler) {
+    this.actionHandlers[action] = handler;
   }
 
   pushBackHandler(handler) {
@@ -25,6 +30,16 @@ class SpatialNavigator {
     if (!this.enabled) return;
 
     const code = e.keyCode || e.which;
+
+    // Do not interfere with text inputs (e.g. search box, settings)
+    if (e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA')) {
+      if (code === 27 || code === 461) { // Esc or Back from input
+        e.target.blur();
+        e.preventDefault();
+        return;
+      }
+      return;
+    }
 
     switch (code) {
       case 37: // ArrowLeft
@@ -43,81 +58,112 @@ class SpatialNavigator {
         e.preventDefault();
         this.move('down');
         break;
-      case 13: // Enter / OK
+      case 13: // Enter / OK (Switch A button)
         e.preventDefault();
         if (this.currentFocus) {
           this.currentFocus.click();
         }
         break;
       case 461: // webOS Back
-      case 27:  // Esc
-      case 8:   // Backspace (outside input)
-        if (e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA')) {
-          return;
-        }
+      case 27:  // Esc / Switch B button
+      case 8:   // Backspace
         e.preventDefault();
         if (this.backHandlers.length > 0) {
           const handler = this.backHandlers[this.backHandlers.length - 1];
           if (handler()) {
-            this.backHandlers.pop();
+            return;
           }
         }
+        // Fallback: return focus to active header tab
+        const activeTab = document.querySelector('.nav-tab.active');
+        if (activeTab && this.currentFocus !== activeTab) {
+          this.setFocus(activeTab);
+        }
         break;
-      case 415: // MediaPlay
-      case 19:  // MediaPause
-      case 179: // MediaPlayPause
-        window.dispatchEvent(new CustomEvent('tv:playpause'));
+
+      // Switch L button (Tab Left): [ (219), Q (81), Red button (403), Channel Down (34)
+      case 219:
+      case 81:
+      case 403:
+      case 34:
+        e.preventDefault();
+        if (this.actionHandlers['tabLeft']) this.actionHandlers['tabLeft']();
         break;
-      case 417: // FastForward
-        window.dispatchEvent(new CustomEvent('tv:fastforward'));
+
+      // Switch R button (Tab Right): ] (221), E (69), Green button (404), Channel Up (33)
+      case 221:
+      case 69:
+      case 404:
+      case 33:
+        e.preventDefault();
+        if (this.actionHandlers['tabRight']) this.actionHandlers['tabRight']();
         break;
-      case 412: // Rewind
-        window.dispatchEvent(new CustomEvent('tv:rewind'));
+
+      // Switch X button (Search): X (88), Blue button (406)
+      case 88:
+      case 406:
+        e.preventDefault();
+        if (this.actionHandlers['search']) this.actionHandlers['search']();
+        break;
+
+      // Switch Y button (Bookmark): Y (89), Yellow button (405)
+      case 89:
+      case 405:
+        e.preventDefault();
+        if (this.actionHandlers['bookmark']) this.actionHandlers['bookmark']();
+        break;
+
+      // Switch (+) button (Options): + (187, 61), O (79), Menu / Info
+      case 187:
+      case 61:
+      case 79:
+        e.preventDefault();
+        if (this.actionHandlers['options']) this.actionHandlers['options']();
+        break;
+
+      default:
         break;
     }
   }
 
-  getFocusableElements(container = document) {
-    const list = Array.from(container.querySelectorAll('.focusable, button:not([disabled]), [tabindex="0"]'));
-    return list.filter(el => {
-      if (el.disabled || el.getAttribute('aria-hidden') === 'true') return false;
-      const rect = el.getBoundingClientRect();
-      return rect.width > 0 && rect.height > 0 && window.getComputedStyle(el).display !== 'none' && window.getComputedStyle(el).visibility !== 'hidden';
+  setFocus(elem) {
+    if (!elem) return;
+    if (this.currentFocus && this.currentFocus !== elem) {
+      this.currentFocus.classList.remove('focus');
+    }
+    this.currentFocus = elem;
+    elem.classList.add('focus');
+    try {
+      elem.focus({ preventScroll: true });
+    } catch (_) {}
+
+    // Smoothly scroll container into view
+    elem.scrollIntoView({
+      behavior: 'smooth',
+      block: 'nearest',
+      inline: 'center'
     });
   }
 
-  setFocus(el, smoothScroll = true) {
-    if (!el) return;
-    if (this.currentFocus && this.currentFocus !== el) {
-      this.currentFocus.classList.remove('focused');
-      this.currentFocus.blur();
-    }
-    this.currentFocus = el;
-    this.currentFocus.classList.add('focused');
-    this.currentFocus.focus();
-
-    if (smoothScroll) {
-      el.scrollIntoView({
-        behavior: 'smooth',
-        block: 'nearest',
-        inline: 'center'
-      });
-    }
-  }
-
   move(direction) {
-    const focusables = this.getFocusableElements();
+    const focusables = Array.from(document.querySelectorAll('.focusable:not([disabled])'))
+      .filter(el => {
+        const style = window.getComputedStyle(el);
+        const rect = el.getBoundingClientRect();
+        return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+      });
+
     if (focusables.length === 0) return;
 
-    if (!this.currentFocus || !document.body.contains(this.currentFocus)) {
+    if (!this.currentFocus || !focusables.includes(this.currentFocus)) {
       this.setFocus(focusables[0]);
       return;
     }
 
-    const curRect = this.currentFocus.getBoundingClientRect();
-    const curCenter = {
-      x: curRect.left + curRect.width / 2,
-      y: curRect.top + curRect.height / 2
+    const currentRect = this.currentFocus.getBoundingClientRect();
+    const currentCenter = {
+      x: currentRect.left + currentRect.width / 2,
+      y: currentRect.top + currentRect.height / 2
     };
 
     let bestCandidate = null;
@@ -125,40 +171,35 @@ class SpatialNavigator {
 
     for (const el of focusables) {
       if (el === this.currentFocus) continue;
+
       const rect = el.getBoundingClientRect();
       const center = {
         x: rect.left + rect.width / 2,
         y: rect.top + rect.height / 2
       };
 
-      const dx = center.x - curCenter.x;
-      const dy = center.y - curCenter.y;
+      const dx = center.x - currentCenter.x;
+      const dy = center.y - currentCenter.y;
 
-      let validDirection = false;
-      if (direction === 'left' && dx < -10) validDirection = true;
-      else if (direction === 'right' && dx > 10) validDirection = true;
-      else if (direction === 'up' && dy < -10) validDirection = true;
-      else if (direction === 'down' && dy > 10) validDirection = true;
+      // Check geometric cone
+      let isValidDirection = false;
+      if (direction === 'left' && dx < -5) isValidDirection = true;
+      else if (direction === 'right' && dx > 5) isValidDirection = true;
+      else if (direction === 'up' && dy < -5) isValidDirection = true;
+      else if (direction === 'down' && dy > 5) isValidDirection = true;
 
-      if (!validDirection) continue;
+      if (!isValidDirection) continue;
 
-      // Distance calculation with directional alignment weight
-      let mainAxis = 0;
-      let crossAxis = 0;
-
+      // Priority along primary axis
+      let dist = 0;
       if (direction === 'left' || direction === 'right') {
-        mainAxis = Math.abs(dx);
-        crossAxis = Math.abs(dy);
+        dist = Math.abs(dx) + Math.abs(dy) * 2.5;
       } else {
-        mainAxis = Math.abs(dy);
-        crossAxis = Math.abs(dx);
+        dist = Math.abs(dy) + Math.abs(dx) * 2.5;
       }
 
-      // Orthogonal penalty so straight-line items win over diagonal ones
-      const distance = mainAxis + crossAxis * 2.5;
-
-      if (distance < minDistance) {
-        minDistance = distance;
+      if (dist < minDistance) {
+        minDistance = dist;
         bestCandidate = el;
       }
     }
