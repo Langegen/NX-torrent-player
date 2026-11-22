@@ -6,13 +6,7 @@
 #define APPDATA_DIR      "sdmc:/switch/NX-torrent-player"
 #define APP_RES(p)       "romfs:/" p
 #elif defined(__ANDROID__) || defined(ANDROID)
-#include <SDL2/SDL.h>
-inline const char* androidAppDataDir()
-{
-    const char* path = SDL_AndroidGetInternalStoragePath();
-    return path ? path : "/data/data/com.nxtorrent.player/files";
-}
-#define APPDATA_DIR      androidAppDataDir()
+#define APPDATA_DIR      "/data/data/com.nxtorrent.player/files"
 #define APP_RES(p)       p
 #else
 #define APPDATA_DIR      "./appdata"

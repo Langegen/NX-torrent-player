@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <functional>
 #include <string>
+#include <vector>
 
 // The app's HTTP calls. Blocking: every caller here already runs them off the
 // UI thread (workers::run, brls::async) and syncs the result back.

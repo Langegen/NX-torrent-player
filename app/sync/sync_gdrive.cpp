@@ -5,7 +5,7 @@
 #include "../http.hpp"
 #include "../json.hpp"
 
-namespace sync
+namespace cloud_sync
 {
 
 // Default fallback client ID for open source community testing / device flow.
@@ -371,4 +371,4 @@ bool GdriveProvider::push(const std::string& libraryJson, const std::string& his
     return true;
 }
 
-} // namespace sync
+} // namespace cloud_sync

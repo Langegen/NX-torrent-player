@@ -3,7 +3,7 @@
 #include "../config.hpp"
 #include "../http.hpp"
 
-namespace sync
+namespace cloud_sync
 {
 
 std::string WebdavProvider::normalizeUrl(std::string url)
@@ -211,4 +211,4 @@ bool WebdavProvider::push(const std::string& libraryJson, const std::string& his
     return true;
 }
 
-} // namespace sync
+} // namespace cloud_sync

@@ -156,9 +156,9 @@ static void test_webdav_url_normalize()
 {
     std::printf("[3/5] WebDAV URL normalization...\n");
 
-    CHECK(sync::WebdavProvider::normalizeUrl("webdav.yandex.ru") == "https://webdav.yandex.ru");
-    CHECK(sync::WebdavProvider::normalizeUrl("http://nas.local:8080/") == "http://nas.local:8080");
-    CHECK(sync::WebdavProvider::normalizeUrl("  https://webdav.cloud.mail.ru/  ") == "https://webdav.cloud.mail.ru");
+    CHECK(cloud_sync::WebdavProvider::normalizeUrl("webdav.yandex.ru") == "https://webdav.yandex.ru");
+    CHECK(cloud_sync::WebdavProvider::normalizeUrl("http://nas.local:8080/") == "http://nas.local:8080");
+    CHECK(cloud_sync::WebdavProvider::normalizeUrl("  https://webdav.cloud.mail.ru/  ") == "https://webdav.cloud.mail.ru");
 
     std::printf("      PASSED\n");
 }
@@ -221,7 +221,7 @@ static void test_webdav_mock_cycle()
     config::get().syncWebdavUser = "tester";
     config::get().syncWebdavPass = "pass123";
 
-    sync::WebdavProvider prov;
+    cloud_sync::WebdavProvider prov;
     CHECK(prov.isConfigured() == true);
 
     std::string err;

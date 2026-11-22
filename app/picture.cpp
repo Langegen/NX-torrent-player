@@ -2,10 +2,20 @@
 
 #include <borealis.hpp>
 
+#ifdef __SWITCH__
 #include <switch.h>  // appletGetOperationMode
+#endif
 
+#ifdef __SDL2__
+#include <SDL.h>
+#ifdef USE_GLES2
+#include <GLES2/gl2.h>
+#include <GLES2/gl2ext.h>
+#endif
+#else
 #include <glad/glad.h>
 #include <GLFW/glfw3.h>
+#endif
 
 #ifdef ABSOLUTE
 #undef ABSOLUTE
@@ -92,9 +102,11 @@ bool step(int prop, int dir)
 
 bool handheld()
 {
-    // A cached read of what the applet message loop last heard, not an IPC
-    // call (see audioBoostWanted in player.cpp): fine per frame.
+#ifdef __SWITCH__
     return appletGetOperationMode() == AppletOperationMode_Handheld;
+#else
+    return false;
+#endif
 }
 
 namespace
@@ -216,8 +228,12 @@ namespace
 
 void* getProcAddress(void*, const char* name)
 {
+#ifdef __SDL2__
+    return SDL_GL_GetProcAddress(name);
+#else
     glfwGetCurrentContext();
     return (void*)glfwGetProcAddress(name);
+#endif
 }
 
 // The test patterns (assets/patterns, made by tools/make_patterns.py). Each is

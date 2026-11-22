@@ -5,10 +5,20 @@
 #include <cstring>
 
 
+#ifdef __SWITCH__
 #include <switch.h>  // appletSetMediaPlaybackState (keep the screen awake)
+#endif
 
+#ifdef __SDL2__
+#include <SDL.h>
+#ifdef USE_GLES2
+#include <GLES2/gl2.h>
+#include <GLES2/gl2ext.h>
+#endif
+#else
 #include <glad/glad.h>
 #include <GLFW/glfw3.h>
+#endif
 
 #ifdef ABSOLUTE
 #undef ABSOLUTE
@@ -83,8 +93,12 @@ namespace
 {
 void* getProcAddress(void*, const char* name)
 {
+#ifdef __SDL2__
+    return SDL_GL_GetProcAddress(name);
+#else
     glfwGetCurrentContext();
     return (void*)glfwGetProcAddress(name);
+#endif
 }
 
 // Seconds of video mpv must buffer before playback starts (and the loading
@@ -148,8 +162,12 @@ std::string speedLabel(size_t i)
 // is safe on a per-frame path -- unlike the nifm call that used to freeze it.
 bool audioBoostWanted()
 {
+#ifdef __SWITCH__
     return config::get().audioBoost
            && appletGetOperationMode() == AppletOperationMode_Handheld;
+#else
+    return config::get().audioBoost;
+#endif
 }
 
 // Analog scrubbing. Rate is (tilt^2) * base, so a light push creeps and a full
@@ -216,11 +234,13 @@ class PlayPauseButton : public brls::Box
 // and a plain true/false pair turned the flag off under the new episode.
 void keepAwake(int delta)
 {
+#ifdef __SWITCH__
     static int players = 0;  // UI thread only
     int before = players;
     players += delta;
     if (players < 0) players = 0;
     if ((before > 0) != (players > 0)) appletSetMediaPlaybackState(players > 0);
+#endif
 }
 
 // Pops `n` activities back-to-back, then runs `then`. A free function, not a
@@ -2922,7 +2942,7 @@ MpvView::~MpvView()
     // and the push itself runs on a background thread with no reference to us.
     maybePushWatchState(true);
     maybeUpdateHistory(true);
-    sync::triggerAutoSync();
+    cloud_sync::triggerAutoSync();
     if (pictureDirty) config::save();  // the panel closes with the player
 
     // Tell any in-flight startEngine() that we are gone, so it closes the engine
@@ -2988,12 +3008,14 @@ void MpvView::pumpEvents()
     // Pause when the console takes focus away (HOME menu / overlay), so the video
     // does not keep playing -- and its audio blaring -- in the background. Left
     // paused; the user resumes with A or a tap when they come back.
+#ifdef __SWITCH__
     if (ready && !userPaused && appletGetFocusState() != AppletFocusState_InFocus)
     {
         userPaused = true;
         mpv_set_property_string(mpv, "pause", "yes");
         setControlsVisible(true);
     }
+#endif
 
     // The boost follows the dock state, which can change mid-film -- putting the
     // console on the dock has to drop it, and taking it off has to bring it

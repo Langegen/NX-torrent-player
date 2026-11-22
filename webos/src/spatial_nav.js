@@ -1,3 +1,5 @@
+import { sound } from './sound.js';
+
 /**
  * Spatial Navigation engine for webOS TV and D-pad remotes with Nintendo Switch button mapping.
  */
@@ -60,6 +62,7 @@ class SpatialNavigator {
         break;
       case 13: // Enter / OK (Switch A button)
         e.preventDefault();
+        sound.playConfirm();
         if (this.currentFocus) {
           this.currentFocus.click();
         }
@@ -68,6 +71,7 @@ class SpatialNavigator {
       case 27:  // Esc / Switch B button
       case 8:   // Backspace
         e.preventDefault();
+        sound.playBack();
         if (this.backHandlers.length > 0) {
           const handler = this.backHandlers[this.backHandlers.length - 1];
           if (handler()) {
@@ -87,6 +91,7 @@ class SpatialNavigator {
       case 403:
       case 34:
         e.preventDefault();
+        sound.playTab();
         if (this.actionHandlers['tabLeft']) this.actionHandlers['tabLeft']();
         break;
 
@@ -96,6 +101,7 @@ class SpatialNavigator {
       case 404:
       case 33:
         e.preventDefault();
+        sound.playTab();
         if (this.actionHandlers['tabRight']) this.actionHandlers['tabRight']();
         break;
 
@@ -126,9 +132,10 @@ class SpatialNavigator {
     }
   }
 
-  setFocus(elem) {
+  setFocus(elem, playAudio = true) {
     if (!elem) return;
-    if (this.currentFocus && this.currentFocus !== elem) {
+    const changed = this.currentFocus !== elem;
+    if (this.currentFocus && changed) {
       this.currentFocus.classList.remove('focus');
     }
     this.currentFocus = elem;
@@ -136,6 +143,10 @@ class SpatialNavigator {
     try {
       elem.focus({ preventScroll: true });
     } catch (_) {}
+
+    if (changed && playAudio) {
+      sound.playMove();
+    }
 
     // Smoothly scroll container into view
     elem.scrollIntoView({

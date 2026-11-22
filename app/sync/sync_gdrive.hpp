@@ -3,7 +3,7 @@
 #include "sync_provider.hpp"
 #include <string>
 
-namespace sync
+namespace cloud_sync
 {
 
 struct DeviceAuthInfo
@@ -48,4 +48,4 @@ private:
     int64_t m_tokenExpiry = 0;
 };
 
-} // namespace sync
+} // namespace cloud_sync

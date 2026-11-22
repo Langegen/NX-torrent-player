@@ -3,7 +3,7 @@
 #include "sync_provider.hpp"
 #include <string>
 
-namespace sync
+namespace cloud_sync
 {
 
 class WebdavProvider : public SyncProvider
@@ -25,4 +25,4 @@ private:
     bool ensureFolder(const std::string& folderUrl, const std::string& userPwd, std::string& err);
 };
 
-} // namespace sync
+} // namespace cloud_sync

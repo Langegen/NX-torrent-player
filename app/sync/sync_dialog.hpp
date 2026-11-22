@@ -5,7 +5,7 @@
 #include <string>
 #include "qrcodegen.hpp"
 
-namespace sync
+namespace cloud_sync
 {
 
 class QrCodeView : public brls::View
@@ -23,4 +23,4 @@ private:
 
 void showGoogleAuthDialog(std::function<void(bool success)> onComplete);
 
-} // namespace sync
+} // namespace cloud_sync

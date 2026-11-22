@@ -39,9 +39,15 @@
 #undef RELATIVE
 #endif
 
+#ifdef __SDL2__
+#include <SDL.h>
+#else
 #include <GLFW/glfw3.h>
+#endif
 
+#ifdef __SWITCH__
 #include <switch.h>  // Thread/Mutex/CondVar for the async log sink
+#endif
 
 #include "appdata.hpp"
 #include "browse.hpp"
@@ -907,11 +913,20 @@ std::string promptMagnetInput()
         return "";
 #else
     char raw[2048] = { 0 };
+#ifdef __SDL2__
+    char* clip = SDL_GetClipboardText();
+    if (clip)
+    {
+        snprintf(raw, sizeof(raw), "%s", clip);
+        SDL_free(clip);
+    }
+#else
     const char* clip = glfwGetClipboardString(nullptr);
     if (clip)
     {
         snprintf(raw, sizeof(raw), "%s", clip);
     }
+#endif
     if (!raw[0])
     {
         auto* d = new brls::Dialog(
@@ -1970,8 +1985,8 @@ int main(int argc, char* argv[])
     http::applyProxy();
     history::load();
     library::load();
-    sync::init();
-    sync::triggerAutoSync();
+    cloud_sync::init();
+    cloud_sync::triggerAutoSync();
     // Now, while nothing can be playing: a file fetched for the result being
     // played is only referenced once the player records it.
     jackett::pruneCache();
@@ -2128,7 +2143,7 @@ int main(int argc, char* argv[])
     // The new version is picked up on the next launch.
     update::applyPending();
 
-    sync::shutdown();
+    cloud_sync::shutdown();
     // The network pool's threads, joined before main() returns (see
     // workers.hpp): a request still running past it would crash on the Switch.
     workers::stop();

@@ -4,7 +4,9 @@
 
 #include <borealis.hpp>
 
+#ifdef __SWITCH__
 #include <switch.h>
+#endif
 
 #include <cerrno>
 #include <cstdio>
@@ -540,6 +542,7 @@ void promptInstall(const Release& r)
 
 bool restartNow()
 {
+#ifdef __SWITCH__
     if (selfNro.empty() || !envHasNextLoad())
     {
         brls::Logger::warning("[update] loader cannot relaunch us");
@@ -551,10 +554,14 @@ bool restartNow()
     envSetNextLoad(selfNro.c_str(), selfNro.c_str());
     brls::Application::quit();
     return true;
+#else
+    return false;
+#endif
 }
 
 void applyPending()
 {
+#ifdef __SWITCH__
     std::string src = pendingPath();
     if (src.empty() || !hasPending()) return;
 
@@ -587,6 +594,7 @@ void applyPending()
     brls::Logger::error("[update] could not install {}: {}", src,
                         std::strerror(errno));
     if (moved) std::rename(bak.c_str(), selfNro.c_str());  // put it back
+#endif
 }
 
 } // namespace update

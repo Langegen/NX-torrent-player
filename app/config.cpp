@@ -2,7 +2,9 @@
 
 #include <borealis.hpp>
 
+#ifdef __SWITCH__
 #include <switch.h>
+#endif
 
 #include <cctype>
 #include <cstdio>

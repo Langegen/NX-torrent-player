@@ -9,7 +9,7 @@
 #include "../theme.hpp"
 #include "sync_manager.hpp"
 
-namespace sync
+namespace cloud_sync
 {
 
 QrCodeView::QrCodeView(const std::string& text, float displaySize)
@@ -85,7 +85,8 @@ void showGoogleAuthDialog(std::function<void(bool success)> onComplete)
 
     auto* box = new brls::Box();
     box->setAxis(brls::Axis::COLUMN);
-    box->setAlignment(brls::Alignment::CENTER);
+    box->setAlignItems(brls::AlignItems::CENTER);
+    box->setJustifyContent(brls::JustifyContent::CENTER);
     box->setPadding(24.0f, 32.0f, 24.0f, 32.0f);
 
     auto* title = new brls::Label();
@@ -166,4 +167,4 @@ void showGoogleAuthDialog(std::function<void(bool success)> onComplete)
     dialog->open();
 }
 
-} // namespace sync
+} // namespace cloud_sync

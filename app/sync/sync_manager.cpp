@@ -10,7 +10,7 @@
 #include "../history.hpp"
 #include "../library.hpp"
 
-namespace sync
+namespace cloud_sync
 {
 
 namespace
@@ -189,4 +189,4 @@ State state() { return Manager::instance().state(); }
 std::string lastMessage() { return Manager::instance().lastMessage(); }
 SyncProvider* activeProvider() { return Manager::instance().activeProvider(); }
 
-} // namespace sync
+} // namespace cloud_sync

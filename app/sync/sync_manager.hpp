@@ -7,7 +7,7 @@
 #include "sync_webdav.hpp"
 #include "sync_gdrive.hpp"
 
-namespace sync
+namespace cloud_sync
 {
 
 enum class State
@@ -62,4 +62,4 @@ State state();
 std::string lastMessage();
 SyncProvider* activeProvider();
 
-} // namespace sync
+} // namespace cloud_sync

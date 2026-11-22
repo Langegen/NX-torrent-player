@@ -3,22 +3,23 @@
    ========================================================================== */
 
 :root {
-  --bg-ink: #0d0d15;
-  --bg-surface: #141420;
-  --bg-card: #191928;
-  --bg-card-hover: #222235;
+  --bg-ink: #0d0d18;
+  --bg-field: radial-gradient(circle at 85% 15%, #1a173e 0%, #0d0d18 55%, #05050a 100%) fixed;
+  --bg-surface: rgba(22, 22, 36, 0.96);
+  --bg-card: #1c1c2e;
+  --bg-card-hover: #26263e;
   --border: rgba(255, 255, 255, 0.08);
-  --border-focus: rgba(255, 255, 255, 0.2);
+  --border-focus: rgba(45, 253, 157, 0.8);
 
-  /* Borealis Teal Accent (Default) */
-  --accent: #00d4aa;
-  --accent-rgb: 0, 212, 170;
-  --accent-text: #051612;
-  --focus-glow: 0 0 0 3px var(--accent), 0 0 22px rgba(var(--accent-rgb), 0.45);
+  /* Nintendo Switch Horizon Purple Accent (matching main.cpp / theme.cpp) */
+  --accent: #603cf3;
+  --accent-rgb: 96, 60, 243;
+  --accent-text: #ffffff;
+  --focus-glow: 0 0 0 3.5px #2dfd9d, 0 0 20px rgba(45, 253, 157, 0.65), inset 0 0 10px rgba(45, 253, 157, 0.2);
 
   --text-primary: #ffffff;
   --text-secondary: #9a9ab2;
-  --text-muted: #65657c;
+  --text-muted: #6e6e88;
 
   --rating-gold: #f5a623;
   --seed-green: #2ecc71;
@@ -37,7 +38,7 @@ body {
   width: 1920px;
   height: 1080px;
   overflow: hidden;
-  background-color: var(--bg-ink);
+  background: var(--bg-field);
   color: var(--text-primary);
   font-family: 'Space Grotesk', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
   font-size: 16px;

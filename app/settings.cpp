@@ -640,7 +640,7 @@ brls::View* syncPane()
             logoutBtn->setText(tr("Sign out"));
             logoutBtn->setMargins(10.0f, 20.0f, 10.0f, 20.0f);
             logoutBtn->registerClickAction([](brls::View*) {
-                sync::Manager::instance().gdriveProvider()->disconnect();
+                cloud_sync::Manager::instance().gdriveProvider()->disconnect();
                 note(tr("Signed out of Google Drive"));
                 return true;
             });
@@ -652,11 +652,11 @@ brls::View* syncPane()
             loginBtn->setText(tr("Sign in to Google Drive"));
             loginBtn->setMargins(14.0f, 20.0f, 14.0f, 20.0f);
             loginBtn->registerClickAction([](brls::View*) {
-                sync::showGoogleAuthDialog([](bool ok) {
+                cloud_sync::showGoogleAuthDialog([](bool ok) {
                     if (ok)
                     {
                         note(tr("Google Drive connected successfully!"));
-                        sync::syncNow();
+                        cloud_sync::syncNow();
                     }
                 });
                 return true;
@@ -688,7 +688,7 @@ brls::View* syncPane()
         urlCell->registerClickAction([urlCell](brls::View*) {
             brls::Application::getImeManager()->openForText(
                 [urlCell](std::string out) {
-                    out = sync::WebdavProvider::normalizeUrl(out);
+                    out = cloud_sync::WebdavProvider::normalizeUrl(out);
                     config::get().syncWebdavUrl = out;
                     config::save();
                     urlCell->setDetailText(out.empty() ? tr("Not set") : out);
@@ -744,7 +744,7 @@ brls::View* syncPane()
             testBtn->setText(tr("Testing..."));
             std::thread([testBtn, live = testBtn->alive]() {
                 std::string err;
-                bool ok = sync::Manager::instance().webdavProvider()->testConnection(err);
+                bool ok = cloud_sync::Manager::instance().webdavProvider()->testConnection(err);
                 brls::async([testBtn, live, ok, err]() {
                     if (*live)
                     {
@@ -794,7 +794,7 @@ brls::View* syncPane()
         syncBtn->registerClickAction([syncBtn, timeCell](brls::View*) {
             syncBtn->setState(brls::ButtonState::DISABLED);
             syncBtn->setText(tr("Syncing..."));
-            sync::syncNow([syncBtn, timeCell, live = syncBtn->alive](bool ok, const std::string& msg) {
+            cloud_sync::syncNow([syncBtn, timeCell, live = syncBtn->alive](bool ok, const std::string& msg) {
                 if (*live)
                 {
                     syncBtn->setState(brls::ButtonState::ENABLED);

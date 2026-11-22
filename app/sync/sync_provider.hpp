@@ -2,7 +2,7 @@
 
 #include <string>
 
-namespace sync
+namespace cloud_sync
 {
 
 class SyncProvider
@@ -25,4 +25,4 @@ public:
     virtual bool push(const std::string& libraryJson, const std::string& historyJson, std::string& err) = 0;
 };
 
-} // namespace sync
+} // namespace cloud_sync

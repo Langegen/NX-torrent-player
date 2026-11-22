@@ -26,4 +26,7 @@
 /pctest/test_library.exe
 /pctest/test_jackett
 /pctest/test_jackett.exe
+/pctest/test_sync
+/pctest/test_sync.exe
+*.exe
 
