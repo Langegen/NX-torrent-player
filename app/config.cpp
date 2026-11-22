@@ -222,19 +222,25 @@ const BufferPreset kBufferPresets[] = {
     { 256, 90, 180, 30.0, 64 },   // large
     { 512, 180, 300, 45.0, 128 }, // maximum
 };
+const BufferPreset kAppletBufferPreset = { 64, 20, 40, 10.0, 16 };
 } // namespace
+
+bool isAppletMode()
+{
+#ifdef __SWITCH__
+    AppletType at = appletGetAppletType();
+    return at != AppletType_Application && at != AppletType_SystemApplication;
+#else
+    return false;
+#endif
+}
 
 BufferPreset bufferPreset()
 {
+    if (isAppletMode())
+        return kAppletBufferPreset;
     int m = cfg.bufferMode;
     if (m < 0 || m > 2) m = 0;
-#ifdef __SWITCH__
-    // An applet launch (album, or a title held with R) gets a few hundred MB
-    // in all: the maximum preset would not fit next to mpv and the engine.
-    if (m > 1 && appletGetAppletType() != AppletType_Application &&
-        appletGetAppletType() != AppletType_SystemApplication)
-        m = 1;
-#endif
     return kBufferPresets[m];
 }
 

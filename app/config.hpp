@@ -205,6 +205,9 @@ struct BufferPreset
 // The preset for the current setting, already capped to what this launch can
 // afford (an applet launch has far less RAM than a full one).
 BufferPreset bufferPreset();
+// True when running on Switch as an applet (e.g. via Album) with ~440 MB
+// total RAM rather than a full-RAM title takeover.
+bool isAppletMode();
 const std::vector<std::string>& bufferLabels();
 
 // The values of Config::endAction.

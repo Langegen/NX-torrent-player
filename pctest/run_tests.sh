@@ -126,6 +126,8 @@ echo
     --label "resume, back window 24 MB"
 "$out/test_stream" --size 128 --piece 2 --seeds 6000,6000 --resume 0 \
     --label "resume, no back window"
+"$out/test_stream" --size 32 --piece 4 --seeds 0,0,0 --corrupt 1 --strict \
+    --label "corrupt peer, strict verify"
 echo
 "$out/test_httpsrc"
 echo

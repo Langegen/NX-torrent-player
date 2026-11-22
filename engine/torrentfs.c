@@ -182,7 +182,7 @@
 #define TFS_ZONE_BACK    6
 #define BACK_MIN_BACKLOG_MS 12000
 // The back window's ceiling: in RAM mode it is held on top of the RAM window.
-#define BACK_WINDOW_MAX  (384LL << 20)
+#define BACK_WINDOW_MAX  (192LL << 20)
 
 // Startup criticals: mpv probes the container head and tail (MP4 moov, MKV
 // cues) first, so both ends are fetched up front. Budgeted in BYTES: one big
@@ -984,7 +984,10 @@ static void ram_evict(torrentfs *t) {   // caller holds t->cache_lock
         t->ram_piece[v] = NULL;
         t->ram_resident -= t->meta.piece_len;
         mutexLock(&t->lock);
-        if (t->status[v] == PIECE_DONE) { t->status[v] = PIECE_NEEDED; t->pieces_done--; }
+        if (t->status[v] == PIECE_DONE) {
+            __atomic_store_n(&t->status[v], PIECE_NEEDED, __ATOMIC_RELEASE);
+            t->pieces_done--;
+        }
         // Recycle buffer into an empty aq slot or into a small bounded free pool
         bool recycled = false;
         for (int i = 0; i < t->n_aq; i++) {
@@ -1037,8 +1040,12 @@ static void ram_store(torrentfs *t, int64_t idx, uint8_t *buf) {
     // to reset it to NEEDED. Marking it afterwards left a "done" piece with no
     // data that was never fetched again.
     mutexLock(&t->lock);
+    if (t->writing_idx == idx && t->writing_buf == buf) {
+        t->writing_idx = -1;
+        t->writing_buf = NULL;
+    }
     if (t->status[idx] != PIECE_DONE) {
-        t->status[idx] = PIECE_DONE;
+        __atomic_store_n(&t->status[idx], PIECE_DONE, __ATOMIC_RELEASE);
         t->pieces_done++;
     }
     mutexUnlock(&t->lock);
@@ -1625,7 +1632,7 @@ static void writer_main(void *arg) {
             mutexLock(&t->lock);
             if (ok) {
                 if (t->status[j.idx] != PIECE_DONE) {
-                    t->status[j.idx] = PIECE_DONE;
+                    __atomic_store_n(&t->status[j.idx], PIECE_DONE, __ATOMIC_RELEASE);
                     t->pieces_done++;
                 }
                 condvarWakeAll(&t->piece_cv);
@@ -4956,9 +4963,10 @@ void torrentfs_pause_dials(torrentfs *tfs, int seconds) {
 }
 
 static bool have_piece(torrentfs *t, int64_t idx) {
-    // DONE is terminal and only set once the piece is fully on disk, so the
-    // worst a stale read costs is one extra 20 ms wait.
-    return t->status[idx] == PIECE_DONE;
+    // DONE is terminal and only set once the piece is in RAM / on disk;
+    // acquire pairs with the writer's release store so the backing storage
+    // is visible when have_piece() returns true.
+    return __atomic_load_n(&t->status[idx], __ATOMIC_ACQUIRE) == PIECE_DONE;
 }
 
 // True once a read starting at piece idx, block b0 can return data: the piece
@@ -5478,7 +5486,7 @@ const char *torrentfs_name(const torrentfs *tfs) {
 
 int torrentfs_piece_done(const torrentfs *tfs, int64_t idx) {
     if (idx < 0 || idx >= tfs->meta.piece_count) return 0;
-    return tfs->status[idx] == PIECE_DONE;
+    return __atomic_load_n(&tfs->status[idx], __ATOMIC_ACQUIRE) == PIECE_DONE;
 }
 
 int torrentfs_incoming_count(const torrentfs *tfs) {

@@ -295,6 +295,11 @@ static void test_russian_first()
           release::score(release::parse("Фильм / Film (2023) WEB-DL 1080p | P"), 50, 0, ru));
     // "Rus" alone counts.
     CHECK(release::score(release::parse("Film.2023.720p.WEB-DL.Rus.Eng"), 10, 0, ru) > e);
+    // Standard unspecified-codec 1080p WEB-DL (H.264 on Russian trackers) with
+    // high seeds must outrank a low-seed BDRip-HEVC release.
+    auto webdl = release::parse("Закулисье реальности / Backrooms (2026) WEB-DL 1080p | Дубляж");
+    auto hevc = release::parse("Закулисье реальности / Backrooms (2026) BDRip-HEVC 1080p | D");
+    CHECK(release::score(webdl, 208, 9800LL << 20, ru) > release::score(hevc, 26, 7700LL << 20, ru));
     // An English UI keeps the old order.
     release::Want en;
     CHECK(release::score(eng, 200, 6LL << 30, en) > release::score(rus720, 5, 3LL << 30, en));

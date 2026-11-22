@@ -546,7 +546,12 @@ void MpvView::startEngine(const std::string& source, int fileIndex)
     auto job      = std::make_shared<EngineOpen>();
     engineOpen    = job;
     // Latched into the engine at open; read from config here, on the UI thread.
-    int ramStream     = config::get().ramStream ? 1 : 0;
+    // Applet mode only has ~440 MB total RAM, so RAM streaming would starve
+    // nvtegra NVDEC surface pools or OOM during playback.
+    bool applet       = config::isAppletMode();
+    int ramStream     = (config::get().ramStream && !applet) ? 1 : 0;
+    if (config::get().ramStream && applet)
+        brls::Logger::warning("[player] applet mode: disabling RAM streaming to avoid OOM");
     int64_t streamWin = (int64_t)config::bufferPreset().streamWindowMiB * 1024 * 1024;
     // On the worker pool: a magnet open is tens of seconds, and on
     // brls::async it held up every save and the next player's open behind it.
@@ -593,6 +598,10 @@ void MpvView::startEngine(const std::string& source, int fileIndex)
                 return;
             }
             tfs = t;
+            // Strict SHA-1 verification: never feed unverified peer blocks or
+            // assembling piece buffers to mpv in RAM mode. Corrupt reference
+            // frames in HEVC cause grey macroblocks/chroma smears and nvtegra hangs.
+            torrentfs_set_strict_verify(t, 1);
             // Incoming peers (the listen port) are routed to it from now on.
             engine_register_torrent(t);
             startupMark("torrent open: metadata ready, dialing peers");
@@ -636,11 +645,11 @@ bool MpvView::startMpv()
     mpv_set_option_string(mpv, "vo", "libmpv");
     // Hardware decode by default (Options -> Hardware decoding). Software decode
     // ("no") sidesteps the nvtegra/GPU path -- a way to test whether the random
-    // freezes come from it.
+    // freezes come from it. Note: switch-ffmpeg's nvtegra backend allocates
+    // its HW frames pool dynamically (initial_pool_size == 0), so
+    // hwdec-extra-frames has no effect on Switch and is omitted.
     bool hwDec = config::get().hwDecode;
     mpv_set_option_string(mpv, "hwdec", hwDec ? "auto" : "no");
-    if (hwDec)
-        mpv_set_option_string(mpv, "hwdec-extra-frames", "24");
     // Force 8-bit RGBA for intermediate FBOs. mpv defaults to rgba16hf
     // (64 bits per pixel), which costs 16.6 MB per 1080p frame and starves the
     // Tegra X1 memory bus when docked. The display output is 8-bit RGBA anyway.
@@ -661,6 +670,18 @@ bool MpvView::startMpv()
     mpv_set_option_string(mpv, "video-sync", "audio");
     mpv_set_option_string(mpv, "autosync", "30");
     mpv_set_option_string(mpv, "framedrop", "vo");
+    // Never let FFmpeg drop frames inside the decoder: skipping non-ref/B
+    // frames can still break HEVC temporal MV prediction on reference frames.
+    mpv_set_option_string(mpv, "vd-lavc-framedrop", "none");
+#ifdef __SWITCH__
+    // Match the Switch's 3 application CPU cores for software decode/fallback
+    // so FFmpeg does not oversubscribe alongside the torrent engine and UI.
+    mpv_set_option_string(mpv, "vd-lavc-threads", "3");
+#endif
+    // Non-blocking libmpv render (paired with MPV_RENDER_PARAM_BLOCK_FOR_TARGET_TIME=0):
+    // Borealis drives the 60 Hz swap loop; letting mpv sleep for target time
+    // stalls the UI/render thread.
+    mpv_set_option_string(mpv, "video-timing-offset", "0");
     // Even so a 5.1 master downmixed to stereo sits well below a native stereo
     // track on the Switch's own speakers, which is what the boost is for (see
     // audioBoostWanted -- handheld only, and switchable in Options). Kept in
@@ -720,10 +741,13 @@ bool MpvView::startMpv()
     // its own, which is a setting nobody has asked for yet.
     mpv_set_option_string(mpv, "sub-codepage", "cp1252");
     mpv_set_option_string(mpv, "cache", "yes");
-    // Never let mpv auto-pause playback to rebuffer -- once we start, we keep
-    // playing. We do the initial buffering ourselves: start paused, fill the
-    // demuxer cache, then unpause on reveal (see updateLoadingOverlay/draw).
-    mpv_set_option_string(mpv, "cache-pause", "no");
+    // Initial buffering is still controlled by our loading overlay (we start
+    // paused until startTargetSecs()), so cache-pause-initial stays off.
+    // Mid-playback underruns cleanly pause and rebuffer 2 s instead of
+    // starving the decoder/audio pipeline into freezes and A/V desync.
+    mpv_set_option_string(mpv, "cache-pause", "yes");
+    mpv_set_option_string(mpv, "cache-pause-initial", "no");
+    mpv_set_option_string(mpv, "cache-pause-wait", "2");
     mpv_set_option_string(mpv, "pause", "yes");
     // Give the demuxer enough headroom to buffer bufferSecs() before we
     // unpause. The sizes come from Options -> Buffer size.
@@ -741,7 +765,8 @@ bool MpvView::startMpv()
     // What was already played stays in the demuxer cache (mpv's default 50 MiB
     // is ~40 s of 1080p): a rewind inside it is instant, and for a direct link
     // it is the only copy -- the engine's back window covers torrents beyond it.
-    mpv_set_option_string(mpv, "demuxer-max-back-bytes", "128MiB");
+    mpv_set_option_string(mpv, "demuxer-max-back-bytes",
+                          config::isAppletMode() ? "32MiB" : "128MiB");
     // On Switch the hardware decoder's GPU work is async; without a glFinish
     // after mpv's render, glfwSwapBuffers can present before the video is drawn
     // (black frame). This is what the other Switch mpv players set too.
@@ -812,6 +837,7 @@ bool MpvView::startMpv()
     // lag spikes. Property-change events arrive through pumpEvents instead.
     mpv_observe_property(mpv, 0, "demuxer-cache-duration", MPV_FORMAT_DOUBLE);
     mpv_observe_property(mpv, 0, "demuxer-cache-idle", MPV_FORMAT_FLAG);
+    mpv_observe_property(mpv, 0, "paused-for-cache", MPV_FORMAT_FLAG);
     mpv_observe_property(mpv, 0, "time-pos", MPV_FORMAT_DOUBLE);
     mpv_observe_property(mpv, 0, "duration", MPV_FORMAT_DOUBLE);
     // The decoded picture's width: above 1080p the scalers go cheap.
@@ -2686,6 +2712,27 @@ void MpvView::openTrackMenu()
             return true;
         }));
 
+    // Live hardware decoding toggle: lets users immediately test/switch to
+    // software decode on problematic HEVC streams without leaving the player.
+    auto setHwDecode = [this](bool on) {
+        if (config::get().hwDecode == on) return;
+        config::get().hwDecode = on;
+        config::save();
+        if (mpv)
+            mpv_set_property_string(mpv, "hwdec", on ? "auto" : "no");
+        brls::Logger::info("[player] hardware decoding -> {}", on ? "auto" : "no");
+    };
+    content->addView(new StepperCell(
+        tr("Hardware decoding"),
+        []() { return std::string(config::get().hwDecode ? tr("On") : tr("Off")); },
+        [setHwDecode](int d) {
+            bool want = d > 0;
+            if (config::get().hwDecode == want) return false;
+            setHwDecode(want);
+            return true;
+        },
+        [setHwDecode]() { setHwDecode(!config::get().hwDecode); }));
+
     // The picture on the console's own screen (picture.hpp): one row here,
     // the four settings a level below (openPicturePanel), so they do not
     // crowd this list. Handheld only: docked the TV sets the picture, so the
@@ -3150,16 +3197,28 @@ void MpvView::pumpEvents()
                 break;
             }
             case MPV_EVENT_PLAYBACK_RESTART:
-                // First frame is decoded, but with cache-pause-initial mpv is
-                // still buffering-paused here; readiness is driven off buffered
-                // seconds in updateLoadingOverlay(), not this event.
-                brls::Logger::info("[mpv event] playback restart (first frame)");
+            {
+                // First frame is decoded (or decoder restarted after seek/hwdec switch):
+                // log the active decoder/codec/pixelformat once rather than polling per-frame.
+                char* hwc = mpv_get_property_string(mpv, "hwdec-current");
+                char* vc  = mpv_get_property_string(mpv, "video-codec");
+                char* pf  = mpv_get_property_string(mpv, "video-params/pixelformat");
+                brls::Logger::info("[mpv event] playback restart (hwdec={}, codec={}, pixfmt={})",
+                                   hwc ? hwc : "none", vc ? vc : "-", pf ? pf : "-");
+                if (hwc) mpv_free(hwc);
+                if (vc)  mpv_free(vc);
+                if (pf)  mpv_free(pf);
                 break;
+            }
             case MPV_EVENT_LOG_MESSAGE:
             {
                 auto* m = (mpv_event_log_message*)ev->data;
-                brls::Logger::debug("[mpv:{}] {}: {}", m->level, m->prefix,
-                                    m->text);
+                if (m->log_level <= MPV_LOG_LEVEL_ERROR)
+                    brls::Logger::error("[mpv:{}] {}: {}", m->level, m->prefix, m->text);
+                else if (m->log_level <= MPV_LOG_LEVEL_WARN)
+                    brls::Logger::warning("[mpv:{}] {}: {}", m->level, m->prefix, m->text);
+                else
+                    brls::Logger::debug("[mpv:{}] {}: {}", m->level, m->prefix, m->text);
                 break;
             }
             case MPV_EVENT_PROPERTY_CHANGE:
@@ -3189,6 +3248,9 @@ void MpvView::pumpEvents()
                 else if (p->format == MPV_FORMAT_FLAG &&
                          std::strcmp(p->name, "demuxer-cache-idle") == 0)
                     obsCacheIdle = *(int*)p->data != 0;
+                else if (p->format == MPV_FORMAT_FLAG &&
+                         std::strcmp(p->name, "paused-for-cache") == 0)
+                    obsPausedForCache = *(int*)p->data != 0;
                 else if (p->format == MPV_FORMAT_INT64 &&
                          std::strcmp(p->name, "file-size") == 0)
                     obsFileSize = *(int64_t*)p->data;
@@ -3219,7 +3281,7 @@ void MpvView::pumpEvents()
 // that stretch as well.
 void MpvView::applyBackWindow()
 {
-    if (!tfs || obsDur < 60.0) return;
+    if (!tfs || obsDur < 60.0 || config::isAppletMode()) return;
     constexpr double kRewindSecs = 150.0;
     const double rate = (double)torrentfs_size(tfs) / obsDur;   // bytes/s
     const config::BufferPreset buf = config::bufferPreset();
@@ -3837,7 +3899,7 @@ void MpvView::updateBufferIndicator()
     // stream is struggling); hide it once it recovers. Small hysteresis so it
     // doesn't flicker.
     double secs = obsCacheSecs;  // async-observed; no sync mpv call per frame
-    bool stalling = buffering ? (secs < 1.0) : (secs < 0.25);
+    bool stalling = obsPausedForCache || (buffering ? (secs < 1.0) : (secs < 0.25));
     if (stalling != buffering)
     {
         buffering = stalling;
@@ -4963,9 +5025,11 @@ void renderMpvFrame(NVGcontext* vg, mpv_render_context* rctx)
     mfbo.h               = (int)brls::Application::windowHeight;
     mfbo.internal_format = 0;
     int flip             = 1;
+    int block            = 0;
     mpv_render_param params[] = {
         { MPV_RENDER_PARAM_OPENGL_FBO, &mfbo },
         { MPV_RENDER_PARAM_FLIP_Y, &flip },
+        { MPV_RENDER_PARAM_BLOCK_FOR_TARGET_TIME, &block },
         { MPV_RENDER_PARAM_INVALID, nullptr },
     };
 

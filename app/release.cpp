@@ -472,11 +472,14 @@ int score(const Info& in, int seeders, int64_t size, const Want& want)
         case 480:  s += 10; break;
         default:   s += 16; break;
     }
-    // H.264 decodes in hardware everywhere; HEVC too, but 10-bit and HDR
-    // releases are the heavy ones; AV1 has no hardware decoder on the X1.
+    // H.264 decodes cleanly in hardware everywhere. Russian trackers routinely
+    // omit "H.264"/"AVC" on standard 720p/1080p releases and only tag "HEVC",
+    // so an unnamed SDR non-4K release should not lose to a low-seed HEVC rip
+    // just for omitting the tag. HEVC (especially 10-bit) is heavier on Switch.
     if (in.codec == "H.264") s += 10;
-    else if (in.codec == "HEVC") s += 5;
+    else if (in.codec == "HEVC") s += 2;
     else if (in.codec == "AV1") s -= 20;
+    else if (in.codec.empty() && in.height <= 1080 && !in.hdr && !in.dolbyVision) s += 6;
     if (in.tenBit) s -= 4;
     if (in.dolbyVision) s -= 20;  // profile 5 comes out green and purple
     else if (in.hdr) s -= 8;      // washed out without a tone-map

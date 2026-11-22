@@ -72,6 +72,7 @@ typedef struct {
     int rate_kbs;         // 0 = unlimited
     int latency_ms;
     int64_t sent;         // payload bytes served
+    bool corrupt;         // flip bytes in block 0 of pieces >= 1
 } seeder;
 
 typedef struct {
@@ -202,6 +203,8 @@ static void *conn_main(void *arg) {
             v = htonl(r.idx);   memcpy(msg + 5, &v, 4);
             v = htonl(r.begin); memcpy(msg + 9, &v, 4);
             fill(msg + 13, abs, r.len);
+            if (sd->corrupt && r.idx >= 1 && r.begin == 0 && r.len > 0)
+                msg[13] ^= 0xFF;
             if (!send_full(fd, msg, 13 + r.len)) goto out;
             __atomic_add_fetch(&sd->sent, (int64_t)r.len, __ATOMIC_RELAXED);
             if (rate > 0) tokens -= r.len;
@@ -371,16 +374,21 @@ int main(int argc, char **argv) {
     if (chdir(SCRATCH_DIR) != 0) { fprintf(stderr, "chdir failed\n"); return 2; }
     int size_mb = 96, piece_mb = 4, latency = 0, limit = 120;
     int resume_back_mb = -1;   // --resume N: the resume scenario, back window N MB
+    int corrupt_seeds = 0;     // --corrupt N: first N seeders inject corrupt bytes
+    bool strict_verify = false;
     const char *seeds = "0,0,0";
     const char *label = "";
-    for (int i = 1; i + 1 < argc; i += 2) {
-        if (!strcmp(argv[i], "--size")) size_mb = atoi(argv[i + 1]);
-        else if (!strcmp(argv[i], "--piece")) piece_mb = atoi(argv[i + 1]);
-        else if (!strcmp(argv[i], "--seeds")) seeds = argv[i + 1];
-        else if (!strcmp(argv[i], "--latency")) latency = atoi(argv[i + 1]);
-        else if (!strcmp(argv[i], "--label")) label = argv[i + 1];
-        else if (!strcmp(argv[i], "--limit")) limit = atoi(argv[i + 1]);
-        else if (!strcmp(argv[i], "--resume")) resume_back_mb = atoi(argv[i + 1]);
+    for (int i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--strict")) { strict_verify = true; continue; }
+        if (i + 1 >= argc) break;
+        if (!strcmp(argv[i], "--size")) size_mb = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--piece")) piece_mb = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--seeds")) seeds = argv[++i];
+        else if (!strcmp(argv[i], "--latency")) latency = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--label")) label = argv[++i];
+        else if (!strcmp(argv[i], "--limit")) limit = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--resume")) resume_back_mb = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--corrupt")) corrupt_seeds = atoi(argv[++i]);
     }
     // A short last piece on purpose: + 123 KB.
     g_size = (int64_t)size_mb * 1024 * 1024 + 123 * 1024;
@@ -394,6 +402,7 @@ int main(int argc, char **argv) {
         sd->idx = g_nseeds;
         sd->rate_kbs = atoi(p);
         sd->latency_ms = latency;
+        sd->corrupt = g_nseeds < corrupt_seeds;
         sd->ip = htonl(0x7F00000A + (uint32_t)g_nseeds);   // 127.0.0.10 + i
         sd->listen_fd = socket(AF_INET, SOCK_STREAM, 0);
         int one = 1;
@@ -447,6 +456,7 @@ int main(int argc, char **argv) {
     g_deadline = t0 + limit;
     g_tfs = torrentfs_open(tpath, cpath, err, sizeof(err));
     if (!g_tfs) { fprintf(stderr, "torrentfs_open: %s\n", err); return 2; }
+    if (strict_verify) torrentfs_set_strict_verify(g_tfs, 1);
     pthread_create(&th, NULL, watchdog_main, NULL);
     pthread_detach(th);
 

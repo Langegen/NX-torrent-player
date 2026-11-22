@@ -549,7 +549,8 @@ class MpvView : public brls::Box
     // core froze the render thread with it (and, through the engine getters'
     // lock, the whole download).
     double obsPos = 0.0, obsDur = 0.0, obsCacheSecs = 0.0;
-    bool obsCacheIdle = false;
+    bool obsCacheIdle      = false;
+    bool obsPausedForCache = false;
     std::chrono::steady_clock::time_point infoLastSample;
 
     // Periodic stats dump (see logStats).
