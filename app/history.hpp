@@ -70,4 +70,13 @@ uint32_t generation();
 // Checks if the item has a valid resume point (not completed, >= 15s and < 95% of duration)
 bool hasValidResume(const Item& item);
 
+// Pure helpers for serialization and synchronization
+std::string toJson(const std::vector<Item>& items);
+std::vector<Item> fromJson(const std::string& json);
+int merge(std::vector<Item>& target, const std::vector<Item>& incoming);
+
+// Store-level sync methods
+std::string getJson();
+int mergeJson(const std::string& json);
+
 } // namespace history

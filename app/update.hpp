@@ -29,8 +29,15 @@ struct Release
     int64_t size = 0;      // its size in bytes, 0 if the API did not say
     std::string error;     // set when !ok
 
-    // Both true = we can offer the update.
-    bool installable() const { return newer && !url.empty(); }
+    // Both true = we can offer the update (in-app .nro replacement is Switch-only).
+    bool installable() const
+    {
+#ifdef __SWITCH__
+        return newer && !url.empty();
+#else
+        return false;
+#endif
+    }
 };
 
 // Records where we are running from (argv[0]). Call once, from main, before

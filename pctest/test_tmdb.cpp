@@ -134,6 +134,9 @@ static void test_json_helpers()
     CHECK(json::str(R"J({"k":"a\ud800b"})J", "k") == "a\xEF\xBF\xBD" "b");
     CHECK(json::str(R"J({"k":"a\u0000b"})J", "k") == "a\xEF\xBF\xBD" "b");
     CHECK(json::str(R"J({"k":"😀"})J", "k") == "\xF0\x9F\x98\x80");
+    // json::strings decodes \uXXXX and escapes just like json::str.
+    auto strs = json::strings(R"J({"voices":["\u0414\u0443\u0431\u043b\u044f\u0436","Jaskier \"Pro\""]})J", "voices");
+    CHECK(strs.size() == 2 && strs[0] == "Дубляж" && strs[1] == "Jaskier \"Pro\"");
     // A number too long for 64 bits saturates instead of overflowing.
     CHECK(json::integer(R"J({"n":123456789012345678901234567890})J", "n", 0) == LLONG_MAX);
     CHECK(json::integer(R"J({"n":-42})J", "n", 0) == -42);
@@ -400,7 +403,21 @@ static void test_renderability()
     content::Details d;
     CHECK(tmdb::parseDetails(kMovieWithTranslations, content::Kind::Movie, IMG, d));
     CHECK(d.item.title == "O.M: Operation Mole");
+    CHECK(d.item.englishTitle == "O.M: Operation Mole");
     CHECK(d.item.overview == "An elite undercover operative infiltrates a syndicate.");
+
+    // English translation is also preserved when primary title is valid Russian.
+    const char* kAnimeRuWithEn = R"J({
+      "id": 127532,
+      "name": "Поднятие уровня в одиночку",
+      "original_name": "俺だけレベルアップな件",
+      "original_language": "ja",
+      "translations": {"translations": [{"iso_639_1": "en", "data": {"name": "Solo Leveling"}}]}
+    })J";
+    content::Details ani;
+    CHECK(tmdb::parseDetails(kAnimeRuWithEn, content::Kind::Series, IMG, ani));
+    CHECK(ani.item.title == "Поднятие уровня в одиночку");
+    CHECK(ani.item.englishTitle == "Solo Leveling");
 
     // List parsing sanitizes titles with mixed unsupported glyphs
     auto list = tmdb::parseList(kTamilList, IMG, 0);

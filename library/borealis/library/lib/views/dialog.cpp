@@ -139,6 +139,8 @@ const std::string dialogXML = R"xml(
 Dialog::Dialog(Box* contentView)
 {
     this->inflateFromXMLString(dialogXML);
+    if (Application::contentWidth < 768.0f)
+        appletFrame->setWidth(std::max(300.0f, Application::contentWidth - 48.0f));
     container->addView(contentView);
 
     appletFrame->registerAction(
@@ -167,6 +169,8 @@ Dialog::Dialog(std::string text)
     box->setPadding(style["brls/dialog/paddingTopBottom"], style["brls/dialog/paddingLeftRight"], style["brls/dialog/paddingTopBottom"], style["brls/dialog/paddingLeftRight"]);
 
     this->inflateFromXMLString(dialogXML);
+    if (Application::contentWidth < 768.0f)
+        appletFrame->setWidth(std::max(300.0f, Application::contentWidth - 48.0f));
     container->addView(box);
 
     appletFrame->registerAction(

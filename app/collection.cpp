@@ -3,14 +3,21 @@
 #include "card.hpp"
 #include "i18n.hpp"
 #include "library.hpp"
+#include "platform_ui.hpp"
 #include "theme.hpp"
 #include "widgets.hpp"
 
 namespace
 {
-constexpr float kInset   = 60.0f;
-constexpr float kPosterW = 150.0f;
-constexpr float kGap     = 16.0f;
+inline float inset() { return platform_ui::sideInset(); }
+inline float posterWidth()
+{
+    return (platform_ui::isMobile() && platform_ui::isPortrait()) ? 156.0f : 150.0f;
+}
+inline float gapWidth()
+{
+    return (platform_ui::isMobile() && platform_ui::isPortrait()) ? 14.0f : 16.0f;
+}
 // How close to the end of the scroll the next page is asked for: about one
 // row of posters, so it is there before anyone reaches the bottom.
 constexpr float kNearBottom = 400.0f;
@@ -20,8 +27,9 @@ PosterGrid::PosterGrid()
 {
     setAxis(brls::Axis::COLUMN);
     setPadding(6.0f, 0.0f, 24.0f, 0.0f);
-    float usable = brls::Application::contentWidth - 2 * kInset + kGap;
-    columns = std::max(3, (int)(usable / (kPosterW + kGap)));
+    float gap    = gapWidth();
+    float usable = brls::Application::contentWidth - 2.0f * inset() + gap;
+    columns      = std::max(3, (int)(usable / (posterWidth() + gap)));
 }
 
 PosterGrid::~PosterGrid() { *alive = false; }
@@ -75,7 +83,7 @@ void PosterGrid::loadPersonCredits(int personId, bool isDirector, brls::Scrollin
     status = new brls::Label();
     status->setFontSize(17.0f);
     status->setTextColor(theme::textMuted());
-    status->setMargins(14.0f, 0.0f, 0.0f, kInset);
+    status->setMargins(14.0f, 0.0f, 0.0f, inset());
     status->setText(tr("Loading..."));
     addView(status);
 
@@ -111,7 +119,7 @@ void PosterGrid::next()
         status = new brls::Label();
         status->setFontSize(17.0f);
         status->setTextColor(theme::textMuted());
-        status->setMargins(14.0f, 0.0f, 0.0f, kInset);
+        status->setMargins(14.0f, 0.0f, 0.0f, inset());
         addView(status);
     }
     status->setText(tr("Loading..."));
@@ -165,14 +173,15 @@ void PosterGrid::focusFirstIfLost()
 
 void PosterGrid::add(const content::Item& it)
 {
+    float gap = gapWidth();
     if (!row || (int)row->getChildren().size() >= columns)
     {
         row = new ui::NearestRow();
-        row->setPaddingLeft(kInset);
-        row->setMarginBottom(kGap);
+        row->setPaddingLeft(inset());
+        row->setMarginBottom(gap);
         addView(row);
     }
-    brls::Box* card = catalogPoster(it, alive, kPosterW);
+    brls::Box* card = catalogPoster(it, alive, posterWidth());
     if (!firstCard) firstCard = card;
     row->addView(card);
     shown++;
@@ -195,15 +204,19 @@ void PosterGrid::draw(NVGcontext* vg, float x, float y, float w, float h, brls::
 
 void openCollection(const std::string& title, const tmdb::ListQuery& q)
 {
+    bool mobile = platform_ui::isMobile();
     auto* root = new brls::Box();
     root->setAxis(brls::Axis::COLUMN);
     root->setGrow(1.0f);
 
-    auto* head = new brls::Label();
-    head->setText(title);
-    head->setFontSize(28.0f);
-    head->setMargins(34.0f, 0.0f, 6.0f, kInset);
-    root->addView(head);
+    if (!mobile)
+    {
+        auto* head = new brls::Label();
+        head->setText(title);
+        head->setFontSize(28.0f);
+        head->setMargins(34.0f, 0.0f, 6.0f, inset());
+        root->addView(head);
+    }
 
     auto* scroll = new brls::ScrollingFrame();
     scroll->setGrow(1.0f);
@@ -214,37 +227,48 @@ void openCollection(const std::string& title, const tmdb::ListQuery& q)
     grid->load(q, scroll);
 
     auto* frame = new ui::FieldFrame(root);
-    frame->setTitle("");
-    // The heading is the collection's name: no empty title bar above it.
-    frame->setHeaderVisibility(brls::Visibility::GONE);
+    if (mobile)
+    {
+        frame->setTitle(title);
+    }
+    else
+    {
+        frame->setTitle("");
+        // The heading is the collection's name: no empty title bar above it.
+        frame->setHeaderVisibility(brls::Visibility::GONE);
+    }
     brls::Application::pushActivity(new brls::Activity(frame));
 }
 
 void openPersonCredits(const std::string& name, const std::string& role, int personId, bool isDirector)
 {
+    bool mobile = platform_ui::isMobile();
     auto* root = new brls::Box();
     root->setAxis(brls::Axis::COLUMN);
     root->setGrow(1.0f);
 
-    auto* headerBox = new brls::Box();
-    headerBox->setAxis(brls::Axis::ROW);
-    headerBox->setAlignItems(brls::AlignItems::BASELINE);
-    headerBox->setMargins(34.0f, 0.0f, 6.0f, kInset);
-
-    auto* head = new brls::Label();
-    head->setText(name);
-    head->setFontSize(28.0f);
-    headerBox->addView(head);
-
-    if (!role.empty())
+    if (!mobile)
     {
-        auto* sub = new brls::Label();
-        sub->setText("  \xC2\xB7  " + role);
-        sub->setFontSize(18.0f);
-        sub->setTextColor(theme::textMuted());
-        headerBox->addView(sub);
+        auto* headerBox = new brls::Box();
+        headerBox->setAxis(brls::Axis::ROW);
+        headerBox->setAlignItems(brls::AlignItems::BASELINE);
+        headerBox->setMargins(34.0f, 0.0f, 6.0f, inset());
+
+        auto* head = new brls::Label();
+        head->setText(name);
+        head->setFontSize(28.0f);
+        headerBox->addView(head);
+
+        if (!role.empty())
+        {
+            auto* sub = new brls::Label();
+            sub->setText("  \xC2\xB7  " + role);
+            sub->setFontSize(18.0f);
+            sub->setTextColor(theme::textMuted());
+            headerBox->addView(sub);
+        }
+        root->addView(headerBox);
     }
-    root->addView(headerBox);
 
     auto* scroll = new brls::ScrollingFrame();
     scroll->setGrow(1.0f);
@@ -255,7 +279,14 @@ void openPersonCredits(const std::string& name, const std::string& role, int per
     grid->loadPersonCredits(personId, isDirector, scroll);
 
     auto* frame = new ui::FieldFrame(root);
-    frame->setTitle("");
-    frame->setHeaderVisibility(brls::Visibility::GONE);
+    if (mobile)
+    {
+        frame->setTitle(role.empty() ? name : (name + "  \xC2\xB7  " + role));
+    }
+    else
+    {
+        frame->setTitle("");
+        frame->setHeaderVisibility(brls::Visibility::GONE);
+    }
     brls::Application::pushActivity(new brls::Activity(frame));
 }

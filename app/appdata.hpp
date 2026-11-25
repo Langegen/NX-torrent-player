@@ -2,9 +2,12 @@
 
 // All files the app writes live under one folder on the SD card instead of the
 // root. The directory is created at startup by ensureAppDataDir() in main.cpp.
-#ifdef __SWITCH__
+#if defined(__SWITCH__)
 #define APPDATA_DIR      "sdmc:/switch/NX-torrent-player"
 #define APP_RES(p)       "romfs:/" p
+#elif defined(__ANDROID__) || defined(ANDROID)
+#define APPDATA_DIR      "."
+#define APP_RES(p)       "@res/" p
 #else
 #define APPDATA_DIR      "./appdata"
 #define APP_RES(p)       "resources/" p

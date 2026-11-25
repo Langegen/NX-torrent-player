@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=1920, height=1080, initial-scale=1.0, user-scalable=no" />
+  <title>NX Torrent Player</title>
+  <link rel="stylesheet" href="src/styles.css" />
+</head>
+<body>
+  <!-- Borealis / Switch AppletFrame Header Bar -->
+  <header class="app-header">
+    <div class="brand-group">
+      <img class="app-logo" src="icon.png" alt="NX" />
+      <span class="brand-title">NX Torrent Player</span>
+    </div>
+
+    <!-- Switch Top Tab Bar (matching main.cpp attachTopTabBar) -->
+    <nav class="nav-tabs" role="tablist">
+      <button class="nav-tab focusable active" data-tab="home" tabindex="0">Главная</button>
+      <button class="nav-tab focusable" data-tab="movies" tabindex="0">Фильмы</button>
+      <button class="nav-tab focusable" data-tab="shows" tabindex="0">Сериалы</button>
+      <button class="nav-tab focusable" data-tab="anime" tabindex="0">Аниме</button>
+      <button class="nav-tab focusable" data-tab="bookmarks" tabindex="0">Закладки</button>
+      <button class="nav-tab focusable" data-tab="history" tabindex="0">История</button>
+      <button class="nav-tab focusable" data-tab="torrents" tabindex="0">Торренты</button>
+    </nav>
+
+    <div class="header-right-group">
+      <button class="header-action-btn btn-search focusable" title="Поиск (X)" tabindex="0">
+        <span class="btn-glyph">X</span> <span>Поиск</span>
+      </button>
+      <button class="header-action-btn btn-options focusable" title="Настройки (+)" tabindex="0">
+        <span class="btn-glyph">＋</span> <span>Опции</span>
+      </button>
+      <div class="cloud-sync-status" title="Облачная синхронизация">
+        <span class="cloud-icon">☁</span>
+      </div>
+      <span class="header-clock">00:00</span>
+    </div>
+  </header>
+
+  <!-- App Views Container -->
+  <main class="app-content"></main>
+
+  <!-- Switch Bottom Hints Bar (matching Borealis bottom hint frame) -->
+  <footer class="app-footer-hints">
+    <div class="hint-item"><span class="btn-glyph btn-a">A</span> <span class="hint-label">Выбрать</span></div>
+    <div class="hint-item"><span class="btn-glyph btn-b">B</span> <span class="hint-label">Назад</span></div>
+    <div class="hint-item"><span class="btn-glyph btn-x">X</span> <span class="hint-label">Поиск</span></div>
+    <div class="hint-item"><span class="btn-glyph btn-y">Y</span> <span class="hint-label">В закладки</span></div>
+    <div class="hint-item"><span class="btn-glyph btn-lr">L / R</span> <span class="hint-label">Смена вкладок</span></div>
+    <div class="hint-item"><span class="btn-glyph btn-plus">＋</span> <span class="hint-label">Настройки</span></div>
+  </footer>
+
+  <!-- Modal Overlays Container -->
+  <div id="modal-container"></div>
+
+  <script type="module" src="src/app.js"></script>
+</body>
+</html>

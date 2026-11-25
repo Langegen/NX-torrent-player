@@ -33,7 +33,9 @@ void tick() {}
 #include "card.hpp"
 #include "content.hpp"
 #include "home.hpp"
+#include "platform_ui.hpp"
 #include "player.hpp"
+#include "settings.hpp"
 #include "setup.hpp"
 
 namespace autotest
@@ -139,7 +141,10 @@ void dump(const std::string& name)
 {
     auto stack = brls::Application::getActivitiesStack();
     std::ofstream o(outDir + "/" + name + ".txt");
-    o << "activities: " << stack.size() << "\n";
+    o << "window: " << brls::Application::windowWidth << "x" << brls::Application::windowHeight
+      << " content: " << (int)brls::Application::contentWidth << "x" << (int)brls::Application::contentHeight
+      << " scale: " << brls::Application::windowScale
+      << " activities: " << stack.size() << "\n";
     brls::View* focus = brls::Application::getCurrentFocus();
     o << "focus: " << (focus ? viewName(focus) : std::string("none"));
     if (focus)
@@ -311,6 +316,103 @@ bool run(const std::string& line)
     {
         picture::openCalibration();
         return true;
+    }
+    if (cmd == "settings")
+    {
+        brls::Application::pushActivity(new SettingsActivity());
+        resumeAt = Clock::now() + std::chrono::milliseconds(300);
+        return false;
+    }
+    if (cmd == "account")
+    {
+        brls::Application::pushActivity(new AccountActivity());
+        resumeAt = Clock::now() + std::chrono::milliseconds(300);
+        return false;
+    }
+    if (cmd == "back")
+    {
+        brls::Application::popActivity();
+        resumeAt = Clock::now() + std::chrono::milliseconds(300);
+        return false;
+    }
+    if (cmd == "touchmode")
+    {
+        brls::Application::setInputType(brls::InputType::TOUCH);
+        return true;
+    }
+    if (cmd == "resize")
+    {
+        int rw = 1280, rh = 720;
+        in >> rw >> rh;
+        if (auto* p = brls::Application::getPlatform())
+            p->setWindowSize((uint32_t)rw, (uint32_t)rh);
+        brls::Application::onWindowResized(rw, rh);
+        say("resize " + std::to_string(rw) + "x" + std::to_string(rh) +
+            " -> content " + std::to_string((int)brls::Application::contentWidth) +
+            "x" + std::to_string((int)brls::Application::contentHeight));
+        resumeAt = Clock::now() + std::chrono::milliseconds(400);
+        return false;
+    }
+    if (cmd == "click")
+    {
+        std::string want;
+        std::getline(in, want);
+        while (!want.empty() && want[0] == ' ') want.erase(0, 1);
+        auto stack = brls::Application::getActivitiesStack();
+        brls::View* hit = nullptr;
+        std::vector<brls::View*> todo;
+        if (!stack.empty()) todo.push_back(stack.back()->getContentView());
+        while (!todo.empty() && !hit)
+        {
+            brls::View* v = todo.front();
+            todo.erase(todo.begin());
+            if (!v || v->getVisibility() == brls::Visibility::GONE) continue;
+            if (v->isFocusable())
+            {
+                std::vector<brls::View*> sub = { v };
+                while (!sub.empty())
+                {
+                    brls::View* s = sub.front();
+                    sub.erase(sub.begin());
+                    if (auto* l = dynamic_cast<brls::Label*>(s))
+                        if (!l->getFullText().empty())
+                        {
+                            if (l->getFullText().find(want) != std::string::npos) hit = v;
+                            break;
+                        }
+                    if (auto* b = dynamic_cast<brls::Box*>(s))
+                        for (brls::View* c : b->getChildren()) sub.push_back(c);
+                }
+                if (hit) break;
+            }
+            if (auto* b = dynamic_cast<brls::Box*>(v))
+                for (brls::View* c : b->getChildren()) todo.push_back(c);
+        }
+        if (hit)
+        {
+            bool fired = false;
+            for (const auto& act : hit->getActions())
+            {
+                if (act->getType() == brls::ACTION_GAMEPAD &&
+                    act->getButton() == brls::BUTTON_A && act->isAvailable())
+                {
+                    act->getActionListener()(hit);
+                    fired = true;
+                    break;
+                }
+            }
+            if (!fired)
+                brls::Application::giveFocus(hit);
+            say("click \"" + want + "\" fired=" + std::to_string(fired) +
+                " box=[" + std::to_string((int)hit->getX()) + "," +
+                std::to_string((int)hit->getY()) + " " +
+                std::to_string((int)hit->getWidth()) + "x" +
+                std::to_string((int)hit->getHeight()) + "]");
+        }
+        else
+            say("click: nothing says \"" + want + "\"");
+        resumeAt = Clock::now() + std::chrono::milliseconds(350);
+        return false;
     }
     if (cmd == "log")
     {

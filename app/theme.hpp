@@ -110,6 +110,11 @@ void setRepaintHook(std::function<void()> fn);
 // rather than loaded from romfs:/stremio-icon.png.
 void drawStremioMark(NVGcontext* vg, float x, float y, float size);
 
+// Draws a clean platform-neutral rounded play app mark into a `size` x `size`
+// box at (x, y) in the current accent colour (used on mobile instead of the
+// Nintendo Switch Joy-Con icon).
+void drawAppMark(NVGcontext* vg, float x, float y, float size);
+
 // A Box / Label that is always the current accent, by re-reading it as it draws
 // rather than copying it once at construction. Both setters are plain field
 // assignments, so this costs nothing per frame and needs no hook.

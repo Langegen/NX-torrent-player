@@ -6,7 +6,10 @@
 #include <cstdio>
 #include <ctime>
 #include <mutex>
+
+#ifndef HISTORY_NO_UI
 #include <borealis.hpp>
+#endif
 
 #include "appdata.hpp"
 #include "fsutil.hpp"
@@ -48,22 +51,42 @@ std::string makeId(const std::string& source, int fileIndex, const std::string& 
     return source;
 }
 
-void load()
+std::string toJson(const std::vector<Item>& items)
 {
-    std::lock_guard<std::mutex> guard(g_lock);
-    g_items.clear();
-    g_loaded = true;
+    std::string out = "{\n  \"history\": [\n";
+    for (size_t i = 0; i < items.size(); i++)
+    {
+        const auto& it = items[i];
+        out += "    {\n";
+        out += "      \"id\": \"" + json::escape(it.id) + "\",\n";
+        out += "      \"source\": \"" + json::escape(it.source) + "\",\n";
+        out += "      \"fileIndex\": " + std::to_string(it.fileIndex) + ",\n";
+        out += "      \"title\": \"" + json::escape(it.title) + "\",\n";
+        out += "      \"sourceType\": \"" + json::escape(it.sourceType) + "\",\n";
+        out += "      \"posterPath\": \"" + json::escape(it.posterPath) + "\",\n";
+        out += "      \"positionSec\": " + std::to_string(it.positionSec) + ",\n";
+        out += "      \"durationSec\": " + std::to_string(it.durationSec) + ",\n";
+        out += "      \"lastWatched\": " + std::to_string(it.lastWatched) + ",\n";
+        out += "      \"completed\": " + std::string(it.completed ? "true" : "false") + ",\n";
+        out += "      \"stremioAuthKey\": \"" + json::escape(it.stremioAuthKey) + "\",\n";
+        out += "      \"stremioItemId\": \"" + json::escape(it.stremioItemId) + "\",\n";
+        out += "      \"stremioVideoId\": \"" + json::escape(it.stremioVideoId) + "\",\n";
+        out += "      \"stremioType\": \"" + json::escape(it.stremioType) + "\",\n";
+        out += "      \"tmdbId\": " + std::to_string(it.tmdbId) + ",\n";
+        out += "      \"series\": " + std::string(it.series ? "true" : "false") + ",\n";
+        out += "      \"season\": " + std::to_string(it.season) + ",\n";
+        out += "      \"episode\": " + std::to_string(it.episode) + "\n";
+        out += "    }" + std::string(i + 1 < items.size() ? "," : "") + "\n";
+    }
+    out += "  ]\n}\n";
+    return out;
+}
 
-    // The saved file, or (cut short, or missing after a save cut between its
-    // renames) the .tmp or the version before -- see fsutil::writeAtomic.
-    std::string body;
-    if (!fsutil::readFirst(APPDATA_HISTORY, body, [](const std::string& b) {
-            return fsutil::looksComplete(b);
-        }))
-        return;
-
+std::vector<Item> fromJson(const std::string& body)
+{
+    std::vector<Item> items;
     std::vector<std::string> objs = json::objects(body, "history");
-    g_items.reserve(objs.size());
+    items.reserve(objs.size());
 
     for (const auto& obj : objs)
     {
@@ -90,15 +113,75 @@ void load()
         if (it.id.empty())
             it.id = makeId(it.source, it.fileIndex, it.stremioVideoId);
 
-        g_items.push_back(std::move(it));
+        items.push_back(std::move(it));
     }
 
-    std::sort(g_items.begin(), g_items.end(), [](const Item& a, const Item& b) {
+    std::sort(items.begin(), items.end(), [](const Item& a, const Item& b) {
         return a.lastWatched > b.lastWatched;
     });
 
-    if (g_items.size() > kMaxItems)
-        g_items.resize(kMaxItems);
+    if (items.size() > kMaxItems)
+        items.resize(kMaxItems);
+
+    return items;
+}
+
+int merge(std::vector<Item>& target, const std::vector<Item>& incoming)
+{
+    int changedCount = 0;
+    for (const auto& in : incoming)
+    {
+        std::string inId = in.id.empty() ? makeId(in.source, in.fileIndex, in.stremioVideoId) : in.id;
+        auto it = std::find_if(target.begin(), target.end(), [&](const Item& x) {
+            if (x.id == inId) return true;
+            if (!in.stremioVideoId.empty() && x.stremioVideoId == in.stremioVideoId) return true;
+            if (!in.source.empty() && x.source == in.source && x.fileIndex == in.fileIndex) return true;
+            return false;
+        });
+
+        if (it == target.end())
+        {
+            Item newItem = in;
+            newItem.id = inId;
+            target.push_back(std::move(newItem));
+            changedCount++;
+        }
+        else
+        {
+            if (in.lastWatched > it->lastWatched)
+            {
+                *it = in;
+                it->id = inId;
+                changedCount++;
+            }
+        }
+    }
+
+    std::sort(target.begin(), target.end(), [](const Item& a, const Item& b) {
+        return a.lastWatched > b.lastWatched;
+    });
+
+    if (target.size() > kMaxItems)
+        target.resize(kMaxItems);
+
+    return changedCount;
+}
+
+void load()
+{
+    std::lock_guard<std::mutex> guard(g_lock);
+    g_items.clear();
+    g_loaded = true;
+
+    // The saved file, or (cut short, or missing after a save cut between its
+    // renames) the .tmp or the version before -- see fsutil::writeAtomic.
+    std::string body;
+    if (!fsutil::readFirst(APPDATA_HISTORY, body, [](const std::string& b) {
+            return fsutil::looksComplete(b);
+        }))
+        return;
+
+    g_items = fromJson(body);
 }
 
 void save()
@@ -110,37 +193,38 @@ void save()
         copy = g_items;
     }
 
-    std::string out = "{\n  \"history\": [\n";
-    for (size_t i = 0; i < copy.size(); i++)
-    {
-        const auto& it = copy[i];
-        out += "    {\n";
-        out += "      \"id\": \"" + json::escape(it.id) + "\",\n";
-        out += "      \"source\": \"" + json::escape(it.source) + "\",\n";
-        out += "      \"fileIndex\": " + std::to_string(it.fileIndex) + ",\n";
-        out += "      \"title\": \"" + json::escape(it.title) + "\",\n";
-        out += "      \"sourceType\": \"" + json::escape(it.sourceType) + "\",\n";
-        out += "      \"posterPath\": \"" + json::escape(it.posterPath) + "\",\n";
-        out += "      \"positionSec\": " + std::to_string(it.positionSec) + ",\n";
-        out += "      \"durationSec\": " + std::to_string(it.durationSec) + ",\n";
-        out += "      \"lastWatched\": " + std::to_string(it.lastWatched) + ",\n";
-        out += "      \"completed\": " + std::string(it.completed ? "true" : "false") + ",\n";
-        out += "      \"stremioAuthKey\": \"" + json::escape(it.stremioAuthKey) + "\",\n";
-        out += "      \"stremioItemId\": \"" + json::escape(it.stremioItemId) + "\",\n";
-        out += "      \"stremioVideoId\": \"" + json::escape(it.stremioVideoId) + "\",\n";
-        out += "      \"stremioType\": \"" + json::escape(it.stremioType) + "\",\n";
-        out += "      \"tmdbId\": " + std::to_string(it.tmdbId) + ",\n";
-        out += "      \"series\": " + std::string(it.series ? "true" : "false") + ",\n";
-        out += "      \"season\": " + std::to_string(it.season) + ",\n";
-        out += "      \"episode\": " + std::to_string(it.episode) + "\n";
-        out += "    }" + std::string(i + 1 < copy.size() ? "," : "") + "\n";
-    }
-    out += "  ]\n}\n";
+    std::string out = toJson(copy);
 
     // Checked and atomic: an unchecked write on a full card used to replace
     // the good file with a truncated one.
+#ifndef HISTORY_NO_UI
     if (!fsutil::writeAtomic(APPDATA_HISTORY, out))
         brls::Logger::error("[history] could not write {}", APPDATA_HISTORY);
+#endif
+}
+
+std::string getJson()
+{
+    std::lock_guard<std::mutex> guard(g_lock);
+    return toJson(g_items);
+}
+
+int mergeJson(const std::string& json)
+{
+    std::vector<Item> incoming = fromJson(json);
+    if (incoming.empty() && json.find("\"history\"") == std::string::npos)
+        return 0;
+
+    int changed = 0;
+    {
+        std::lock_guard<std::mutex> guard(g_lock);
+        changed = merge(g_items, incoming);
+        if (changed > 0)
+            g_generation++;
+    }
+    if (changed > 0)
+        save();
+    return changed;
 }
 
 std::vector<Item> all()
@@ -216,6 +300,7 @@ void record(const Item& item, bool saveNow)
         save();
         return;
     }
+#ifndef HISTORY_NO_UI
     if (!g_savePending.exchange(true))
     {
         brls::async([]() {
@@ -223,6 +308,9 @@ void record(const Item& item, bool saveNow)
             save();
         });
     }
+#else
+    save();
+#endif
 }
 
 void remove(const std::string& id)

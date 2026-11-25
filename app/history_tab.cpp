@@ -12,6 +12,7 @@
 #include "history.hpp"
 #include "i18n.hpp"
 #include "library.hpp"
+#include "platform_ui.hpp"
 #include "player.hpp"
 #include "theme.hpp"
 #include "widgets.hpp"
@@ -26,10 +27,16 @@
 namespace
 {
 
-constexpr float kInset   = 60.0f;
-constexpr float kPosterW = 190.0f;
-constexpr float kWideW   = 300.0f;
-constexpr float kGlow    = 24.0f;
+inline float inset() { return platform_ui::sideInset(); }
+inline float posterWidth()
+{
+    return (platform_ui::isMobile() && platform_ui::isPortrait()) ? 156.0f : 190.0f;
+}
+inline float wideWidth()
+{
+    return (platform_ui::isMobile() && platform_ui::isPortrait()) ? 240.0f : 300.0f;
+}
+constexpr float kGlow = 24.0f;
 
 // True if `v` is `ancestor` or sits under it.
 bool isUnder(brls::View* v, brls::View* ancestor)
@@ -165,16 +172,20 @@ class HistoryTabRoot : public brls::Box
                 if (!kv.second.source.empty())
                     titleFiles.insert(fileKey(kv.second.source, kv.second.fileIndex));
         }
+        float ins = inset();
+        float pw  = posterWidth();
+        float ww  = wideWidth();
+
         if (!titles.empty())
         {
-            list->addView(ui::heading(tr("Films and series"), kInset));
+            list->addView(ui::heading(tr("Films and series"), ins));
             titleRow = new brls::Box();
             for (const auto& e : titles)
             {
                 content::Item it = e.item;
                 std::string key  = e.key();
                 auto* card = ui::posterCard(it.title, it.key(), it.posterUrl, alive,
-                                            [it]() { openContentCard(it); }, kPosterW,
+                                            [it]() { openContentCard(it); }, pw,
                                             badgeFor(e));
                 std::string name = it.title;
                 card->registerAction(
@@ -189,10 +200,10 @@ class HistoryTabRoot : public brls::Box
                         return true;
                     },
                     false, false, brls::SOUND_CLICK);
-                if (titleRow->getChildren().empty()) card->setMarginLeft(kInset);
+                if (titleRow->getChildren().empty()) card->setMarginLeft(ins);
                 titleRow->addView(card);
             }
-            list->addView(ui::strip(titleRow, kPosterW * 1.5f + kGlow));
+            list->addView(ui::strip(titleRow, pw * 1.5f + kGlow));
         }
 
         // ---- other files ------------------------------------------------
@@ -202,11 +213,11 @@ class HistoryTabRoot : public brls::Box
                 files.push_back(it);
         if (!files.empty())
         {
-            list->addView(ui::heading(tr("Other files"), kInset));
+            list->addView(ui::heading(tr("Other files"), ins));
             fileRow = new brls::Box();
             for (const auto& it : files) fileRow->addView(fileCard(it));
-            fileRow->getChildren()[0]->setMarginLeft(kInset);
-            list->addView(ui::strip(fileRow, kWideW * 9.0f / 16.0f + kGlow));
+            fileRow->getChildren()[0]->setMarginLeft(ins);
+            list->addView(ui::strip(fileRow, ww * 9.0f / 16.0f + kGlow));
         }
 
         if (titles.empty() && files.empty())
@@ -265,7 +276,7 @@ class HistoryTabRoot : public brls::Box
                                       startPlaybackPrompt(copy.source, art, copy.title,
                                                           copy.fileIndex, w, copy.sourceType);
                                   },
-                                  kWideW);
+                                  wideWidth());
 
         card->registerAction(
             tr("Remove"), brls::BUTTON_Y,

@@ -1333,6 +1333,7 @@ static void find_coreGL(void) {
      * https://github.com/glfw/glfw/blob/master/src/context.c#L36
      */
     int i, major, minor;
+    int is_gles = 0;
 
     const char* version;
     const char* prefixes[] = {
@@ -1349,6 +1350,7 @@ static void find_coreGL(void) {
         const size_t length = strlen(prefixes[i]);
         if (strncmp(version, prefixes[i], length) == 0) {
             version += length;
+            is_gles = 1;
             break;
         }
     }
@@ -1372,6 +1374,11 @@ static void find_coreGL(void) {
 	GLAD_GL_VERSION_2_1 = (major == 2 && minor >= 1) || major > 2;
 	GLAD_GL_VERSION_3_0 = (major == 3 && minor >= 0) || major > 3;
 	GLAD_GL_VERSION_3_1 = (major == 3 && minor >= 1) || major > 3;
+	if (is_gles && major == 3 && minor == 0) {
+		// OpenGL ES 3.0 includes UBO functions that desktop GL introduced in 3.1
+		// (required by NanoVG GLES3 for glGetUniformBlockIndex / glUniformBlockBinding / glBindBufferRange).
+		GLAD_GL_VERSION_3_1 = 1;
+	}
 	GLAD_GL_VERSION_3_2 = (major == 3 && minor >= 2) || major > 3;
 	GLAD_GL_VERSION_3_3 = (major == 3 && minor >= 3) || major > 3;
 	GLAD_GL_VERSION_4_0 = (major == 4 && minor >= 0) || major > 4;

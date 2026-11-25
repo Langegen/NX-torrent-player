@@ -124,15 +124,78 @@ int readRangeEnd(const std::string& s, size_t& i, int from, int maxv)
     return n;
 }
 
-// The number just before `pos` ("1 сезон"), or -1.
-int numberBefore(const std::string& s, size_t pos)
+// Reads a single number ("2 сезон") or range ("1-5 сезоны", "1-8 серии")
+// immediately before `pos`.
+bool numberRangeBefore(const std::string& s, size_t pos, int maxDigits, int maxVal,
+                       int& outFrom, int& outTo)
 {
     size_t j = pos;
     while (j > 0 && s[j - 1] == ' ') j--;
     size_t end = j;
     while (j > 0 && std::isdigit((unsigned char)s[j - 1])) j--;
-    if (j == end || end - j > 2) return -1;
-    return std::atoi(s.substr(j, end - j).c_str());
+    if (j == end || (int)(end - j) > maxDigits) return false;
+    if (j > 0 && (std::isalpha((unsigned char)s[j - 1]) || (unsigned char)s[j - 1] >= 0x80))
+        return false;
+    int b = std::atoi(s.substr(j, end - j).c_str());
+    if (b < 0 || b > maxVal) return false;
+
+    outFrom = outTo = b;
+    // Check for an optional "a-" or "a–" range prefix before b.
+    size_t d = j;
+    while (d > 0 && s[d - 1] == ' ') d--;
+    size_t aEnd = std::string::npos;
+    if (d > 0 && s[d - 1] == '-')
+        aEnd = d - 1;
+    else if (d >= 3 && s.compare(d - 3, 3, "\xE2\x80\x93") == 0)
+        aEnd = d - 3;
+    if (aEnd != std::string::npos)
+    {
+        while (aEnd > 0 && s[aEnd - 1] == ' ') aEnd--;
+        size_t aStart = aEnd;
+        while (aStart > 0 && std::isdigit((unsigned char)s[aStart - 1])) aStart--;
+        if (aStart < aEnd && (int)(aEnd - aStart) <= maxDigits &&
+            (aStart == 0 ||
+             (!std::isalpha((unsigned char)s[aStart - 1]) &&
+              (unsigned char)s[aStart - 1] < 0x80)))
+        {
+            int a = std::atoi(s.substr(aStart, aEnd - aStart).c_str());
+            if (a >= 0 && a <= b) outFrom = a;
+        }
+    }
+    return true;
+}
+
+// Reads "из 8", "of 8", or "(7)" right after an episode token/range.
+int readTotalAfter(const std::string& s, size_t j)
+{
+    size_t scanEnd = std::min(s.size(), j + 16);
+    for (size_t p = j; p < scanEnd; p++)
+    {
+        if (s.compare(p, 5, "\xD0\xB8\xD0\xB7 ") == 0)  // "из "
+        {
+            size_t t = p + 5;
+            while (t < s.size() && s[t] == ' ') t++;
+            return readNum(s, t, 3);
+        }
+        if (s.compare(p, 3, "of ") == 0 &&
+            (p == 0 || !std::isalpha((unsigned char)s[p - 1])))
+        {
+            size_t t = p + 3;
+            while (t < s.size() && s[t] == ' ') t++;
+            return readNum(s, t, 3);
+        }
+    }
+    size_t p = j;
+    while (p < s.size() && s[p] == ' ') p++;
+    if (p < s.size() && s[p] == '(')
+    {
+        size_t t = p + 1;
+        while (t < s.size() && s[t] == ' ') t++;
+        int tot = readNum(s, t, 3);
+        while (t < s.size() && s[t] == ' ') t++;
+        if (tot > 0 && t < s.size() && s[t] == ')') return tot;
+    }
+    return -1;
 }
 
 bool isLetterAt(const std::string& s, size_t i)
@@ -186,7 +249,7 @@ void readScope(const std::string& low, Info& in)
         }
     }
 
-    // 1x06
+    // 1x06, 01x01-08 из 08
     if (in.season < 0)
         for (size_t i = 1; i + 2 < low.size(); i++)
         {
@@ -201,11 +264,16 @@ void readScope(const std::string& low, Info& in)
             if (e < 0 || j - (i + 1) < 2) continue;  // "2x2" is not an episode
             in.season = in.seasonTo = std::atoi(low.substr(a, i - a).c_str());
             in.episode = in.episodeTo = e;
+            int to = readRangeEnd(low, j, e, 999);
+            if (to >= 0) in.episodeTo = to;
+            int tot = readTotalAfter(low, j);
+            if (tot > 0 && in.episode <= 1 && in.episodeTo >= tot)
+                in.fullSeason = true;
             break;
         }
 
-    // "сезон 1", "1 сезон", "сезоны 1-3", "season 2", "seasons 1-3"
-    // "сезон 1", "1 сезон", "сезоны 1-3", "season 2", "seasons 1-3"
+    // "2 сезон", "1-5 сезоны", "сезон 1", "сезоны 1-3", "season 2", "seasons 1-3"
+    // Check BEFORE the word first so "(2 сезон: 1-8 серии из 8)" reads 2, not 1-8!
     for (const char* word : { "\xD1\x81\xD0\xB5\xD0\xB7\xD0\xBE\xD0\xBD",  // сезон
                               "season" })
     {
@@ -214,17 +282,32 @@ void readScope(const std::string& low, Info& in)
         {
             size_t j;
             if (!wordAt(low, k, std::strlen(word), j)) continue;
-            skipSpaces(low, j);
-            int s = readNum(low, j, 2);
-            if (s < 0) s = numberBefore(low, k);
-            if (s < 0) continue;
-            in.season = in.seasonTo = s;
-            int to = readRangeEnd(low, j, s, 99);
-            if (to >= 0) in.seasonTo = to;
+            int s = -1, sto = -1;
+            if (numberRangeBefore(low, k, 2, 99, s, sto))
+            {
+                in.season   = s;
+                in.seasonTo = sto;
+                // Handle "(1 сезон-5)" where the dash sits immediately after "сезон".
+                if (j < low.size() &&
+                    (low[j] == '-' || low.compare(j, 3, "\xE2\x80\x93") == 0))
+                {
+                    int to = readRangeEnd(low, j, s, 99);
+                    if (to >= 0) in.seasonTo = to;
+                }
+            }
+            else
+            {
+                skipSpaces(low, j);
+                s = readNum(low, j, 2);
+                if (s < 0) continue;
+                in.season = in.seasonTo = s;
+                int to = readRangeEnd(low, j, s, 99);
+                if (to >= 0) in.seasonTo = to;
+            }
         }
     }
 
-    // "серии 1-8 из 8", "серия 6", "6 серия", "episode 6", "episodes 1-8"
+    // "1-8 серии из 8", "7 серий из 7", "серии 1-7 (7)", "8 серия", "episode 6"
     const char* seria = "\xD1\x81\xD0\xB5\xD1\x80\xD0\xB8";  // сери(я|и|й)
     for (const char* word : { seria, "episode" })
     {
@@ -234,28 +317,94 @@ void readScope(const std::string& low, Info& in)
             size_t j;
             // "сериал" is not "серия".
             if (!wordAt(low, k, std::strlen(word), j)) continue;
-            skipSpaces(low, j);
-            int e = readNum(low, j);
-            if (e < 0) e = numberBefore(low, k);
-            if (e < 0) continue;
-            in.episode = in.episodeTo = e;
-            int to = readRangeEnd(low, j, e, 999);
-            if (to >= 0) in.episodeTo = to;
-            // "из 8" / "of 8": the whole season when the range reaches it.
-            size_t of = low.find("\xD0\xB8\xD0\xB7 ", j);  // "из "
-            if (of == std::string::npos) of = low.find("of ", j);
-            if (of != std::string::npos && of < j + 6)
+            bool isGenitive = (word == seria) &&
+                              low.compare(k, 10, "\xD1\x81\xD0\xB5\xD1\x80\xD0\xB8\xD0\xB9") == 0;
+            int e = -1, eto = -1;
+            if (numberRangeBefore(low, k, 3, 999, e, eto))
             {
-                size_t t = low.find(' ', of) + 1;
-                int total = readNum(low, t);
+                in.episode   = e;
+                in.episodeTo = eto;
+                int total = readTotalAfter(low, j);
+                if (isGenitive && total > 0 && in.episode == in.episodeTo && in.episode == total)
+                {
+                    in.episode    = 1;
+                    in.episodeTo  = total;
+                    in.fullSeason = true;
+                }
+                else if (total > 0 && in.episode <= 1 && in.episodeTo >= total)
+                {
+                    in.fullSeason = true;
+                }
+            }
+            else
+            {
+                skipSpaces(low, j);
+                e = readNum(low, j);
+                if (e < 0) continue;
+                in.episode = in.episodeTo = e;
+                int to = readRangeEnd(low, j, e, 999);
+                if (to >= 0) in.episodeTo = to;
+                int total = readTotalAfter(low, j);
                 if (total > 0 && in.episode <= 1 && in.episodeTo >= total)
                     in.fullSeason = true;
             }
         }
     }
 
+    // "(1-16 из 16)" / "(1-62 из 62)" when a season was already named without "серии".
+    if (in.season >= 0 && in.episode < 0)
+    {
+        for (size_t p = 0; p < low.size(); p++)
+        {
+            if (low[p] != '(' && low[p] != '[') continue;
+            size_t j = p + 1;
+            while (j < low.size() && low[j] == ' ') j++;
+            int a = readNum(low, j, 3);
+            if (a < 0) continue;
+            int b = readRangeEnd(low, j, a, 999);
+            if (b < 0) b = a;
+            int tot = readTotalAfter(low, j);
+            if (tot > 0 && ((a <= 1 && b >= tot) || (a == b && a == tot)))
+            {
+                in.episode    = 1;
+                in.episodeTo  = tot;
+                in.fullSeason = true;
+                break;
+            }
+        }
+    }
+
+    // Anime cour/season markers: "(ТВ-1)", "(ТВ-2)", "TV-1", "TV-2".
+    if (in.season < 0)
+    {
+        for (const char* tag : { "\xD1\x82\xD0\xB2-", "tv-" })
+        {
+            size_t tlen = std::strlen(tag);
+            for (size_t k = low.find(tag); k != std::string::npos; k = low.find(tag, k + 1))
+            {
+                if (k > 0 && (std::isalnum((unsigned char)low[k - 1]) ||
+                              (unsigned char)low[k - 1] >= 0x80))
+                    continue;
+                size_t j = k + tlen;
+                int n = readNum(low, j, 2);
+                if (n >= 1 && n <= 20 && !isLetterAt(low, j))
+                {
+                    in.season = in.seasonTo = n;
+                    break;
+                }
+            }
+            if (in.season >= 0) break;
+        }
+    }
+
     if (in.season >= 0 && in.episode < 0) in.fullSeason = true;
     if (hasWord(words(low), "complete") && in.episode < 0) in.fullSeason = true;
+
+    if (in.season >= 0 && in.seasonTo >= in.season && in.seasonTo - in.season <= 50)
+    {
+        for (int s = in.season; s <= in.seasonTo; s++)
+            in.seasons.push_back(s);
+    }
 }
 
 struct Voice
@@ -265,7 +414,7 @@ struct Voice
     // A short Latin mark ("| D", "| P", "L1", "Dub") that only means a Russian
     // voice-over on a Russian tracker's title: an English "(Dub)" anime release
     // is not one. Only taken when the name has Cyrillic in it.
-    bool needsCyrillic;
+    bool needsCyrillic = false;
 };
 
 const Voice kVoices[] = {
@@ -307,9 +456,26 @@ const Voice kVoices[] = {
     { "amedia", "Amedia" },
     { "coldfilm", "ColdFilm" },
     { "red head sound", "RHS" },
+    { " rhs ", "RHS", true },
+    { "flarrow films", "Flarrow Films" },
+    { "\xD0\xBD\xD0\xB5\xD0\xB2\xD0\xB0\xD1\x84\xD0\xB8\xD0\xBB\xD1\x8C\xD0\xBC", "\xD0\x9D\xD0\xB5\xD0\xB2\xD0\xB0\xD1\x84\xD0\xB8\xD0\xBB\xD1\x8C\xD0\xBC" },  // невафильм -> Невафильм
+    { "\xD0\xBF\xD0\xB8\xD1\x84\xD0\xB0\xD0\xB3\xD0\xBE\xD1\x80", "\xD0\x9F\xD0\xB8\xD1\x84\xD0\xB0\xD0\xB3\xD0\xBE\xD1\x80" },  // пифагор -> Пифагор
     { "anilibria", "AniLibria" },
     { "animevost", "AnimeVost" },
 };
+
+void recomputeVoiceRank(Info& in)
+{
+    in.voiceRank = 0;
+    for (const auto& v : in.voices)
+    {
+        int r = v == "\xD0\x94\xD1\x83\xD0\xB1\xD0\xBB\xD1\x8F\xD0\xB6" ? 4  // Дубляж
+              : v == "DVO"                                                 ? 2
+              : v == "AVO"                                                 ? 1
+                                                                           : 3;  // MVO, a studio
+        if (r > in.voiceRank) in.voiceRank = r;
+    }
+}
 
 void readVoices(const std::string& low, const std::string& w, Info& in)
 {
@@ -331,14 +497,7 @@ void readVoices(const std::string& low, const std::string& w, Info& in)
         for (const auto& x : in.voices) dup = dup || x == v.label;
         if (!dup) in.voices.push_back(v.label);
     }
-    for (const auto& v : in.voices)
-    {
-        int r = v == "\xD0\x94\xD1\x83\xD0\xB1\xD0\xBB\xD1\x8F\xD0\xB6" ? 4  // Дубляж
-              : v == "DVO"                                                 ? 2
-              : v == "AVO"                                                 ? 1
-                                                                           : 3;  // MVO, a studio
-        if (r > in.voiceRank) in.voiceRank = r;
-    }
+    recomputeVoiceRank(in);
 }
 
 // "...H264-NTb.mkv" -> "NTb"; "[HDRezka]" at the end -> "HDRezka".
@@ -375,7 +534,8 @@ Info parse(const std::string& title)
     std::string low = lower(title);
     std::string w   = words(low);
 
-    if (has(low, "2160p") || hasWord(w, "4k") || hasWord(w, "uhd") || has(low, "3840x"))
+    if (has(low, "2160p") || hasWord(w, "4k") || hasWord(w, "4\xD0\xBA") ||
+        hasWord(w, "uhd") || has(low, "3840x"))
         in.height = 2160;
     else if (has(low, "1080p") || has(low, "1080i") || has(low, "1920x"))
         in.height = 1080;
@@ -390,12 +550,15 @@ Info parse(const std::string& title)
         in.source = "BDRip";
     else if (has(low, "bluray") || has(low, "blu-ray"))
         in.source = "BluRay";
+    else if (has(low, "web-dlrip") || has(low, "webdlrip") || has(low, "web-dl-rip") ||
+             has(low, "webrip") || has(low, "web-rip"))
+        in.source = "WEBRip";
     else if (has(low, "web-dl") || has(low, "webdl") || has(low, "web dl"))
         in.source = "WEB-DL";
-    else if (has(low, "webrip") || has(low, "web-rip"))
-        in.source = "WEBRip";
     else if (has(low, "hdtv"))
         in.source = "HDTV";
+    else if (has(low, "hdrip"))
+        in.source = "HDRip";
     else if (has(low, "dvdrip") || hasWord(w, "dvd5") || hasWord(w, "dvd9"))
         in.source = "DVDRip";
     if (has(low, "camrip") || hasWord(w, "cam") || hasWord(w, "ts") || has(low, "telesync") ||
@@ -407,13 +570,13 @@ Info parse(const std::string& title)
 
     // Also spelled with a space: "DDP5 1 H 264-NTb" (an index that turned
     // the dots into spaces).
-    if (has(low, "hevc") || has(low, "x265") || has(low, "h265") || has(low, "h.265") ||
-        has(w, " h 265 ") || has(w, " x 265 "))
+    if (has(low, "hevc") || has(low, "x265") || has(low, "x.265") ||
+        has(low, "h265") || has(low, "h.265") || has(w, " h 265 ") || has(w, " x 265 "))
         in.codec = "HEVC";
-    else if (has(low, "x264") || has(low, "h264") || has(low, "h.264") || hasWord(w, "avc") ||
-             has(w, " h 264 ") || has(w, " x 264 "))
+    else if (has(low, "x264") || has(low, "x.264") || has(low, "h264") || has(low, "h.264") ||
+             hasWord(w, "avc") || has(w, " h 264 ") || has(w, " x 264 "))
         in.codec = "H.264";
-    else if (hasWord(w, "av1"))
+    else if (hasWord(w, "av1") || hasWord(w, "av01"))
         in.codec = "AV1";
     else if (has(low, "xvid") || has(low, "divx"))
         in.codec = "XviD";
@@ -424,6 +587,8 @@ Info parse(const std::string& title)
              in.dolbyVision;
     in.tenBit      = has(low, "10bit") || has(low, "10-bit") || has(low, "10 bit") ||
                 has(low, "hi10");
+    if (in.codec.empty() && has(low, "hi10"))
+        in.codec = "H.264";
 
     readScope(low, in);
     readVoices(low, w, in);
@@ -435,6 +600,180 @@ Info parse(const std::string& title)
                  has(low, "russian");
     in.ukrainian = has(low, "ukr") || has(low, "\xD1\x83\xD0\xBA\xD1\x80");  // укр
     return in;
+}
+
+namespace
+{
+std::string normalizeMetaVoice(const std::string& raw, bool& isRuVoice, bool& isUkr)
+{
+    std::string v = raw;
+    while (!v.empty() && std::isspace((unsigned char)v.front())) v.erase(0, 1);
+    while (!v.empty() && std::isspace((unsigned char)v.back())) v.pop_back();
+    if (v.empty()) return "";
+
+    std::string lv = lower(v);
+    if (lv == "\xD1\x83\xD0\xBA\xD1\x80\xD0\xB0\xD0\xB8\xD0\xBD\xD1\x81\xD0\xBA\xD0\xB8\xD0\xB9" || // украинский
+        lv == "\xD1\x83\xD0\xBA\xD1\x80" || lv == "ukr" || lv == "ukrainian")
+    {
+        isUkr = true;
+        return "";
+    }
+    // Non-voice meta tags returned by Jacred in info.voices.
+    if (lv == "\xD1\x81\xD1\x83\xD0\xB1\xD1\x82\xD0\xB8\xD1\x82\xD1\x80\xD1\x8B" || // субтитры
+        lv == "sub" || lv == "subs" ||
+        lv == "\xD0\xBE\xD1\x80\xD0\xB8\xD0\xB3\xD0\xB8\xD0\xBD\xD0\xB0\xD0\xBB" || // оригинал
+        lv == "original" ||
+        lv == "\xD0\xB4\xD0\xB2\xD0\xB5 \xD0\xB4\xD0\xBE\xD1\x80\xD0\xBE\xD0\xB6\xD0\xBA\xD0\xB8" || // две дорожки
+        lv == "\xD0\xBD\xD0\xB5\xD1\x81\xD0\xBA\xD0\xBE\xD0\xBB\xD1\x8C\xD0\xBA\xD0\xBE \xD0\xB4\xD0\xBE\xD1\x80\xD0\xBE\xD0\xB6\xD0\xB5\xD0\xBA" || // несколько дорожек
+        lv == "\xD0\xBC\xD1\x83\xD0\xBB\xD1\x8C\xD1\x82\xD0\xB8\xD1\x8F\xD0\xB7\xD1\x8B\xD1\x87\xD0\xBD\xD0\xB0\xD1\x8F" || // мультиязычная
+        lv == "\xD0\xBC\xD0\xBD\xD0\xBE\xD0\xB3\xD0\xBE\xD1\x8F\xD0\xB7\xD1\x8B\xD1\x87\xD0\xBD\xD0\xB0\xD1\x8F" || // многоязычная
+        lv == "\xD0\xBC\xD0\xBD\xD0\xBE\xD0\xB3\xD0\xBE\xD0\xB4\xD0\xBE\xD1\x80\xD0\xBE\xD0\xB6\xD0\xB5\xD1\x87\xD0\xBD\xD0\xB0\xD1\x8F" || // многодорожечная
+        lv == "\xD0\xB1\xD0\xB5\xD0\xB7 \xD0\xBF\xD0\xB5\xD1\x80\xD0\xB5\xD0\xB2\xD0\xBE\xD0\xB4\xD0\xB0" || // без перевода
+        lv == "\xD0\xBD\xD0\xB5\xD0\xB8\xD0\xB7\xD0\xB2\xD0\xB5\xD1\x81\xD1\x82\xD0\xBD\xD0\xBE" || // неизвестно
+        lv == "\xD1\x80\xD0\xBE\xD1\x81\xD1\x81\xD0\xB8\xD1\x8F" || // россия
+        lv == "russia" || lv == "eng" || lv == "english" || lv == "multi" ||
+        lv == "dual audio" || lv == "multi-audio" || lv == "multi audio" || lv == "unknown")
+        return "";
+
+    isRuVoice = true;
+    if (lv == "red head sound" || lv == "rhs") return "RHS";
+    if (lv == "hdrezka" || lv == "hdrezka studio") return "HDRezka";
+    if (lv == "\xD0\xBA\xD1\x83\xD0\xB1\xD0\xB8\xD0\xBA \xD0\xB2 \xD0\xBA\xD1\x83\xD0\xB1\xD0\xB5" || // кубик в кубе
+        lv == "kubik")
+        return "\xD0\x9A\xD1\x83\xD0\xB1\xD0\xB8\xD0\xBA \xD0\xB2 \xD0\x9A\xD1\x83\xD0\xB1\xD0\xB5";
+    if (lv == "\xD0\xB4\xD1\x83\xD0\xB1\xD0\xBB\xD1\x8F\xD0\xB6" || // дубляж
+        lv == "\xD0\xB4\xD1\x83\xD0\xB1\xD0\xBB\xD0\xB8\xD1\x80\xD0\xBE\xD0\xB2\xD0\xB0\xD0\xBD\xD0\xBD\xD1\x8B\xD0\xB9" ||
+        lv == "dub")
+        return "\xD0\x94\xD1\x83\xD0\xB1\xD0\xBB\xD1\x8F\xD0\xB6";
+    if (lv == "lostfilm") return "LostFilm";
+    if (lv == "jaskier") return "Jaskier";
+    if (lv == "alexfilm") return "AlexFilm";
+    if (lv == "newstudio") return "NewStudio";
+    if (lv == "baibako") return "BaibaKo";
+    if (lv == "coldfilm") return "ColdFilm";
+    if (lv == "amedia") return "Amedia";
+    if (lv == "tvshows") return "TVShows";
+    if (lv == "anilibria") return "AniLibria";
+    if (lv == "animevost") return "AnimeVost";
+    if (lv == "mvo" || lv == "dvo" || lv == "avo")
+    {
+        std::string up = lv;
+        for (char& c : up) c = (char)std::toupper((unsigned char)c);
+        return up;
+    }
+    return v;
+}
+
+bool isForeignTracker(const std::string& raw)
+{
+    std::string t = lower(raw);
+    while (!t.empty() && std::isspace((unsigned char)t.front())) t.erase(0, 1);
+    while (!t.empty() && std::isspace((unsigned char)t.back())) t.pop_back();
+    static const char* const kForeign[] = {
+        "nyaa", "nyaasi", "knaben", "piratebay", "thepiratebay", "1337x",
+        "yts", "eztv", "torrentgalaxy", "rarbg", "limetorrents", "kickass",
+        "bitsearch", "solidtorrents", "extto", "anidex", "tokyotosho",
+        "sukebei", "glodls", "magnetdl", "torlock", "torrentdownloads",
+    };
+    for (const char* f : kForeign)
+        if (t == f) return true;
+    return false;
+}
+} // namespace
+
+void enrich(Info& in, const ExternalMeta& meta)
+{
+    in.seedersUnknown = in.seedersUnknown || meta.seedersUnknown;
+
+    if (in.height == 0 && meta.quality > 0)
+    {
+        if (meta.quality >= 2000) in.height = 2160;
+        else if (meta.quality >= 1000) in.height = 1080;
+        else if (meta.quality >= 700) in.height = 720;
+        else if (meta.quality >= 400) in.height = 480;
+    }
+
+    if (!meta.videotype.empty())
+    {
+        std::string vt = lower(meta.videotype);
+        if (vt.find("dv") != std::string::npos || vt.find("dolby") != std::string::npos)
+            in.dolbyVision = in.hdr = true;
+        else if (vt.find("hdr") != std::string::npos)
+            in.hdr = true;
+    }
+
+    if (!meta.seasons.empty())
+    {
+        std::vector<int> ms;
+        for (int s : meta.seasons)
+            if (s > 0 && std::find(ms.begin(), ms.end(), s) == ms.end())
+                ms.push_back(s);
+        std::sort(ms.begin(), ms.end());
+        if (!ms.empty())
+        {
+            if (!in.hasAnySeason())
+            {
+                in.seasons  = ms;
+                in.season   = ms.front();
+                in.seasonTo = ms.back();
+                if (in.episode < 0) in.fullSeason = true;
+            }
+            else if (ms.size() > in.seasons.size())
+            {
+                for (int s : ms)
+                    if (std::find(in.seasons.begin(), in.seasons.end(), s) == in.seasons.end())
+                        in.seasons.push_back(s);
+                std::sort(in.seasons.begin(), in.seasons.end());
+                in.season   = in.seasons.front();
+                in.seasonTo = in.seasons.back();
+            }
+        }
+    }
+
+    const bool parsedRussian = in.russian;
+    for (const auto& lang : meta.languages)
+    {
+        std::string l = lower(lang);
+        if (l == "rus" || l == "ru") in.russian = true;
+        else if (l == "ukr" || l == "uk" || l == "ua") in.ukrainian = true;
+    }
+
+    bool onlyForeignTrackers = !meta.trackers.empty();
+    for (const auto& t : meta.trackers)
+    {
+        if (!isForeignTracker(t))
+        {
+            onlyForeignTrackers = false;
+            break;
+        }
+    }
+
+    bool addedVoice = false;
+    for (const auto& rawV : meta.voices)
+    {
+        bool isRuVoice = false, isUkr = false;
+        std::string norm = normalizeMetaVoice(rawV, isRuVoice, isUkr);
+        if (isUkr) in.ukrainian = true;
+        if (norm.empty()) continue;
+        // Jacred maps English/anime "Dub" on foreign trackers to generic "Дубляж".
+        if (onlyForeignTrackers && !parsedRussian &&
+            norm == "\xD0\x94\xD1\x83\xD0\xB1\xD0\xBB\xD1\x8F\xD0\xB6")
+            continue;
+        std::string nl = lower(norm);
+        bool dup = false;
+        for (const auto& ex : in.voices)
+            if (lower(ex) == nl) { dup = true; break; }
+        if (!dup)
+        {
+            in.voices.push_back(std::move(norm));
+            addedVoice = addedVoice || isRuVoice;
+        }
+    }
+    if (addedVoice)
+    {
+        in.russian = true;
+        recomputeVoiceRank(in);
+    }
 }
 
 std::vector<std::string> tags(const Info& in)
@@ -450,70 +789,185 @@ std::vector<std::string> tags(const Info& in)
     return t;
 }
 
+int packEpisodeEstimate(const Info& in)
+{
+    if (in.episode > 0 && in.episodeTo > in.episode)
+        return in.episodeTo - in.episode + 1;
+    if (in.fullSeason)
+    {
+        int sc = !in.seasons.empty()
+                     ? (int)in.seasons.size()
+                     : ((in.season > 0 && in.seasonTo >= in.season)
+                            ? (in.seasonTo - in.season + 1)
+                            : 1);
+        return std::max(1, sc) * 8;
+    }
+    return 1;
+}
+
+bool isSoftwareDecodedOnSwitch(const Info& in)
+{
+    return in.codec == "AV1" || (in.codec == "H.264" && in.tenBit);
+}
+
+bool isHeavyForWifi(const Info& in, int64_t size, bool series)
+{
+    if (in.height == 2160 || in.source == "Remux") return true;
+    if (size <= 0) return false;
+    int64_t effSize = size;
+    if (series)
+    {
+        int epDiv = packEpisodeEstimate(in);
+        if (epDiv > 1) effSize /= epDiv;
+    }
+    return effSize > (series ? (10LL << 30) : (30LL << 30));
+}
+
+bool isRecommendedEligible(const Info& in, int seeders, const Want& want)
+{
+    if (in.cam) return false;
+    if (seeders == 0 && !in.seedersUnknown) return false;
+    if (want.switchProfile)
+    {
+        if (isSoftwareDecodedOnSwitch(in)) return false;
+        if (in.dolbyVision) return false;
+    }
+    return true;
+}
+
 int score(const Info& in, int seeders, int64_t size, const Want& want)
 {
-    // What it holds first: the wrong season or episode is not a choice at all.
-    if (want.series && want.season > 0 && in.season >= 0 &&
-        (want.season < in.season || want.season > in.seasonTo))
+    // Wrong season or wrong single episode: filtered out of the visible list.
+    if (want.series && want.season > 0 && in.hasAnySeason() && !in.hasSeason(want.season))
         return -1000;
-    if (want.series && want.episode > 0 && in.episode >= 0 && !in.fullSeason &&
-        (want.episode < in.episode || want.episode > in.episodeTo))
+    if (want.series && want.episode > 0 && !in.fullSeason && in.episode >= 0 &&
+        in.episode == in.episodeTo && in.episode != want.episode)
         return -1000;
-    if (in.cam) return -500;
+    if (in.cam) return -200;
+
+    // For streaming, judge a series pack by per-episode size rather than whole-pack size.
+    double effGb = size / (1024.0 * 1024.0 * 1024.0);
+    if (want.series)
+    {
+        int epDiv = packEpisodeEstimate(in);
+        if (epDiv > 1) effGb /= epDiv;
+    }
 
     int s = 0;
-    // Quality for a Switch: 1080p plays everywhere; 4K is downscaled by the
-    // dock anyway (it outputs 1080p) and costs four times the bandwidth.
-    switch (in.height)
+    if (want.switchProfile)
     {
-        case 1080: s += 40; break;
-        case 720:  s += 28; break;
-        case 2160: s += 18; break;
-        case 480:  s += 10; break;
-        default:   s += 16; break;
+        // Quality for a Switch: 1080p plays everywhere; 4K is downscaled by the
+        // dock anyway (it outputs 1080p) and costs four times the bandwidth.
+        switch (in.height)
+        {
+            case 1080: s += 40; break;
+            case 720:  s += 28; break;
+            case 2160: s += 18; break;
+            case 480:  s += 10; break;
+            default:   s += 16; break;
+        }
+        // Tegra X1 NVDEC hardware-decodes H.264 8-bit and HEVC 8/10-bit.
+        // AV1 (all bit depths) and H.264 10-bit (Hi10P) have no hardware decoder
+        // on Switch and fall back to CPU software decode (1080p AV1 10-bit drops
+        // to ~5 fps in complex scenes on stock 1.02 GHz Cortex-A57).
+        if (in.codec == "H.264")
+        {
+            if (in.tenBit) s -= (in.height > 0 && in.height <= 720) ? 35 : 60;
+            else s += 10;
+        }
+        else if (in.codec == "HEVC")
+        {
+            s += 2;
+            if (in.tenBit) s -= 4;
+        }
+        else if (in.codec == "AV1")
+        {
+            s -= (in.height > 0 && in.height <= 720) ? 75 : 110;
+            if (in.tenBit) s -= 20;
+        }
+        else
+        {
+            if (in.codec.empty() && in.height <= 1080 && !in.hdr && !in.dolbyVision && !in.tenBit)
+                s += 6;
+            if (in.tenBit) s -= 4;
+        }
+        if (in.dolbyVision) s -= 20;  // profile 5 comes out green and purple
+        else if (in.hdr) s -= 8;      // washed out without a tone-map
+
+        if (in.source == "WEB-DL") s += 8;
+        else if (in.source == "BluRay" || in.source == "BDRip") s += 6;
+        else if (in.source == "WEBRip") s += 5;
+        else if (in.source == "HDRip") s += 4;
+        else if (in.source == "Remux") s -= 15;  // 40-80 GB over Wi-Fi
+
+        if (effGb > (want.series ? 40.0 : 80.0)) s -= 20;
+        else if (effGb > (want.series ? 20.0 : 40.0)) s -= 10;
     }
-    // H.264 decodes in hardware everywhere; HEVC too, but 10-bit and HDR
-    // releases are the heavy ones; AV1 has no hardware decoder on the X1.
-    if (in.codec == "H.264") s += 10;
-    else if (in.codec == "HEVC") s += 5;
-    else if (in.codec == "AV1") s -= 20;
-    if (in.tenBit) s -= 4;
-    if (in.dolbyVision) s -= 20;  // profile 5 comes out green and purple
-    else if (in.hdr) s -= 8;      // washed out without a tone-map
-
-    if (in.source == "WEB-DL") s += 8;
-    else if (in.source == "BluRay" || in.source == "BDRip") s += 6;
-    else if (in.source == "WEBRip") s += 5;
-    else if (in.source == "Remux") s -= 15;  // 40-80 GB over Wi-Fi
-
-    if (seeders == 0) s -= 30;
-    // Seeders keep counting up to ~30: for streaming, 286 beats 19.
-    else if (seeders > 0) s += (int)std::fmin(40.0, 8.0 * std::log2(1.0 + seeders));
-
-    const double gb = size / (1024.0 * 1024.0 * 1024.0);
-    if (gb > 80) s -= 20;
-    else if (gb > 40) s -= 10;
-
-    if (want.series && want.episode > 0)
+    else
     {
-        if (in.episode == want.episode && in.episodeTo == want.episode) s += 4;
-        else if (in.fullSeason) s += 2;
+        // PC / Android: 4K, HEVC, 10-bit and HDR play well without heavy penalties.
+        switch (in.height)
+        {
+            case 2160: s += 42; break;
+            case 1080: s += 40; break;
+            case 720:  s += 24; break;
+            case 480:  s += 8; break;
+            default:   s += 16; break;
+        }
+        if (in.codec == "H.264") s += 8;
+        else if (in.codec == "HEVC") s += 8;
+        else if (in.codec == "AV1") s += 4;
+        else if (in.codec.empty() && in.height <= 1080 && !in.hdr && !in.dolbyVision) s += 6;
+        if (in.dolbyVision) s -= 8;
+        else if (in.hdr) s += 2;
+
+        if (in.source == "WEB-DL") s += 8;
+        else if (in.source == "BluRay" || in.source == "BDRip") s += 7;
+        else if (in.source == "WEBRip") s += 5;
+        else if (in.source == "HDRip") s += 4;
+        else if (in.source == "Remux") s -= 4;
+
+        if (effGb > (want.series ? 50.0 : 100.0)) s -= 12;
+        else if (effGb > (want.series ? 30.0 : 60.0)) s -= 5;
+    }
+
+    const bool dead = (seeders == 0 && !in.seedersUnknown);
+    if (dead) s -= 150;
+    else if (seeders > 0) s += (int)std::fmin(45.0, 9.0 * std::log2(1.0 + seeders));
+
+    if (want.series)
+    {
+        if (in.fullSeason)
+        {
+            bool singleSeason = (in.seasons.size() <= 1) && (in.season < 0 || in.season == in.seasonTo);
+            s += singleSeason ? 16 : 12;
+        }
+        else if (want.episode > 0)
+        {
+            if (in.episode >= 0 && in.episode <= want.episode &&
+                in.episodeTo >= want.episode && in.episodeTo > in.episode)
+                s += 8;
+            else if (in.episode == want.episode && in.episodeTo == want.episode)
+                s += 4;
+        }
     }
 
     if (!want.voice.empty())
         for (const auto& v : in.voices)
             if (v == want.voice) s += 15;
     if (!want.group.empty() && in.group == want.group) s += 10;
+
     // A Russian UI wants Russian audio: any live release with it ranks above
     // every release without it (+100 is more than quality and seeders can
     // add up to), and within that, dubbing first, then multi-, two-, single-
-    // voice. A dead one (0 seeders) gets nothing: it would never play.
-    if (want.preferRussian && in.russian && seeders != 0)
+    // voice. A dead one (0 known seeders) gets nothing: it sinks to the bottom.
+    bool hasRussian = in.russian || (want.originalRussian && !in.ukrainian);
+    if (want.preferRussian && hasRussian && !dead)
         s += 100 + (in.voiceRank == 4 ? 20 : in.voiceRank == 3 ? 15
                     : in.voiceRank == 2 ? 10 : in.voiceRank == 1 ? 5 : 0);
     // Ukrainian audio only, the UI in Russian: a working release, but rarely
     // the one wanted.
-    if (want.preferRussian && in.ukrainian && !in.russian) s -= 12;
+    if (want.preferRussian && in.ukrainian && !hasRussian) s -= 12;
     return s;
 }
 
@@ -563,36 +1017,193 @@ void fileScope(const std::string& path, int& season, int& episode)
 namespace
 {
 
-// A name for comparing: lower case, "ё" as "е", separators as single spaces,
-// " padded ", without a leading "[group]" or "the".
+char foldLatinCp(uint32_t cp)
+{
+    if (cp >= 0x00C0 && cp <= 0x00C5) return 'A';
+    if (cp == 0x00C7) return 'C';
+    if (cp >= 0x00C8 && cp <= 0x00CB) return 'E';
+    if (cp >= 0x00CC && cp <= 0x00CF) return 'I';
+    if (cp == 0x00D1) return 'N';
+    if ((cp >= 0x00D2 && cp <= 0x00D6) || cp == 0x00D8) return 'O';
+    if (cp >= 0x00D9 && cp <= 0x00DC) return 'U';
+    if (cp == 0x00DD) return 'Y';
+
+    if (cp >= 0x00E0 && cp <= 0x00E5) return 'a';
+    if (cp == 0x00E7) return 'c';
+    if (cp >= 0x00E8 && cp <= 0x00EB) return 'e';
+    if (cp >= 0x00EC && cp <= 0x00EF) return 'i';
+    if (cp == 0x00F1) return 'n';
+    if ((cp >= 0x00F2 && cp <= 0x00F6) || cp == 0x00F8) return 'o';
+    if (cp >= 0x00F9 && cp <= 0x00FC) return 'u';
+    if (cp == 0x00FD || cp == 0x00FF) return 'y';
+
+    if (cp >= 0x0100 && cp <= 0x0105) return (cp & 1) ? 'a' : 'A';
+    if (cp >= 0x0106 && cp <= 0x010D) return (cp & 1) ? 'c' : 'C';
+    if (cp >= 0x010E && cp <= 0x0111) return (cp & 1) ? 'd' : 'D';
+    if (cp >= 0x0112 && cp <= 0x011B) return (cp & 1) ? 'e' : 'E';
+    if (cp >= 0x011C && cp <= 0x0123) return (cp & 1) ? 'g' : 'G';
+    if (cp >= 0x0124 && cp <= 0x0127) return (cp & 1) ? 'h' : 'H';
+    if (cp >= 0x0128 && cp <= 0x012F) return (cp & 1) ? 'i' : 'I';
+    if (cp == 0x0130) return 'I';
+    if (cp == 0x0131) return 'i';
+    if (cp >= 0x0134 && cp <= 0x0135) return (cp & 1) ? 'j' : 'J';
+    if (cp >= 0x0136 && cp <= 0x0137) return (cp & 1) ? 'k' : 'K';
+    if (cp >= 0x0139 && cp <= 0x0142) return (cp & 1) ? 'L' : 'l';
+    if (cp >= 0x0143 && cp <= 0x0148) return (cp & 1) ? 'N' : 'n';
+    if (cp >= 0x014C && cp <= 0x0151) return (cp & 1) ? 'o' : 'O';
+    if (cp >= 0x0154 && cp <= 0x0159) return (cp & 1) ? 'r' : 'R';
+    if (cp >= 0x015A && cp <= 0x0161) return (cp & 1) ? 's' : 'S';
+    if (cp >= 0x0162 && cp <= 0x0167) return (cp & 1) ? 't' : 'T';
+    if (cp >= 0x0168 && cp <= 0x0173) return (cp & 1) ? 'u' : 'U';
+    if (cp >= 0x0174 && cp <= 0x0175) return (cp & 1) ? 'w' : 'W';
+    if (cp == 0x0176 || cp == 0x0178) return 'Y';
+    if (cp == 0x0177) return 'y';
+    if (cp >= 0x0179 && cp <= 0x017E) return (cp & 1) ? 'Z' : 'z';
+    return 0;
+}
+
+// A name for comparing: lower case, folded diacritics and "ё" -> "е",
+// separators as single spaces, " padded ", without leading "[group]" or "the".
 std::string comparable(std::string s)
 {
-    while (!s.empty() && s[0] == ' ') s.erase(0, 1);
-    if (!s.empty() && s[0] == '[')
+    while (true)
     {
-        size_t close = s.find(']');
-        if (close != std::string::npos) s.erase(0, close + 1);
-    }
-    std::string low = lower(s);
-    std::string e;
-    for (size_t i = 0; i < low.size(); i++)
-    {
-        if ((unsigned char)low[i] == 0xD1 && i + 1 < low.size() &&
-            (unsigned char)low[i + 1] == 0x91)
+        while (!s.empty() && s[0] == ' ') s.erase(0, 1);
+        if (!s.empty() && s[0] == '[')
         {
-            e += (char)0xD0;
-            e += (char)0xB5;
-            i++;
+            size_t close = s.find(']');
+            if (close != std::string::npos)
+            {
+                s.erase(0, close + 1);
+                continue;
+            }
         }
-        else
-            e += low[i];
+        break;
     }
-    std::string w = words(e);
+    std::string w = words(lower(foldAscii(s)));
     if (w.compare(0, 5, " the ") == 0) w.erase(0, 4);
     return w;
 }
 
 } // namespace
+
+std::string foldAscii(const std::string& s)
+{
+    std::string out;
+    out.reserve(s.size());
+    for (size_t i = 0; i < s.size(); i++)
+    {
+        unsigned char c = (unsigned char)s[i];
+        if (c < 0x80)
+        {
+            out += (char)c;
+            continue;
+        }
+        if ((c & 0xE0) == 0xC0 && i + 1 < s.size() && ((unsigned char)s[i + 1] & 0xC0) == 0x80)
+        {
+            uint32_t cp = ((c & 0x1F) << 6) | ((unsigned char)s[i + 1] & 0x3F);
+            if (cp == 0x0401)  // Ё -> Е
+            {
+                out += (char)0xD0;
+                out += (char)0x95;
+                i++;
+                continue;
+            }
+            if (cp == 0x0451)  // ё -> е
+            {
+                out += (char)0xD0;
+                out += (char)0xB5;
+                i++;
+                continue;
+            }
+            char ascii = foldLatinCp(cp);
+            if (ascii)
+            {
+                out += ascii;
+                i++;
+                continue;
+            }
+        }
+        out += (char)c;
+    }
+    return out;
+}
+
+bool isNonVideo(const std::string& title,
+                const std::vector<int>& categories,
+                const std::vector<std::string>& types)
+{
+    if (!categories.empty())
+    {
+        bool anyVideo = false, anyNonVideo = false;
+        for (int c : categories)
+        {
+            if (c == 0 || (c >= 2000 && c < 3000) || (c >= 5000 && c < 6000) ||
+                (c >= 8000 && c < 9000))
+                anyVideo = true;
+            else
+                anyNonVideo = true;
+        }
+        if (anyNonVideo && !anyVideo) return true;
+    }
+
+    if (!types.empty())
+    {
+        bool anyVideo = false, anyExplicitNonVideo = false;
+        for (const auto& t : types)
+        {
+            std::string lt = lower(t);
+            if (lt == "movie" || lt == "serial" || lt == "anime" ||
+                lt == "multfilm" || lt == "multserial" || lt == "documovie" ||
+                lt == "docuserial" || lt == "tvshow")
+                anyVideo = true;
+            else if (lt == "game" || lt == "games" || lt == "music" ||
+                     lt == "audio" || lt == "book" || lt == "books" ||
+                     lt == "software")
+                anyExplicitNonVideo = true;
+        }
+        if (anyExplicitNonVideo && !anyVideo) return true;
+    }
+
+    std::string low = lower(title);
+    std::string w   = words(low);
+
+    static const char* const kWords[] = {
+        "ps4", "ps5", "ps3", "ps2", "xbox", "xbox360", "x360", "nsw", "nsp",
+        "xci", "nsz", "gog", "fitgirl", "dodi", "xatab", "elamigos", "steamrip",
+        "chovka", "decepticon", "codex", "skidrow", "plaza", "hoodlum",
+        "empress", "rune", "tenoke", "audiobook", "epub", "fb2", "mobi", "djvu",
+    };
+    for (const char* k : kWords)
+        if (hasWord(w, k)) return true;
+
+    static const char* const kSubs[] = {
+        "r.g. mechanics", "rg mechanics", "r.g. catalyst", "game of the year",
+        "\xD0\xB0\xD1\x83\xD0\xB4\xD0\xB8\xD0\xBE\xD0\xBA\xD0\xBD\xD0\xB8\xD0\xB3\xD0\xB0", // аудиокнига
+        "[ru/multi]", "[pc]", "soundtrack", "original score",
+    };
+    for (const char* s : kSubs)
+        if (has(low, s)) return true;
+
+    bool hasVideoTag = has(low, "1080p") || has(low, "720p") || has(low, "2160p") ||
+                       has(low, "480p") || has(low, "web-dl") || has(low, "webrip") ||
+                       has(low, "bdrip") || has(low, "bluray") || has(low, "remux") ||
+                       has(low, "hdtv") || has(low, "dvdrip") || has(low, "hdrip") ||
+                       has(low, ".mkv") || has(low, ".mp4") || has(low, ".avi") ||
+                       has(low, "h264") || has(low, "h.264") || has(low, "x264") ||
+                       has(low, "h265") || has(low, "h.265") || has(low, "x265") ||
+                       has(low, "hevc") || hasWord(w, "avc") || hasWord(w, "av1") ||
+                       hasWord(w, "av01");
+    if (!hasVideoTag)
+    {
+        if (hasWord(w, "ost") || hasWord(w, "flac") || hasWord(w, "pdf"))
+            return true;
+        if (hasWord(w, "repack") && (hasWord(w, "license") || hasWord(w, "goty") ||
+                                     hasWord(w, "steam") || has(low, "build ")))
+            return true;
+    }
+    return false;
+}
 
 bool titleMatches(const std::string& name, const std::vector<std::string>& titles)
 {

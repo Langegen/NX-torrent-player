@@ -55,13 +55,11 @@ int main(int argc, char* argv[]) {
         auto& p = entry.path();
         if (!fs::is_regular_file(p)) continue;
 
-        auto path = fs::canonical(fs::absolute(entry.path()));
-        auto relativePath = fs::relative(entry.path(), fs::absolute(argv[2]));
-
-        if (path.filename().string() == ".DS_Store") {
-            std::printf("[libromfs] SKIP: %s\n", relativePath.string().c_str());
-            continue ;
+        if (entry.path().filename().string() == ".DS_Store" || entry.path().filename().string() == ".gitignore") {
+            continue;
         }
+
+        auto relativePath = entry.path().lexically_relative(argv[2]);
 
         outputFile << "static std::array<std::uint8_t, " << fs::file_size(p) + 1 << "> " << "resource_" + std::string(argv[1]) + "_" << identifierCount << " = {\n";
         outputFile << "    ";

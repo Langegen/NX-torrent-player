@@ -1,0 +1,124 @@
+plugins {
+    id 'com.android.application'
+}
+
+configurations {
+    mpvAar
+}
+
+android {
+    namespace = "com.nxtorrent.player"
+    compileSdkVersion 34
+    buildToolsVersion "34.0.0"
+    defaultConfig {
+        applicationId = "com.nxtorrent.player"
+        minSdkVersion 26
+        targetSdkVersion 34
+        versionCode 3
+        versionName "1.3.0"
+        ndkVersion "25.2.9519653"
+        ndk {
+            abiFilters 'armeabi-v7a', 'arm64-v8a'
+        }
+        externalNativeBuild {
+            cmake {
+                arguments "-DANDROID_PLATFORM=android-26",
+                          "-DANDROID_STL=c++_static",
+                          "-DCMAKE_WARN_DEPRECATED=FALSE",
+                          "-DMPV_LIBS_DIR=${buildDir}/mpv-libs"
+                if (System.getenv("TMDB_API_KEY")) {
+                    arguments "-DTMDB_API_KEY=${System.getenv('TMDB_API_KEY')}"
+                }
+                if (System.getenv("GDRIVE_CLIENT_ID")) {
+                    arguments "-DGDRIVE_CLIENT_ID=${System.getenv('GDRIVE_CLIENT_ID')}"
+                }
+                if (System.getenv("GDRIVE_CLIENT_SECRET")) {
+                    arguments "-DGDRIVE_CLIENT_SECRET=${System.getenv('GDRIVE_CLIENT_SECRET')}"
+                }
+                abiFilters 'armeabi-v7a', 'arm64-v8a'
+                version = '3.22.1'
+            }
+        }
+    }
+    def releaseKeystorePath = System.getenv("ANDROID_KEYSTORE_PATH") ?: "borealis.jks"
+    def releaseKeystoreFile = file(releaseKeystorePath)
+
+    signingConfigs {
+        release {
+            // keytool -genkey -alias borealis -keyalg RSA -keysize 2048 -keypass password -keystore borealis.jks -storepass password -validity 10000
+            storeFile releaseKeystoreFile
+            storePassword System.getenv("ANDROID_KEYSTORE_PASSWORD") ?: 'password'
+            keyAlias System.getenv("ANDROID_KEY_ALIAS") ?: 'borealis'
+            keyPassword System.getenv("ANDROID_KEY_PASSWORD") ?: 'password'
+            enableV1Signing = true
+            enableV2Signing = true
+            enableV3Signing = true
+        }
+    }
+    buildTypes {
+        release {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+            if (releaseKeystoreFile.exists()) {
+                signingConfig signingConfigs.release
+            } else if (System.getenv("GITHUB_REF_TYPE") == "tag") {
+                throw new GradleException("Release keystore missing at ${releaseKeystoreFile}; refusing to sign release tag with debug key.")
+            } else {
+                logger.warn("Release keystore not found at ${releaseKeystoreFile}; falling back to debug signing config.")
+                signingConfig signingConfigs.debug
+            }
+        }
+    }
+    packaging {
+        jniLibs {
+            pickFirsts += ['**/libc++_shared.so']
+        }
+    }
+    if (!project.hasProperty('EXCLUDE_NATIVE_LIBS')) {
+        applicationVariants.all { variant ->
+            tasks["merge${variant.name.capitalize()}Assets"]
+                .dependsOn("externalNativeBuild${variant.name.capitalize()}")
+        }
+        sourceSets.main {
+            jniLibs.srcDirs = ['libs', "${buildDir}/mpv-libs"]
+        }
+        externalNativeBuild {
+            cmake {
+                path 'jni/CMakeLists.txt'
+                version = '3.22.1'
+            }
+        }
+    }
+    lint {
+        abortOnError = false
+    }
+}
+
+tasks.register('extractMpvLibs', Copy) {
+    from({ zipTree(configurations.mpvAar.singleFile) }) {
+        include 'jni/arm64-v8a/*.so'
+        include 'jni/armeabi-v7a/*.so'
+        exclude '**/libplayer.so'
+        eachFile { f ->
+            f.path = f.path.replaceFirst('^jni/', '')
+        }
+    }
+    includeEmptyDirs = false
+    into "${buildDir}/mpv-libs"
+}
+
+tasks.matching { t ->
+    t.name.startsWith('configureCMake') ||
+    t.name.startsWith('buildCMake') ||
+    t.name.startsWith('externalNativeBuild') ||
+    (t.name.startsWith('merge') && t.name.endsWith('JniLibFolders'))
+}.configureEach {
+    dependsOn extractMpvLibs
+}
+
+dependencies {
+    implementation fileTree(include: ['*.jar'], dir: 'libs')
+    mpvAar('dev.jdtech.mpv:libmpv:1.0.0') {
+        transitive = false
+    }
+}

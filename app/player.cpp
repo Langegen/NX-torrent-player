@@ -5,10 +5,22 @@
 #include <cstring>
 
 
+#ifdef __SWITCH__
 #include <switch.h>  // appletSetMediaPlaybackState (keep the screen awake)
+#endif
 
+#ifdef __SDL2__
+#include <SDL.h>
+#ifdef USE_GLES2
+#include <GLES2/gl2.h>
+#include <GLES2/gl2ext.h>
+#elif defined(USE_GLES3)
+#include <GLES3/gl3.h>
+#endif
+#else
 #include <glad/glad.h>
 #include <GLFW/glfw3.h>
+#endif
 
 #ifdef ABSOLUTE
 #undef ABSOLUTE
@@ -30,18 +42,24 @@
 #include <ctime>
 
 #include "appdata.hpp"
+#if defined(__ANDROID__) || defined(ANDROID)
+#include "android_bridge.hpp"
+#endif
 #include "browse.hpp"  // openEpisodeById, for the next-episode card
 #include "config.hpp"
 #include "history.hpp"
 #include "library.hpp"
+#include "platform_ui.hpp"
 #include "sources.hpp"  // openNextEpisode
 #include "http.hpp"
 #include "torrserver.hpp"
 #include "stremio.hpp"  // cached artwork -> blurred background
 #include "theme.hpp"    // muted text for the in-menu hints
 #include "player_widgets.hpp"
+#include "widgets.hpp"
 #include "release.hpp"  // episodeOfFile: which episode a file of a pack is
 #include "torrent_play.hpp"  // videoFilesOf, for the episode list
+#include "sync/sync_manager.hpp"
 
 extern "C" {
 #include "torrentfs.h"
@@ -82,8 +100,12 @@ namespace
 {
 void* getProcAddress(void*, const char* name)
 {
+#ifdef __SDL2__
+    return SDL_GL_GetProcAddress(name);
+#else
     glfwGetCurrentContext();
     return (void*)glfwGetProcAddress(name);
+#endif
 }
 
 // Seconds of video mpv must buffer before playback starts (and the loading
@@ -147,8 +169,12 @@ std::string speedLabel(size_t i)
 // is safe on a per-frame path -- unlike the nifm call that used to freeze it.
 bool audioBoostWanted()
 {
+#ifdef __SWITCH__
     return config::get().audioBoost
            && appletGetOperationMode() == AppletOperationMode_Handheld;
+#else
+    return config::get().audioBoost;
+#endif
 }
 
 // Analog scrubbing. Rate is (tilt^2) * base, so a light push creeps and a full
@@ -164,6 +190,14 @@ constexpr double kSeekAccelSecs  = 4.0;   // seconds of holding to reach it
 constexpr float kStickStep     = 0.5f;
 constexpr int kStickRepeatMs   = 420;  // first repeat
 constexpr int kStickRepeatNext = 160;  // then every
+
+// Double-tap-to-seek (Android player style): left/right 35% zones jump -/+10s,
+// rapid taps chain and commit in one seek after input settles.
+constexpr double kDoubleTapStepSecs = 10.0;
+constexpr int kDoubleTapWindowMs    = 280;
+constexpr int kDoubleTapCommitMs    = 650;
+constexpr int kDoubleTapFadeMs      = 250;
+constexpr float kDoubleTapZoneFrac  = 0.35f;
 
 // Material Icons padlock glyphs (present in the bundled MaterialIcons-Regular.ttf,
 // same font as the Options gear): the control-lock pill shows the open one as a
@@ -215,11 +249,13 @@ class PlayPauseButton : public brls::Box
 // and a plain true/false pair turned the flag off under the new episode.
 void keepAwake(int delta)
 {
+#ifdef __SWITCH__
     static int players = 0;  // UI thread only
     int before = players;
     players += delta;
     if (players < 0) players = 0;
     if ((before > 0) != (players > 0)) appletSetMediaPlaybackState(players > 0);
+#endif
 }
 
 // Pops `n` activities back-to-back, then runs `then`. A free function, not a
@@ -451,6 +487,21 @@ MpvView::MpvView(const std::string& source, const PlayerArt& art,
     }
     registerPlayerActions();
 
+#if defined(__ANDROID__) || defined(ANDROID)
+    focusSub = brls::Application::getWindowFocusChangedEvent()->subscribe(
+        [this](bool focused) {
+            if (!focused && mpv && ready && !userPaused)
+            {
+                userPaused = true;
+                mpv_set_property_string(mpv, "pause", "yes");
+                setControlsVisible(true);
+                maybePushWatchState(true);
+                maybeUpdateHistory(true);
+            }
+        });
+    focusSubscribed = true;
+#endif
+
     startEngine(source, fileIndex);
 }
 
@@ -525,7 +576,12 @@ void MpvView::startEngine(const std::string& source, int fileIndex)
     auto job      = std::make_shared<EngineOpen>();
     engineOpen    = job;
     // Latched into the engine at open; read from config here, on the UI thread.
-    int ramStream     = config::get().ramStream ? 1 : 0;
+    // Applet mode only has ~440 MB total RAM, so RAM streaming would starve
+    // nvtegra NVDEC surface pools or OOM during playback.
+    bool applet       = config::isAppletMode();
+    int ramStream     = (config::get().ramStream && !applet) ? 1 : 0;
+    if (config::get().ramStream && applet)
+        brls::Logger::warning("[player] applet mode: disabling RAM streaming to avoid OOM");
     int64_t streamWin = (int64_t)config::bufferPreset().streamWindowMiB * 1024 * 1024;
     // On the worker pool: a magnet open is tens of seconds, and on
     // brls::async it held up every save and the next player's open behind it.
@@ -572,6 +628,10 @@ void MpvView::startEngine(const std::string& source, int fileIndex)
                 return;
             }
             tfs = t;
+            // Strict SHA-1 verification: never feed unverified peer blocks or
+            // assembling piece buffers to mpv in RAM mode. Corrupt reference
+            // frames in HEVC cause grey macroblocks/chroma smears and nvtegra hangs.
+            torrentfs_set_strict_verify(t, 1);
             // Incoming peers (the listen port) are routed to it from now on.
             engine_register_torrent(t);
             startupMark("torrent open: metadata ready, dialing peers");
@@ -615,16 +675,26 @@ bool MpvView::startMpv()
     mpv_set_option_string(mpv, "vo", "libmpv");
     // Hardware decode by default (Options -> Hardware decoding). Software decode
     // ("no") sidesteps the nvtegra/GPU path -- a way to test whether the random
-    // freezes come from it.
+    // freezes come from it. Note: switch-ffmpeg's nvtegra backend allocates
+    // its HW frames pool dynamically (initial_pool_size == 0), so
+    // hwdec-extra-frames has no effect on Switch and is omitted.
     bool hwDec = config::get().hwDecode;
+#if defined(__ANDROID__) || defined(ANDROID)
+    mpv_set_option_string(mpv, "hwdec", hwDec ? "auto-copy" : "no");
+#else
     mpv_set_option_string(mpv, "hwdec", hwDec ? "auto" : "no");
-    if (hwDec)
-        mpv_set_option_string(mpv, "hwdec-extra-frames", "24");
+#endif
     // Force 8-bit RGBA for intermediate FBOs. mpv defaults to rgba16hf
     // (64 bits per pixel), which costs 16.6 MB per 1080p frame and starves the
     // Tegra X1 memory bus when docked. The display output is 8-bit RGBA anyway.
     mpv_set_option_string(mpv, "fbo-format", "rgba8");
     mpv_set_option_string(mpv, "config", "no");
+#if defined(__ANDROID__) || defined(ANDROID)
+    // Android uses AudioTrack/OpenSL ES and needs subfont.ttf + system fonts for ASS/SRT subs.
+    mpv_set_option_string(mpv, "ao", "audiotrack,opensles");
+    mpv_set_option_string(mpv, "config-dir", androidStoragePath());
+    mpv_set_option_string(mpv, "sub-fonts-dir", "/system/fonts");
+#endif
     mpv_set_option_string(mpv, "terminal", "no");
     // Switch audio output is strictly 48kHz stereo; resample all audio to 48kHz
     // upfront to eliminate clock drift between media stream and the hardware audio driver.
@@ -640,6 +710,18 @@ bool MpvView::startMpv()
     mpv_set_option_string(mpv, "video-sync", "audio");
     mpv_set_option_string(mpv, "autosync", "30");
     mpv_set_option_string(mpv, "framedrop", "vo");
+    // Never let FFmpeg drop frames inside the decoder: skipping non-ref/B
+    // frames can still break HEVC temporal MV prediction on reference frames.
+    mpv_set_option_string(mpv, "vd-lavc-framedrop", "none");
+#ifdef __SWITCH__
+    // Match the Switch's 3 application CPU cores for software decode/fallback
+    // so FFmpeg does not oversubscribe alongside the torrent engine and UI.
+    mpv_set_option_string(mpv, "vd-lavc-threads", "3");
+#endif
+    // Non-blocking libmpv render (paired with MPV_RENDER_PARAM_BLOCK_FOR_TARGET_TIME=0):
+    // Borealis drives the 60 Hz swap loop; letting mpv sleep for target time
+    // stalls the UI/render thread.
+    mpv_set_option_string(mpv, "video-timing-offset", "0");
     // Even so a 5.1 master downmixed to stereo sits well below a native stereo
     // track on the Switch's own speakers, which is what the boost is for (see
     // audioBoostWanted -- handheld only, and switchable in Options). Kept in
@@ -697,12 +779,20 @@ bool MpvView::startMpv()
     // UTF-8 file is still read as UTF-8. CP1252 is the right guess for the
     // languages this app offers; a Cyrillic or Greek subtitle would still need
     // its own, which is a setting nobody has asked for yet.
+#if defined(__ANDROID__) || defined(ANDROID)
+    mpv_set_option_string(mpv, "sub-codepage",
+                          i18n::lang() == "ru" ? "cp1251" : "cp1252");
+#else
     mpv_set_option_string(mpv, "sub-codepage", "cp1252");
+#endif
     mpv_set_option_string(mpv, "cache", "yes");
-    // Never let mpv auto-pause playback to rebuffer -- once we start, we keep
-    // playing. We do the initial buffering ourselves: start paused, fill the
-    // demuxer cache, then unpause on reveal (see updateLoadingOverlay/draw).
-    mpv_set_option_string(mpv, "cache-pause", "no");
+    // Initial buffering is still controlled by our loading overlay (we start
+    // paused until startTargetSecs()), so cache-pause-initial stays off.
+    // Mid-playback underruns cleanly pause and rebuffer 2 s instead of
+    // starving the decoder/audio pipeline into freezes and A/V desync.
+    mpv_set_option_string(mpv, "cache-pause", "yes");
+    mpv_set_option_string(mpv, "cache-pause-initial", "no");
+    mpv_set_option_string(mpv, "cache-pause-wait", "2");
     mpv_set_option_string(mpv, "pause", "yes");
     // Give the demuxer enough headroom to buffer bufferSecs() before we
     // unpause. The sizes come from Options -> Buffer size.
@@ -720,11 +810,14 @@ bool MpvView::startMpv()
     // What was already played stays in the demuxer cache (mpv's default 50 MiB
     // is ~40 s of 1080p): a rewind inside it is instant, and for a direct link
     // it is the only copy -- the engine's back window covers torrents beyond it.
-    mpv_set_option_string(mpv, "demuxer-max-back-bytes", "128MiB");
+    mpv_set_option_string(mpv, "demuxer-max-back-bytes",
+                          config::isAppletMode() ? "32MiB" : "128MiB");
+#if !defined(__ANDROID__) && !defined(ANDROID)
     // On Switch the hardware decoder's GPU work is async; without a glFinish
     // after mpv's render, glfwSwapBuffers can present before the video is drawn
     // (black frame). This is what the other Switch mpv players set too.
     mpv_set_option_string(mpv, "opengl-glfinish", "yes");
+#endif
     // Disable direct rendering: in libmpv without MPV_RENDER_PARAM_ADVANCED_CONTROL,
     // vd-lavc-dr causes buffer reuse conflicts, macroblock corruption and artifacts
     // during software decoding or decoder fallback.
@@ -791,6 +884,7 @@ bool MpvView::startMpv()
     // lag spikes. Property-change events arrive through pumpEvents instead.
     mpv_observe_property(mpv, 0, "demuxer-cache-duration", MPV_FORMAT_DOUBLE);
     mpv_observe_property(mpv, 0, "demuxer-cache-idle", MPV_FORMAT_FLAG);
+    mpv_observe_property(mpv, 0, "paused-for-cache", MPV_FORMAT_FLAG);
     mpv_observe_property(mpv, 0, "time-pos", MPV_FORMAT_DOUBLE);
     mpv_observe_property(mpv, 0, "duration", MPV_FORMAT_DOUBLE);
     // The decoded picture's width: above 1080p the scalers go cheap.
@@ -945,8 +1039,14 @@ void MpvView::registerPlayerActions()
     }
 }
 
+bool MpvView::hasOverlay() const
+{
+    return overlayDepth > 0 || !ui::isOnTop(const_cast<MpvView*>(this));
+}
+
 bool MpvView::command(Cmd c)
 {
+    if (hasOverlay()) return true;
     if (c == Cmd::Lock)
     {
         toggleLock();
@@ -1171,6 +1271,7 @@ void MpvView::toggleLock()
     {
         // Locking: leave any scrub/pause state and hide the panel so the video
         // runs undisturbed. A blocked input then only flashes the lock pill.
+        singleTapPending = false;
         if (seeking) cancelSeek();
         if (userPaused && mpv)
         {
@@ -1219,6 +1320,7 @@ void MpvView::onPlayPause()
 {
     if (!ready || !mpv)
         return;
+    singleTapPending = false;
     if (seeking)
     {
         commitSeek();
@@ -1240,8 +1342,9 @@ void MpvView::commitSeek()
 {
     if (!seeking || !mpv)
         return;
-    seeking  = false;
-    seekHold = false;
+    seeking   = false;
+    seekHold  = false;
+    dtSeeking = false;
     char t[32];
     std::snprintf(t, sizeof(t), "%.3f", seekTarget);
     const char* cmd[] = { "seek", t, "absolute", nullptr };
@@ -1269,6 +1372,8 @@ void MpvView::commitSeek()
 
 void MpvView::cancelSeek()
 {
+    dtSeeking = false;
+    if (seekRipple) seekRipple->clear();
     if (!seeking)
         return;
     seeking  = false;
@@ -1282,6 +1387,8 @@ void MpvView::cancelSeek()
 
 void MpvView::stepSeek(int dir, bool toTimeline)
 {
+    dtSeeking = false;
+    if (seekRipple) seekRipple->clear();
     if (!seeking)
     {
         beginSeek(false);
@@ -1307,6 +1414,9 @@ void MpvView::seekToFraction(double frac)
 {
     if (!ready || !mpv || obsDur <= 0.0)
         return;
+    singleTapPending = false;
+    dtSeeking        = false;
+    if (seekRipple) seekRipple->clear();
     if (frac < 0.0) frac = 0.0;
     if (frac > 1.0) frac = 1.0;
     if (!seeking) beginSeek(false);
@@ -1414,6 +1524,7 @@ bool MpvView::subsOn() const
 void MpvView::toggleSubtitles()
 {
     if (!ready || !mpv) return;
+    singleTapPending = false;
     if (subsOn())
     {
         lastSid = std::strtoll(obsSid.c_str(), nullptr, 10);
@@ -1468,6 +1579,7 @@ void MpvView::setZone(Zone z)
 
 void MpvView::activateButton(int b)
 {
+    singleTapPending = false;
     switch (b)
     {
         case BTN_PREV:     goToEpisode(-1); break;
@@ -1793,7 +1905,7 @@ void MpvView::updateNextCard()
     if (!nextCard) return;
 
     double left = obsDur - obsPos;
-    bool want   = ready && !ended && !switching && !settingsOpen && isEpisodic() && hasNextEpisode()
+    bool want   = ready && !ended && !switching && !hasOverlay() && isEpisodic() && hasNextEpisode()
                 && obsDur > 0.0 && left > 0.0 && left <= kNextCardSecs;
     // Ride above the panel while it is up, so the two never overlap.
     if (want)
@@ -1833,7 +1945,7 @@ void MpvView::updateSleepTimer()
         userPaused = true;
         mpv_set_property_string(mpv, "pause", "yes");
     }
-    if (!settingsOpen) setControlsVisible(true);
+    if (!hasOverlay()) setControlsVisible(true);
     maybePushWatchState(true);
     maybeUpdateHistory(true);
     // After this frame: the pause and the panel are drawn before it sleeps.
@@ -2330,6 +2442,12 @@ brls::Box* sidePanel(const std::string& titleText, brls::Box* content,
             return true;
         },
         false, false, brls::SOUND_BACK);
+    // Absorb D-pad left/right on non-stepper rows (e.g. "Reset all") so
+    // background player actions never see them.
+    panel->registerAction("", brls::BUTTON_LEFT, [](brls::View*) { return true; }, true, true,
+                          brls::SOUND_NONE);
+    panel->registerAction("", brls::BUTTON_RIGHT, [](brls::View*) { return true; }, true, true,
+                          brls::SOUND_NONE);
 
     auto* title = new brls::Label();
     title->setText(titleText);
@@ -2441,9 +2559,12 @@ void MpvView::openChoicePanel(const std::string& titleText,
                               const std::vector<std::string>& details, int current,
                               std::function<void(int)> onPick)
 {
+    if (hasOverlay()) return;
+    singleTapPending = false;
+    if (seeking) cancelSeek();
     controlsBeforePanel = controlsShown;
     setControlsVisible(false);
-    settingsOpen = true;
+    overlayDepth++;
 
     brls::Box* panel = nullptr;
     auto* content    = new brls::Box();
@@ -2453,7 +2574,7 @@ void MpvView::openChoicePanel(const std::string& titleText,
     auto liveFlag = this->alive;
     brls::Application::pushActivity(new PlayerSettingsActivity(root, [this, liveFlag]() {
         if (!*liveFlag) return;
-        settingsOpen = false;
+        if (overlayDepth > 0) overlayDepth--;
         if (controlsBeforePanel) setControlsVisible(true);
     }));
 }
@@ -2557,7 +2678,7 @@ void MpvView::openEpisodesPanel()
 
 void MpvView::openTrackMenu()
 {
-    if (!ready || !mpv)
+    if (!ready || !mpv || hasOverlay())
         return;
 
     // Playback is deliberately NOT paused here. The panel leaves the picture
@@ -2565,9 +2686,11 @@ void MpvView::openTrackMenu()
     // can only be judged against moving video. The control panel does come
     // down, though: it would be clutter over the very frame this exists to
     // let you watch.
+    singleTapPending = false;
+    if (seeking) cancelSeek();
     controlsBeforePanel = controlsShown;
     setControlsVisible(false);
-    settingsOpen = true;
+    overlayDepth++;
 
     TrackList tracks = readTracks();
 
@@ -2664,6 +2787,33 @@ void MpvView::openTrackMenu()
             applyVideoSize(n);
             return true;
         }));
+
+    // Live hardware decoding toggle: lets users immediately test/switch to
+    // software decode on problematic HEVC streams without leaving the player.
+    auto setHwDecode = [this](bool on) {
+        if (config::get().hwDecode == on) return;
+        config::get().hwDecode = on;
+        config::save();
+        if (mpv)
+        {
+#if defined(__ANDROID__) || defined(ANDROID)
+            mpv_set_property_string(mpv, "hwdec", on ? "auto-copy" : "no");
+#else
+            mpv_set_property_string(mpv, "hwdec", on ? "auto" : "no");
+#endif
+        }
+        brls::Logger::info("[player] hardware decoding -> {}", on ? "auto" : "no");
+    };
+    content->addView(new StepperCell(
+        tr("Hardware decoding"),
+        []() { return std::string(config::get().hwDecode ? tr("On") : tr("Off")); },
+        [setHwDecode](int d) {
+            bool want = d > 0;
+            if (config::get().hwDecode == want) return false;
+            setHwDecode(want);
+            return true;
+        },
+        [setHwDecode]() { setHwDecode(!config::get().hwDecode); }));
 
     // The picture on the console's own screen (picture.hpp): one row here,
     // the four settings a level below (openPicturePanel), so they do not
@@ -2845,7 +2995,7 @@ void MpvView::openTrackMenu()
         new PlayerSettingsActivity(root, [this, liveFlag, panelAlive]() {
             *panelAlive = false;
             if (!*liveFlag) return;
-            settingsOpen = false;
+            if (overlayDepth > 0) overlayDepth--;
             subDelaySink = nullptr;  // the row it fed is about to be freed
             if (pictureDirty)
             {
@@ -2897,11 +3047,14 @@ void MpvView::openPicturePanel(brls::View* under, std::shared_ptr<bool> underAli
     });
     content->addView(reset);
 
+    overlayDepth++;
+    auto liveFlag = this->alive;
     // The settings panel sits right under this one at the same place, and is
     // translucent: hidden, or its rows show through.
     under->setVisibility(brls::Visibility::INVISIBLE);
     brls::Application::pushActivity(
-        new PlayerSettingsActivity(root, [under, underAlive, onClose]() {
+        new PlayerSettingsActivity(root, [this, liveFlag, under, underAlive, onClose]() {
+            if (*liveFlag && overlayDepth > 0) overlayDepth--;
             if (!*underAlive) return;
             under->setVisibility(brls::Visibility::VISIBLE);
             if (onClose) onClose();
@@ -2912,6 +3065,17 @@ MpvView::~MpvView()
 {
     brls::Logger::info("[teardown] ~MpvView enter");
 
+    if (focusSubscribed)
+    {
+        brls::Application::getWindowFocusChangedEvent()->unsubscribe(focusSub);
+        focusSubscribed = false;
+    }
+    if (resizeSubscribed)
+    {
+        brls::Application::getWindowSizeChangedEvent()->unsubscribe(resizeSub);
+        resizeSubscribed = false;
+    }
+
     // Playback is ending: let the OS dim/sleep on idle again -- unless the
     // next episode's player, built before this one is destroyed, is up.
     keepAwake(-1);
@@ -2921,6 +3085,7 @@ MpvView::~MpvView()
     // and the push itself runs on a background thread with no reference to us.
     maybePushWatchState(true);
     maybeUpdateHistory(true);
+    cloud_sync::triggerAutoSync();
     if (pictureDirty) config::save();  // the panel closes with the player
 
     // Tell any in-flight startEngine() that we are gone, so it closes the engine
@@ -2986,12 +3151,14 @@ void MpvView::pumpEvents()
     // Pause when the console takes focus away (HOME menu / overlay), so the video
     // does not keep playing -- and its audio blaring -- in the background. Left
     // paused; the user resumes with A or a tap when they come back.
+#ifdef __SWITCH__
     if (ready && !userPaused && appletGetFocusState() != AppletFocusState_InFocus)
     {
         userPaused = true;
         mpv_set_property_string(mpv, "pause", "yes");
         setControlsVisible(true);
     }
+#endif
 
     // The boost follows the dock state, which can change mid-film -- putting the
     // console on the dock has to drop it, and taking it off has to bring it
@@ -3126,16 +3293,40 @@ void MpvView::pumpEvents()
                 break;
             }
             case MPV_EVENT_PLAYBACK_RESTART:
-                // First frame is decoded, but with cache-pause-initial mpv is
-                // still buffering-paused here; readiness is driven off buffered
-                // seconds in updateLoadingOverlay(), not this event.
-                brls::Logger::info("[mpv event] playback restart (first frame)");
+            {
+                // First frame is decoded (or decoder restarted after seek/hwdec switch):
+                // log the active decoder/codec/pixelformat once rather than polling per-frame.
+                char* hwc = mpv_get_property_string(mpv, "hwdec-current");
+                char* vc  = mpv_get_property_string(mpv, "video-codec");
+                char* vf  = mpv_get_property_string(mpv, "video-format");
+                char* pf  = mpv_get_property_string(mpv, "video-params/pixelformat");
+                obsVideoFormat = vf ? vf : "";
+                obsPixFmt      = pf ? pf : "";
+                bool sw        = (!hwc || !hwc[0] || std::strcmp(hwc, "no") == 0);
+                softwareDecode = sw;
+                if (lastVideoWidth > 0)
+                    applyRenderLoad(lastVideoWidth);
+#ifdef __SWITCH__
+                if (sw && config::get().hwDecode && !swDecodeWarned && !obsVideoFormat.empty())
+                    swDecodeWarnPending = true;
+#endif
+                brls::Logger::info("[mpv event] playback restart (hwdec={}, codec={}, pixfmt={})",
+                                   hwc ? hwc : "none", vc ? vc : "-", pf ? pf : "-");
+                if (hwc) mpv_free(hwc);
+                if (vc)  mpv_free(vc);
+                if (vf)  mpv_free(vf);
+                if (pf)  mpv_free(pf);
                 break;
+            }
             case MPV_EVENT_LOG_MESSAGE:
             {
                 auto* m = (mpv_event_log_message*)ev->data;
-                brls::Logger::debug("[mpv:{}] {}: {}", m->level, m->prefix,
-                                    m->text);
+                if (m->log_level <= MPV_LOG_LEVEL_ERROR)
+                    brls::Logger::error("[mpv:{}] {}: {}", m->level, m->prefix, m->text);
+                else if (m->log_level <= MPV_LOG_LEVEL_WARN)
+                    brls::Logger::warning("[mpv:{}] {}: {}", m->level, m->prefix, m->text);
+                else
+                    brls::Logger::debug("[mpv:{}] {}: {}", m->level, m->prefix, m->text);
                 break;
             }
             case MPV_EVENT_PROPERTY_CHANGE:
@@ -3165,6 +3356,9 @@ void MpvView::pumpEvents()
                 else if (p->format == MPV_FORMAT_FLAG &&
                          std::strcmp(p->name, "demuxer-cache-idle") == 0)
                     obsCacheIdle = *(int*)p->data != 0;
+                else if (p->format == MPV_FORMAT_FLAG &&
+                         std::strcmp(p->name, "paused-for-cache") == 0)
+                    obsPausedForCache = *(int*)p->data != 0;
                 else if (p->format == MPV_FORMAT_INT64 &&
                          std::strcmp(p->name, "file-size") == 0)
                     obsFileSize = *(int64_t*)p->data;
@@ -3195,7 +3389,7 @@ void MpvView::pumpEvents()
 // that stretch as well.
 void MpvView::applyBackWindow()
 {
-    if (!tfs || obsDur < 60.0) return;
+    if (!tfs || obsDur < 60.0 || config::isAppletMode()) return;
     constexpr double kRewindSecs = 150.0;
     const double rate = (double)torrentfs_size(tfs) / obsDur;   // bytes/s
     const config::BufferPreset buf = config::bufferPreset();
@@ -3204,6 +3398,28 @@ void MpvView::applyBackWindow()
     if (ahead > aheadMax) ahead = aheadMax;
     torrentfs_set_back_window(tfs, (int64_t)(ahead + rate * kRewindSecs));
 }
+
+namespace
+{
+std::string shortCodecLabel(const std::string& fmt, const std::string& pixFmt)
+{
+    std::string out;
+    if (fmt == "av1") out = "AV1";
+    else if (fmt == "h264") out = "H.264";
+    else if (fmt == "hevc") out = "HEVC";
+    else if (fmt == "vp9") out = "VP9";
+    else if (fmt == "vp8") out = "VP8";
+    else
+    {
+        out = fmt;
+        for (char& c : out) c = (char)std::toupper((unsigned char)c);
+    }
+    if (!out.empty() &&
+        (pixFmt.find("p10") != std::string::npos || pixFmt.find("010") != std::string::npos))
+        out += " 10-bit";
+    return out;
+}
+} // namespace
 
 // The scalers for a picture `width` pixels wide. Up to 1080p mpv's own
 // (lanczos / hermite) cost little: the frame is at most the screen's size.
@@ -3223,11 +3439,13 @@ void MpvView::applyRenderLoad(int64_t width)
     // Docked mode (1080p output): 2.25x the pixels of handheld; Lanczos upscaling
     // (for <= 720p) or chroma scaling (for 1080p YUV 4:2:0) over 2 million pixels
     // chokes the Tegra X1 GPU. Bilinear is hardware-accelerated for free.
-    bool light = (width > 1920) || docked;
+    // Software decode also switches to bilinear to spare shared LPDDR4 bandwidth.
+    bool light = (width > 1920) || docked || softwareDecode;
     if (light == lightScalers) return;
     lightScalers = light;
-    brls::Logger::info("[player] {}px wide video (docked: {}): {} scalers", width,
-                       docked ? "yes" : "no", light ? "bilinear" : "default");
+    brls::Logger::info("[player] {}px wide video (docked: {}, sw: {}): {} scalers", width,
+                       docked ? "yes" : "no", softwareDecode ? "yes" : "no",
+                       light ? "bilinear" : "default");
     const char* up   = light ? "bilinear" : "lanczos";
     const char* down = light ? "bilinear" : "hermite";
     mpv_set_property_string(mpv, "scale", up);
@@ -3301,26 +3519,46 @@ void MpvView::buildLoadingOverlay(const std::string& title)
     column->setJustifyContent(brls::JustifyContent::CENTER);
     column->setAlignItems(brls::AlignItems::CENTER);
     column->setGrow(1.0f);
-    column->setPadding(0, 60, 0, 60);
+    float loadPad = (platform_ui::isMobile() && platform_ui::isPortrait()) ? 28.0f : 60.0f;
+    column->setPadding(0, loadPad, 0, loadPad);
     loadingOverlay->addView(column);
 
-    // The poster when the caller knows what we're playing, otherwise the app
-    // logo (bundled at romfs:/NX-torrent-player-bg-rounded.png).
-    auto* logo = new brls::Image();
+    // The poster when the caller knows what we're playing, otherwise a vector
+    // app mark on mobile or the bundled logo on Switch/desktop.
     if (!art.posterPath.empty())
     {
+        auto* logo = new brls::Image();
         logo->setImageFromFile(art.posterPath);
         logo->setDimensions(148.0f, 222.0f);  // posters are 2:3
         logo->setCornerRadius(8.0f);           // rounded poster corners
+        logo->setScalingType(brls::ImageScalingType::FIT);
+        logo->setMargins(0, 0, 28, 0);
+        column->addView(logo);
+    }
+    else if (platform_ui::isMobile())
+    {
+        struct AppMarkBox : public brls::Box
+        {
+            void draw(NVGcontext* vg, float x, float y, float w, float h,
+                      brls::Style, brls::FrameContext*) override
+            {
+                theme::drawAppMark(vg, x, y, std::min(w, h));
+            }
+        };
+        auto* mark = new AppMarkBox();
+        mark->setDimensions(112.0f, 112.0f);
+        mark->setMargins(0, 0, 28, 0);
+        column->addView(mark);
     }
     else
     {
+        auto* logo = new brls::Image();
         logo->setImageFromRes("NX-torrent-player-bg-rounded.png");
         logo->setDimensions(148.0f, 148.0f);
+        logo->setScalingType(brls::ImageScalingType::FIT);
+        logo->setMargins(0, 0, 28, 0);
+        column->addView(logo);
     }
-    logo->setScalingType(brls::ImageScalingType::FIT);
-    logo->setMargins(0, 0, 28, 0);
-    column->addView(logo);
 
     auto* titleLabel = new brls::Label();
     titleLabel->setText(title);
@@ -3380,14 +3618,23 @@ void MpvView::buildLoadingOverlay(const std::string& title)
     spinner->animate(true);
     column->addView(spinner);
 
-    // Hint that B cancels and returns to the list.
-    auto* backHint = new brls::Label();
-    backHint->setText(tr("Press B to go back"));
-    backHint->setFontSize(18);
-    backHint->setTextColor(dimText);
-    backHint->setHorizontalAlign(brls::HorizontalAlign::CENTER);
-    backHint->setMargins(40, 0, 0, 0);
-    column->addView(backHint);
+    // Hint that B cancels and returns to the list (clickable button on mobile).
+    if (platform_ui::isMobile())
+    {
+        auto* backBtnLoad = ui::actionButton(tr("Back"), false, [this]() { onBack(); });
+        backBtnLoad->setMargins(34.0f, 0.0f, 0.0f, 0.0f);
+        column->addView(backBtnLoad);
+    }
+    else
+    {
+        auto* backHint = new brls::Label();
+        backHint->setText(tr("Press B to go back"));
+        backHint->setFontSize(18);
+        backHint->setTextColor(dimText);
+        backHint->setHorizontalAlign(brls::HorizontalAlign::CENTER);
+        backHint->setMargins(40, 0, 0, 0);
+        column->addView(backHint);
+    }
 
     this->addView(loadingOverlay);
 
@@ -3421,6 +3668,15 @@ void MpvView::buildLoadingOverlay(const std::string& title)
     bufferOverlay->addView(bufLabel);
 
     this->addView(bufferOverlay);
+
+    // Double-tap seek feedback overlay (click-through via SeekRipple::hitTest).
+    seekRipple = new player_ui::SeekRipple();
+    seekRipple->setPositionType(brls::PositionType::ABSOLUTE);
+    seekRipple->setPositionTop(0.0f);
+    seekRipple->setPositionLeft(0.0f);
+    seekRipple->setWidthPercentage(100.0f);
+    seekRipple->setHeightPercentage(100.0f);
+    this->addView(seekRipple);
 
     // Centre play/pause button, shown with the controls overlay. The overlay box
     // spans the screen (to centre the button) but is NOT tappable itself -- only
@@ -3475,12 +3731,15 @@ void MpvView::buildLoadingOverlay(const std::string& title)
     lockHint->setAlignItems(brls::AlignItems::CENTER);
     lockHint->setVisibility(brls::Visibility::GONE);
     {
-        auto* y = new brls::Label();
-        y->setText("\xEE\x83\xA3");  // borealis font: the Y button glyph (U+E0E3)
-        y->setFontSize(26.0f);
-        y->setTextColor(nvgRGB(255, 255, 255));
-        y->setMargins(0.0f, 12.0f, 0.0f, 0.0f);
-        lockHint->addView(y);
+        if (!platform_ui::isMobile())
+        {
+            auto* y = new brls::Label();
+            y->setText("\xEE\x83\xA3");  // borealis font: the Y button glyph (U+E0E3)
+            y->setFontSize(26.0f);
+            y->setTextColor(nvgRGB(255, 255, 255));
+            y->setMargins(0.0f, 12.0f, 0.0f, 0.0f);
+            lockHint->addView(y);
+        }
 
         // Padlock glyph (Material Icons): open = a hint that Y locks; closed =
         // locked. Nudged down a touch like the gear, which sits high in its box.
@@ -3495,7 +3754,7 @@ void MpvView::buildLoadingOverlay(const std::string& title)
         lockText->setText("");
         lockText->setFontSize(20.0f);
         lockText->setTextColor(nvgRGB(255, 255, 255));
-        lockText->setMargins(0.0f, 0.0f, 0.0f, 14.0f);
+        lockText->setMargins(0.0f, 0.0f, 0.0f, platform_ui::isMobile() ? 10.0f : 14.0f);
         lockHint->addView(lockText);
     }
     topRight->addView(lockHint);
@@ -3559,8 +3818,8 @@ void MpvView::buildLoadingOverlay(const std::string& title)
         headRow->setAlignItems(brls::AlignItems::CENTER);
 
         auto* glyph = new brls::Label();
-        glyph->setText("\xEE\x83\xA0");  // U+E0E0, the A button
-        glyph->setFontSize(26.0f);
+        glyph->setText(platform_ui::isMobile() ? "\xE2\x96\xB6" : "\xEE\x83\xA0");
+        glyph->setFontSize(platform_ui::isMobile() ? 20.0f : 26.0f);
         glyph->setTextColor(nvgRGB(255, 255, 255));
         glyph->setMarginRight(10.0f);
         headRow->addView(glyph);
@@ -3584,6 +3843,7 @@ void MpvView::buildLoadingOverlay(const std::string& title)
     // paused (A resumes then).
     nextCard->addGestureRecognizer(
         new brls::TapGestureRecognizer(nextCard, [this]() {
+            singleTapPending = false;
             if (controlsLocked) { flashLock(); return; }
             goToEpisode(+1);
         }));
@@ -3593,14 +3853,14 @@ void MpvView::buildLoadingOverlay(const std::string& title)
     buildControls();
 
     // --- Touch controls --------------------------------------------------
-    // Tap the video to show/hide the panel. Taps on the children (the buttons,
-    // the timeline, the centre play button, the lock pill) interrupt this one
-    // -- borealis lets a child gesture win over its ancestor -- so they act on
-    // their own areas instead of toggling the panel.
-    this->addGestureRecognizer(
-        new brls::TapGestureRecognizer(this, [this]() {
-            if (controlsLocked) { flashLock(); return; }
-            if (ready) setControlsVisible(!controlsShown);
+    // Tap the video to show/hide the panel; double-tap left/right to seek
+    // -/+10s. Taps on the children (buttons, timeline, centre play button,
+    // lock pill) interrupt this one -- borealis lets a child gesture win over
+    // its ancestor -- so they act on their own areas.
+    this->addGestureRecognizer(new brls::TapGestureRecognizer(
+        [this](brls::TapGestureStatus status, brls::Sound* sound) {
+            if (status.state != brls::GestureState::END) return;
+            onVideoTap(status.position, sound);
         }));
 
     // Tap the padlock pill to toggle the lock -- like the Y button, and NOT
@@ -3609,7 +3869,10 @@ void MpvView::buildLoadingOverlay(const std::string& title)
     // it then unlocks.)
     if (lockHint)
         lockHint->addGestureRecognizer(
-            new brls::TapGestureRecognizer(lockHint, [this]() { toggleLock(); }));
+            new brls::TapGestureRecognizer(lockHint, [this]() {
+                singleTapPending = false;
+                toggleLock();
+            }));
 
     // Semi-transparent network/torrent info panel, toggled with ZR. Two columns:
     // the network/worker counters alone are longer than the screen is tall, so a
@@ -3813,7 +4076,7 @@ void MpvView::updateBufferIndicator()
     // stream is struggling); hide it once it recovers. Small hysteresis so it
     // doesn't flicker.
     double secs = obsCacheSecs;  // async-observed; no sync mpv call per frame
-    bool stalling = buffering ? (secs < 1.0) : (secs < 0.25);
+    bool stalling = obsPausedForCache || (buffering ? (secs < 1.0) : (secs < 0.25));
     if (stalling != buffering)
     {
         buffering = stalling;
@@ -4138,10 +4401,15 @@ void MpvView::updateInfoOverlay()
     }
     if (dl.empty()) dl = "-";
 
+    std::string codecLine = obsVideoFormat.empty() ? "-" : obsVideoFormat;
+    if (!obsVideoFormat.empty() && !obsPixFmt.empty())
+        codecLine += " (" + obsPixFmt + ")";
+
     char right[1536];
     std::snprintf(right, sizeof(right),
                   "VIDEO\n"
                   "%lldx%lld @ %.3f fps\n"
+                  "Codec: %s\n"
                   "Decode: %s\n"
                   "Dropped: %lld (decoder %lld)\n"
                   "RAM buffer: %.0f MB\n"
@@ -4162,6 +4430,7 @@ void MpvView::updateInfoOverlay()
                   "DOWNLOADING\n"
                   "%s",
                   (long long)w, (long long)h, fps,
+                  codecLine.c_str(),
                   hw, (long long)drop, (long long)decDrop,
                   (double)ramBytes / (1024.0 * 1024.0),
                   torrentfs_name(tfs),
@@ -4435,8 +4704,132 @@ void MpvView::beginSeek(bool pause)
 void MpvView::updateSeekCommit()
 {
     if (!seeking || seekHold) return;
-    auto idle = std::chrono::steady_clock::now() - seekLastInput;
-    if (idle >= std::chrono::milliseconds(seekPaused ? 1200 : 900)) commitSeek();
+    auto idle  = std::chrono::steady_clock::now() - seekLastInput;
+    int waitMs = seekPaused ? 1200 : (dtSeeking ? kDoubleTapCommitMs : 900);
+    if (idle >= std::chrono::milliseconds(waitMs)) commitSeek();
+}
+
+void MpvView::onVideoTap(brls::Point pos, brls::Sound* sound)
+{
+    if (hasOverlay()) return;
+    if (controlsLocked)
+    {
+        singleTapPending = false;
+        flashLock();
+        return;
+    }
+    if (!ready || !mpv) return;
+
+    float w  = getWidth();
+    float rx = (w > 0.0f) ? (pos.x - getX()) / w : 0.5f;
+    int dir  = (rx < kDoubleTapZoneFrac) ? -1 : (rx > 1.0f - kDoubleTapZoneFrac ? 1 : 0);
+    if (obsDur <= 0.0) dir = 0;
+    // Empty areas of the visible bars should only toggle the panel, not seek.
+    if (controlsShown &&
+        ((topBar && topBar->getFrame().pointInside(pos)) ||
+         (bottomBar && bottomBar->getFrame().pointInside(pos))))
+        dir = 0;
+
+    auto now = std::chrono::steady_clock::now();
+    if (dtSeeking)
+    {
+        if (dir != 0 && dir == dtDir)
+        {
+            singleTapPending = false;
+            applyDoubleTapSeek(dir, pos);
+            if (sound) *sound = brls::SOUND_FOCUS_CHANGE;
+            return;
+        }
+        if (dir != 0 && dir != dtDir)
+        {
+            commitSeek();
+            // Fall through to arm singleTapPending for the opposite side.
+        }
+        else
+        {
+            commitSeek();
+            setControlsVisible(!controlsShown);
+            return;
+        }
+    }
+
+    if (singleTapPending)
+    {
+        auto elapsed =
+            std::chrono::duration_cast<std::chrono::milliseconds>(now - singleTapAt).count();
+        if (dir != 0 && dir == singleTapDir && elapsed <= kDoubleTapWindowMs)
+        {
+            singleTapPending = false;
+            dtSeeking        = true;
+            dtDir            = dir;
+            dtStartPos       = seeking ? seekTarget : obsPos;
+            applyDoubleTapSeek(dir, pos);
+            if (sound) *sound = brls::SOUND_FOCUS_CHANGE;
+            return;
+        }
+        if (dir == 0)
+        {
+            singleTapPending = false;
+            setControlsVisible(!controlsShown);
+            return;
+        }
+        singleTapPending = true;
+        singleTapDir     = dir;
+        singleTapAt      = now;
+        return;
+    }
+
+    if (dir == 0)
+    {
+        setControlsVisible(!controlsShown);
+        return;
+    }
+    singleTapPending = true;
+    singleTapDir     = dir;
+    singleTapAt      = now;
+}
+
+void MpvView::applyDoubleTapSeek(int dir, brls::Point pos)
+{
+    if (!seeking)
+    {
+        beginSeek(false);
+        seekSteps  = 0;
+        dtStartPos = seekTarget;
+    }
+    seekTarget += dir * kDoubleTapStepSecs;
+    if (seekTarget < 0.0) seekTarget = 0.0;
+    if (seekDur > 0.0 && seekTarget > seekDur) seekTarget = seekDur;
+    auto now      = std::chrono::steady_clock::now();
+    dtLastTapAt   = now;
+    seekLastInput = now;
+    if (controlsShown) pokeControls();
+
+    double delta = seekTarget - dtStartPos;
+    int secs     = (int)std::round(std::fabs(delta));
+    std::string dStr =
+        (secs > 0)
+            ? (std::string(delta >= 0.0 ? "+" : "-") + std::to_string(secs) + tr(" s"))
+            : "";
+    if (seekRipple)
+        seekRipple->trigger(dir, dStr, fmtTime(seekTarget), pos, kDoubleTapCommitMs,
+                            kDoubleTapFadeMs);
+}
+
+void MpvView::updateDoubleTap()
+{
+    if (singleTapPending)
+    {
+        if (hasOverlay() || controlsLocked || !ready)
+            singleTapPending = false;
+        else if (std::chrono::steady_clock::now() - singleTapAt >=
+                 std::chrono::milliseconds(kDoubleTapWindowMs))
+        {
+            singleTapPending = false;
+            setControlsVisible(!controlsShown);
+        }
+    }
+    if (dtSeeking && !seeking) dtSeeking = false;
 }
 
 // The sticks, driven every frame from the axes rather than from button events:
@@ -4455,10 +4848,12 @@ void MpvView::updateStickSeek()
     // A side panel has the cursor, but the stick is polled straight off the
     // controller rather than routed through focus -- so without this it would
     // go on scrubbing the video from under an open menu. The push in progress
-    // is dropped: it belonged to the panel.
-    if (settingsOpen)
+    // is dropped and the stick must return to centre before acting again.
+    if (hasOverlay())
     {
-        stickMode = StickMode::None;
+        stickMode        = StickMode::None;
+        seekHeld         = 0.0;
+        stickWaitNeutral = true;
         return;
     }
 
@@ -4473,6 +4868,15 @@ void MpvView::updateStickSeek()
     float ax = std::fabs(x), ay = std::fabs(y);
 
     bool pushed = ax >= kStickDeadzone || ay >= kStickDeadzone;
+
+    if (stickWaitNeutral)
+    {
+        if (!pushed) stickWaitNeutral = false;
+        stickWasPushed = pushed;
+        stickMode      = StickMode::None;
+        seekHeld       = 0.0;
+        return;
+    }
 
     // Locked: the stick is a blocked input like any other, so it flashes the
     // pill. Once per push, not once per frame: re-arming the timer every frame
@@ -4603,19 +5007,29 @@ void MpvView::buildControls()
     top->setPadding(36.0f, 60.0f, 0.0f, 60.0f);
     top->setVisibility(brls::Visibility::GONE);
     {
-        auto* left = new brls::Box();
-        left->setAxis(brls::Axis::COLUMN);
-        left->setGrow(1.0f);
-        left->setShrink(1.0f);
-        left->setMarginRight(30.0f);
+#if defined(__ANDROID__) || defined(ANDROID)
+        backBtn = new player_ui::Button(player_ui::Icon::Back, tr("Back"), 48.0f);
+        backBtn->setMargins(0.0f, 14.0f, 0.0f, -6.0f);
+        backBtn->addGestureRecognizer(new brls::TapGestureRecognizer(backBtn, [this]() {
+            singleTapPending = false;
+            if (controlsLocked) { flashLock(); return; }
+            brls::Application::popActivity();
+        }));
+        top->addView(backBtn);
+#endif
+
+        topLeft = new brls::Box();
+        topLeft->setAxis(brls::Axis::COLUMN);
+        topLeft->setGrow(1.0f);
+        topLeft->setShrink(1.0f);
+        topLeft->setMarginRight(30.0f);
 
         barTitle = new brls::Label();
         barTitle->setText(pauseTitle);
         barTitle->setFontSize(28.0f);
         barTitle->setTextColor(white);
         barTitle->setSingleLine(true);
-        barTitle->setMaxWidth(900.0f);
-        left->addView(barTitle);
+        topLeft->addView(barTitle);
 
         // The episode, or the file of the pack that is playing.
         barSubtitle = new brls::Label();
@@ -4627,12 +5041,11 @@ void MpvView::buildControls()
         barSubtitle->setFontSize(18.0f);
         barSubtitle->setTextColor(dim);
         barSubtitle->setSingleLine(true);
-        barSubtitle->setMaxWidth(900.0f);
         barSubtitle->setMarginTop(6.0f);
         barSubtitle->setVisibility(sub.empty() ? brls::Visibility::GONE
                                                : brls::Visibility::VISIBLE);
-        left->addView(barSubtitle);
-        top->addView(left);
+        topLeft->addView(barSubtitle);
+        top->addView(topLeft);
 
         auto* right = new brls::Box();
         right->setAxis(brls::Axis::COLUMN);
@@ -4686,7 +5099,7 @@ void MpvView::buildControls()
     bot->setPadding(0.0f, 60.0f, 28.0f, 60.0f);
     bot->setVisibility(brls::Visibility::GONE);
 
-    auto* timeRow = new brls::Box();
+    timeRow = new brls::Box();
     timeRow->setAxis(brls::Axis::ROW);
     timeRow->setAlignItems(brls::AlignItems::CENTER);
     timeRow->setHeight(44.0f);
@@ -4758,6 +5171,7 @@ void MpvView::buildControls()
             auto* b = new player_ui::Button(d.icon, d.caption, d.size);
             int id  = d.id;
             b->addGestureRecognizer(new brls::TapGestureRecognizer(b, [this, id]() {
+                singleTapPending = false;
                 if (controlsLocked && id != BTN_LOCK) { flashLock(); return; }
                 focusBtn = id;
                 zone     = Zone::Buttons;
@@ -4781,6 +5195,7 @@ void MpvView::buildControls()
     subChip->setPositionType(brls::PositionType::ABSOLUTE);
     subChip->setVisibility(brls::Visibility::GONE);
     subChip->addGestureRecognizer(new brls::TapGestureRecognizer(subChip, [this]() {
+        singleTapPending = false;
         if (controlsLocked) { flashLock(); return; }
         pokeControls();
         toggleSubtitles();
@@ -4791,12 +5206,14 @@ void MpvView::buildControls()
     // on release -- one seek instead of one per pixel.
     timeRow->addGestureRecognizer(new brls::TapGestureRecognizer(
         [this](brls::TapGestureStatus status, brls::Sound*) {
+            singleTapPending = false;
             if (controlsLocked) { flashLock(); return; }
             if (status.state != brls::GestureState::END || !timeline) return;
             seekToFraction(timeline->fractionAt(status.position.x));
         }));
     timeRow->addGestureRecognizer(new brls::PanGestureRecognizer(
         [this](brls::PanGestureStatus status, brls::Sound*) {
+            singleTapPending = false;
             if (controlsLocked) { flashLock(); return; }
             if (!ready || !mpv || !timeline || obsDur <= 0.0) return;
             double frac = timeline->fractionAt(status.position.x);
@@ -4812,6 +5229,8 @@ void MpvView::buildControls()
                 seekHold = false;  // let go some other way: the timer does it
                 return;
             }
+            dtSeeking = false;
+            if (seekRipple) seekRipple->clear();
             // Pause while aiming, like the stick -- without it the video kept
             // playing under the preview and the two fought.
             if (!seeking) beginSeek(true);
@@ -4824,7 +5243,77 @@ void MpvView::buildControls()
         },
         brls::PanAxis::HORIZONTAL));
 
+    updateControlsLayout();
+    resizeSub = brls::Application::getWindowSizeChangedEvent()->subscribe(
+        [this]() { updateControlsLayout(); });
+    resizeSubscribed = true;
+
     refreshButtons();
+}
+
+void MpvView::updateControlsLayout()
+{
+    bool portrait = brls::Application::contentHeight > brls::Application::contentWidth;
+    if (topBar)
+    {
+        topBar->setPadding(portrait ? 24.0f : 36.0f,
+                           portrait ? 20.0f : 60.0f, 0.0f,
+                           portrait ? 20.0f : 60.0f);
+        topBar->setHeight(portrait ? 130.0f : 160.0f);
+    }
+    if (topLeft)
+        topLeft->setMarginRight(portrait ? 12.0f : 30.0f);
+    if (backBtn)
+    {
+        float bs = portrait ? 42.0f : 48.0f;
+        backBtn->setDimensions(bs, bs);
+        backBtn->setMargins(0.0f, portrait ? 10.0f : 14.0f, 0.0f, -6.0f);
+    }
+    if (barTitle) barTitle->setFontSize(portrait ? 22.0f : 28.0f);
+    if (barSubtitle) barSubtitle->setFontSize(portrait ? 15.0f : 18.0f);
+    if (barClock) barClock->setFontSize(portrait ? 22.0f : 28.0f);
+    if (barBatteryPct)
+    {
+        barBatteryPct->setFontSize(portrait ? 16.0f : 20.0f);
+        barBatteryPct->setMarginRight(portrait ? 10.0f : 22.0f);
+    }
+    if (barEnds)
+        barEnds->setFontSize(portrait ? 14.0f : 17.0f);
+    if (bottomBar)
+    {
+        bottomBar->setPadding(0.0f, portrait ? 20.0f : 60.0f,
+                              portrait ? 20.0f : 28.0f,
+                              portrait ? 20.0f : 60.0f);
+        bottomBar->setHeight(portrait ? 186.0f : 236.0f);
+    }
+    if (timeRow)
+        timeRow->setMarginBottom(portrait ? 14.0f : 28.0f);
+    if (timeCur)
+    {
+        timeCur->setWidth(portrait ? 72.0f : 100.0f);
+        timeCur->setFontSize(portrait ? 17.0f : 21.0f);
+    }
+    if (timeTotal)
+    {
+        timeTotal->setWidth(portrait ? 72.0f : 100.0f);
+        timeTotal->setFontSize(portrait ? 17.0f : 21.0f);
+    }
+    if (timeline)
+        timeline->setMargins(0.0f, portrait ? 8.0f : 16.0f,
+                             0.0f, portrait ? 8.0f : 16.0f);
+    for (int i = 0; i < BTN_COUNT; i++)
+    {
+        if (!buttons[i]) continue;
+        float sz = portrait ? (i == BTN_PLAY ? 52.0f : 42.0f)
+                            : (i == BTN_PLAY ? 72.0f : 60.0f);
+        float mg = portrait ? 2.5f : 6.0f;
+        buttons[i]->setDimensions(sz, sz);
+        buttons[i]->setMargins(0.0f, mg, 0.0f, mg);
+    }
+    if (nextCard)
+        nextCard->setPositionRight(portrait ? 20.0f : 60.0f);
+    if (bufferOverlay)
+        bufferOverlay->setPositionRight(portrait ? 20.0f : 60.0f);
 }
 
 // Per frame while the panel is up: the timeline, the times, the clock.
@@ -4939,9 +5428,11 @@ void renderMpvFrame(NVGcontext* vg, mpv_render_context* rctx)
     mfbo.h               = (int)brls::Application::windowHeight;
     mfbo.internal_format = 0;
     int flip             = 1;
+    int block            = 0;
     mpv_render_param params[] = {
         { MPV_RENDER_PARAM_OPENGL_FBO, &mfbo },
         { MPV_RENDER_PARAM_FLIP_Y, &flip },
+        { MPV_RENDER_PARAM_BLOCK_FOR_TARGET_TIME, &block },
         { MPV_RENDER_PARAM_INVALID, nullptr },
     };
 
@@ -4997,7 +5488,8 @@ void MpvView::draw(NVGcontext* vg, float x, float y, float width, float height,
     // gamepad press after that is consumed just to switch back -- so A took two
     // presses to pause/resume once the screen had been tapped. Nothing here uses
     // touch, so keep it in GAMEPAD mode; the next A then acts on the first press.
-    if (brls::Application::getInputType() == brls::InputType::TOUCH)
+    // Do not override input mode while an overlay panel is open on top of us.
+    if (!hasOverlay() && brls::Application::getInputType() == brls::InputType::TOUCH)
         brls::Application::setInputType(brls::InputType::GAMEPAD);
 
     // No render context yet: the engine is still opening (a magnet spends up to
@@ -5041,11 +5533,21 @@ void MpvView::draw(NVGcontext* vg, float x, float y, float width, float height,
         loadingOverlay->setVisibility(brls::Visibility::GONE);
         overlayHidden = true;
     }
+    if (overlayHidden && swDecodeWarnPending && !swDecodeWarned)
+    {
+        swDecodeWarnPending = false;
+        swDecodeWarned      = true;
+        std::string msg = std::string(tr("No HW decode (")) +
+                          shortCodecLabel(obsVideoFormat, obsPixFmt) +
+                          tr(") \xE2\x80\x94 may lag");
+        flashPill(msg, 5000);
+    }
     if (overlayHidden)
         updateBufferIndicator();
     if (ready)
         updateStickSeek();  // must run every frame: the stick is an axis, not an event
     updateSeekCommit();    // a seek that has been aimed, once input stops
+    updateDoubleTap();     // delayed single-tap toggle after double-tap window
     updateControls();      // the panel's timeline, times and clock
     updateControlsAutoHide();  // hide the panel after a few seconds of playback
     updateLockHint();  // fades the lock flash out after its moment

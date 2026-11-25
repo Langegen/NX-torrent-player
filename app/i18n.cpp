@@ -4,6 +4,7 @@
 
 #include "config.hpp"
 #include "i18n_tables.hpp"
+#include "platform_ui.hpp"
 
 namespace
 {
@@ -129,6 +130,7 @@ const Entry kFr[] = {
     { "Sleep timer: one minute left", "Minuterie de veille : encore une minute" },
     { "End of the video", "Fin de la vidéo" },
     { " min", " min" },
+    { " s", " s" },
     { "When it ends", "À la fin" },
     { "When a video ends", "À la fin d'une vidéo" },
     { "Back to the menu", "Retour au menu" },
@@ -380,6 +382,7 @@ const Entry kFr[] = {
     { "Movies", "Films" },
     { "Series", "Séries" },
     { "Anime", "Anime" },
+    { "Sort: Recommended", "Tri : Recommandé" },
     { "Sort: Seeders", "Tri : Seeders" },
     { "Sort: Size", "Tri : Taille" },
     { "Sort: Date", "Tri : Date" },
@@ -585,8 +588,19 @@ const Entry kFr[] = {
     { "best choice", "meilleur choix" },
     { "whole season", "saison complète" },
     { "several seasons", "plusieurs saisons" },
+    { "no HW decode", "sans décod. mat." },
     { "heavy for Wi-Fi", "lourd pour le Wi-Fi" },
+    { "No HW decode (", "Sans décod. mat. (" },
+    { ") \xE2\x80\x94 may lag", ") \xE2\x80\x94 ralentissements possibles" },
     { "seeds ", "seeds " },
+    { "seeds ?", "seeds ?" },
+    { "Order: date", "Ordre : date" },
+    { "Alive (>0)", "Actifs (>0)" },
+    { "Custom search", "Recherche" },
+    { "Custom search query", "Requête personnalisée" },
+    { "Leave empty to restore automatic search", "Laissez vide pour la recherche auto" },
+    { "Season", "Saison" },
+    { "All seasons", "Toutes saisons" },
     { "searching addons...", "recherche dans les addons..." },
     { "Any picture", "Toute image" },
     { "Any source", "Toute source" },
@@ -677,6 +691,58 @@ const Entry kFr[] = {
     { "Locked", "Verrouillé" },
     { "Clipboard is empty or does not contain text.", "Le presse-papiers est vide ou ne contient pas de texte." },
 
+    // ---- cloud synchronization --------------------------------------------
+    { "Cloud synchronization", "Synchronisation cloud" },
+    { "Sync", "Synchronisation" },
+    { "Service", "Service" },
+    { "Disabled", "Désactivé" },
+    { "Automatic sync", "Synchronisation automatique" },
+    { "Sync bookmarks and history on startup and when finishing a video.",
+      "Synchronise les favoris et l'historique au démarrage et à la fin d'une vidéo." },
+    { "Create a free OAuth 2.0 Client ID (TVs and Limited Input devices) in Google Cloud Console with Google Drive API enabled.",
+      "Créez un Client ID OAuth 2.0 gratuit (TV et appareils à saisie limitée) dans Google Cloud Console avec l'API Google Drive activée." },
+    { "Enter OAuth Client ID and Client Secret first (Google Cloud Console: TVs and Limited Input devices).",
+      "Renseignez d'abord l'OAuth Client ID et le Client Secret (Google Cloud Console : TV et appareils à saisie limitée)." },
+    { "Connected", "Connecté" },
+    { "Google Drive connection successful!", "Connexion à Google Drive réussie !" },
+    { "Sign out", "Se déconnecter" },
+    { "Signed out of Google Drive", "Déconnecté de Google Drive" },
+    { "Sign in to Google Drive", "Se connecter à Google Drive" },
+    { "Google Drive connected successfully!", "Google Drive connecté avec succès !" },
+    { "Sign in with your phone or PC by scanning the QR code or entering the device code.",
+      "Connectez-vous avec votre téléphone ou PC en scannant le code QR ou en saisissant le code." },
+    { "Preset", "Modèle" },
+    { "Custom", "Personnalisé" },
+    { "WebDAV Server URL", "URL du serveur WebDAV" },
+    { "Username / Email", "Nom d'utilisateur / E-mail" },
+    { "Your cloud login", "Votre identifiant cloud" },
+    { "App password", "Mot de passe d'application" },
+    { "App password / token", "Mot de passe d'application / jeton" },
+    { "Generated in cloud security settings", "Généré dans les paramètres de sécurité du cloud" },
+    { "For Yandex Disk or Mail.ru, create and use an App Password.",
+      "Pour Yandex Disk ou Mail.ru, créez et utilisez un mot de passe d'application." },
+    { "WebDAV credentials not set", "Identifiants WebDAV non renseignés" },
+    { "WebDAV connection successful!", "Connexion WebDAV réussie !" },
+    { "Actions & Status", "Actions et état" },
+    { "Last synced", "Dernière synchronisation" },
+    { "Last error", "Dernière erreur" },
+    { "Never", "Jamais" },
+    { "Sync now", "Synchroniser maintenant" },
+    { "Syncing...", "Synchronisation..." },
+    { "Synchronization complete!", "Synchronisation terminée !" },
+    { "Sync failed: ", "Échec de la synchronisation : " },
+    { "Google Drive Error: ", "Erreur Google Drive : " },
+    { "Requesting Google authorization code...", "Demande du code d'autorisation Google..." },
+    { "1. Scan QR or open: ", "1. Scannez le QR ou ouvrez : " },
+    { "2. Enter code: ", "2. Saisissez le code : " },
+    { "Open in Browser", "Ouvrir dans le navigateur" },
+    { "Code copied to clipboard. Complete sign-in in your browser...",
+      "Code copié dans le presse-papiers. Terminez la connexion dans votre navigateur..." },
+    { "Waiting for approval on your device...", "En attente de validation sur votre appareil..." },
+    { "Network error, retrying...", "Erreur réseau, nouvelle tentative..." },
+    { "Authorization code expired. Close and try again.", "Le code d'autorisation a expiré. Fermez et réessayez." },
+    { "Authorization expired or failed", "Autorisation expirée ou échouée" },
+
     // ---- player, updater & misc -------------------------------------------
     { "Connecting...", "Connexion..." },
     { "Connection lost, reconnecting...", "Connexion perdue, reconnexion..." },
@@ -754,8 +820,9 @@ const std::vector<std::string>& langLabels()
     static const std::vector<std::string> v = [] {
         const std::string c = config::effectiveUiLang("auto");
         const char* name = c == "ru" ? "Русский" : c == "fr" ? "Français" : "English";
-        return std::vector<std::string>{ std::string(tr("Console language")) + " (" +
-                                             name + ")",
+        const char* prefix = platform_ui::isMobile() ? tr("System language")
+                                                     : tr("Console language");
+        return std::vector<std::string>{ std::string(prefix) + " (" + name + ")",
                                          "English", "Français", "Русский" };
     }();
     return v;

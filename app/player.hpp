@@ -22,6 +22,7 @@ namespace player_ui
 class Battery;
 class Button;
 class Chip;
+class SeekRipple;
 class Timeline;
 }
 
@@ -258,10 +259,11 @@ class MpvView : public brls::Box
     brls::Label* nextCardSub = nullptr;  // "Season 1 . Episode 4"
     bool nextCardShown       = false;
 
-    // The settings panel is up. Suppresses the per-frame stick scrub, which is
-    // polled straight off the controller and so would otherwise keep seeking
-    // the video from under a menu that has the cursor.
-    bool settingsOpen = false;
+    // Count of open player side panels (settings, picture, choice panels).
+    // Combined with !ui::isOnTop(this) in hasOverlay() so any overlay activity
+    // above the player blocks commands, stick scrubbing, and touch-mode forcing.
+    int overlayDepth = 0;
+    bool hasOverlay() const;
 
     // A pill, top centre, that shows what an L/R press just did and fades out
     // again. Text only: it says "Subtitles +0.10 s" or "Speed 1.25x", which
@@ -273,11 +275,23 @@ class MpvView : public brls::Box
     bool pillFlashActive     = false;
     std::chrono::steady_clock::time_point pillFlashUntil;
 
-    // Touch controls: tap the video to show/hide the panel, tap the timeline to
-    // jump to that point, tap a button to run it.
+    // Touch controls: tap the video to show/hide the panel, double-tap left/right
+    // to rewind/forward 10s (Android player style), tap the timeline to jump to
+    // that point, tap a button to run it.
     void onPlayPause();                 // toggle pause (or commit a pending seek)
     void setControlsVisible(bool show); // the panel: title bar + timeline + buttons
     void seekToFraction(double frac);   // seek to frac (0..1) of the duration
+    void onVideoTap(brls::Point pos, brls::Sound* sound);
+    void applyDoubleTapSeek(int dir, brls::Point pos);
+    void updateDoubleTap();
+    bool singleTapPending = false;
+    int singleTapDir      = 0;
+    std::chrono::steady_clock::time_point singleTapAt;
+    bool dtSeeking        = false;
+    int dtDir             = 0;
+    double dtStartPos     = 0.0;
+    std::chrono::steady_clock::time_point dtLastTapAt;
+    player_ui::SeekRipple* seekRipple = nullptr;
 
     // ---- The control panel (modelled on Lampa's player) -------------------
     // A title bar on top (title, episode, clock, when it ends) and at the
@@ -306,6 +320,7 @@ class MpvView : public brls::Box
         SubChip,  // the "subtitles off/on" chip over the subtitles button
     };
     void buildControls();
+    void updateControlsLayout();
     void updateControls();          // per frame while shown: times, clock, knob
     void refreshButtons();          // which are there, which has the cursor
     bool buttonAvailable(int b);
@@ -316,9 +331,12 @@ class MpvView : public brls::Box
     Zone zone    = Zone::Buttons;
     int focusBtn = BTN_PLAY;
     player_ui::Button* buttons[BTN_COUNT] = {};
-    player_ui::Timeline* timeline = nullptr;
+    player_ui::Button* backBtn            = nullptr;
+    player_ui::Timeline* timeline         = nullptr;
     brls::Box* topBar        = nullptr;
+    brls::Box* topLeft       = nullptr;
     brls::Box* bottomBar     = nullptr;
+    brls::Box* timeRow       = nullptr;
     brls::Label* barTitle    = nullptr;
     brls::Label* barSubtitle = nullptr;
     brls::Label* barClock    = nullptr;
@@ -330,6 +348,10 @@ class MpvView : public brls::Box
     brls::Label* timeTotal   = nullptr;
     std::chrono::steady_clock::time_point clockLast;
     bool clockValid = false;
+    brls::Event<bool>::Subscription focusSub;
+    brls::VoidEvent::Subscription resizeSub;
+    bool focusSubscribed  = false;
+    bool resizeSubscribed = false;
 
     // Small side panels for one choice each (Lampa opens one per button):
     // the audio track, the subtitles, the episode. The X panel still has
@@ -378,8 +400,13 @@ class MpvView : public brls::Box
     int videoSize = 0;
     void applyVideoSize(int mode);
 
-    // Bilinear scalers for video above 1080p (4K), mpv's own below.
-    bool lightScalers = false;
+    // Bilinear scalers for video above 1080p (4K), docked mode, or software decode.
+    bool lightScalers        = false;
+    bool softwareDecode      = false;
+    bool swDecodeWarned      = false;
+    bool swDecodeWarnPending = false;
+    std::string obsVideoFormat;  // mpv "video-format" (e.g. "av1", "h264", "hevc")
+    std::string obsPixFmt;       // mpv "video-params/pixelformat" (e.g. "yuv420p10le")
     int64_t lastVideoWidth = 0;
     void applyRenderLoad(int64_t width);
     // Sizes the engine's back window from the stream's bitrate (needs obsDur).
@@ -517,6 +544,9 @@ class MpvView : public brls::Box
     // this is what turns it into one -- needed to flash the lock pill once per
     // push while locked instead of on every frame it is held.
     bool stickWasPushed = false;
+    // Set while an overlay panel is open so a stick still held off-centre as
+    // the panel closes must return to the deadzone before seeking again.
+    bool stickWaitNeutral = false;
     // What the current push of the stick is, decided when it leaves the centre
     // and kept until it returns: a scrub of the timeline, or a D-pad-like step
     // (up/down between the rows, left/right along the buttons) that repeats
@@ -549,7 +579,8 @@ class MpvView : public brls::Box
     // core froze the render thread with it (and, through the engine getters'
     // lock, the whole download).
     double obsPos = 0.0, obsDur = 0.0, obsCacheSecs = 0.0;
-    bool obsCacheIdle = false;
+    bool obsCacheIdle      = false;
+    bool obsPausedForCache = false;
     std::chrono::steady_clock::time_point infoLastSample;
 
     // Periodic stats dump (see logStats).

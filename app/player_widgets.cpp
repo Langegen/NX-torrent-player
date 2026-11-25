@@ -1,5 +1,7 @@
 #include "player_widgets.hpp"
 
+#include <algorithm>
+#include <chrono>
 #include <cmath>
 
 #include "player.hpp"  // fmtTime
@@ -151,6 +153,17 @@ void drawIcon(NVGcontext* vg, Icon icon, float cx, float cy, float size, NVGcolo
             nvgStroke(vg);
             break;
         }
+
+        case Icon::Back:
+            // Left arrow: horizontal stem + arrowhead
+            nvgBeginPath(vg);
+            nvgMoveTo(vg, cx + 11 * u, cy);
+            nvgLineTo(vg, cx - 10 * u, cy);
+            nvgMoveTo(vg, cx - 2 * u, cy - 8 * u);
+            nvgLineTo(vg, cx - 10 * u, cy);
+            nvgLineTo(vg, cx - 2 * u, cy + 8 * u);
+            nvgStroke(vg);
+            break;
     }
 }
 
@@ -469,6 +482,13 @@ StepperCell::StepperCell(const std::string& titleText, std::function<std::string
                    true, brls::SOUND_NONE);
     registerAction("", brls::BUTTON_NAV_RIGHT, [by](brls::View*) { return by(1); }, true,
                    true, brls::SOUND_NONE);
+    // D-pad presses emit both BUTTON_LEFT/RIGHT and BUTTON_NAV_LEFT/RIGHT;
+    // consume the non-NAV pair silently so it never triggers an error click or
+    // propagates up to an underlying view.
+    registerAction("", brls::BUTTON_LEFT, [](brls::View*) { return true; }, true,
+                   true, brls::SOUND_NONE);
+    registerAction("", brls::BUTTON_RIGHT, [](brls::View*) { return true; }, true,
+                   true, brls::SOUND_NONE);
     registerClickAction([this, onOk](brls::View*) {
         if (onOk)
             onOk();
@@ -504,6 +524,129 @@ void StepperCell::draw(NVGcontext* vg, float x, float y, float width, float heig
     nvgLineTo(vg, rx + s * 0.6f, cy);
     nvgLineTo(vg, rx - s * 0.6f, cy + s);
     nvgStroke(vg);
+}
+
+SeekRipple::SeekRipple()
+{
+    setFocusable(false);
+}
+
+void SeekRipple::trigger(int direction, std::string delta, std::string target,
+                         brls::Point pos, int holdMs, int fadeMs)
+{
+    if (direction == 0)
+    {
+        clear();
+        return;
+    }
+    auto now       = std::chrono::steady_clock::now();
+    dir            = direction < 0 ? -1 : 1;
+    deltaText      = std::move(delta);
+    targetText     = std::move(target);
+    tapPos         = pos;
+    holdDurationMs = holdMs > 0 ? holdMs : 0;
+    fadeDurationMs = fadeMs > 0 ? fadeMs : 0;
+    tapAt          = now;
+    hideAt         = now + std::chrono::milliseconds(holdDurationMs + fadeDurationMs);
+    active         = true;
+}
+
+void SeekRipple::clear()
+{
+    active = false;
+    dir    = 0;
+}
+
+void SeekRipple::draw(NVGcontext* vg, float x, float y, float w, float h, brls::Style,
+                      brls::FrameContext*)
+{
+    if (!active || dir == 0 || w <= 0.0f || h <= 0.0f) return;
+
+    auto now = std::chrono::steady_clock::now();
+    if (now >= hideAt)
+    {
+        active = false;
+        dir    = 0;
+        return;
+    }
+
+    auto msSince =
+        std::chrono::duration_cast<std::chrono::milliseconds>(now - tapAt).count();
+    auto msLeft =
+        std::chrono::duration_cast<std::chrono::milliseconds>(hideAt - now).count();
+
+    float fadeIn  = std::min(1.0f, (float)(msSince + 30) / 90.0f);
+    float fadeOut = (fadeDurationMs > 0 && msLeft < fadeDurationMs)
+                        ? std::max(0.0f, (float)msLeft / (float)fadeDurationMs)
+                        : 1.0f;
+    float alpha   = fadeIn * fadeOut;
+
+    nvgSave(vg);
+    nvgIntersectScissor(vg, x, y, w, h);
+
+    // Curved dark side wash so the white icon and text remain readable over bright video.
+    float r     = std::min(w * 0.44f, h * 0.78f);
+    float arcCx = (dir < 0) ? (x - r * 0.25f) : (x + w + r * 0.25f);
+    float arcCy = y + h * 0.5f;
+    nvgBeginPath(vg);
+    nvgCircle(vg, arcCx, arcCy, r);
+    nvgFillColor(vg, nvgRGBA(0, 0, 0, (unsigned char)(110.0f * alpha)));
+    nvgFill(vg);
+
+    // Subtle expanding ripple at the finger contact point.
+    if (msSince >= 0 && msSince < 360)
+    {
+        float rt         = (float)msSince / 360.0f;
+        float rr         = 22.0f + rt * 120.0f;
+        unsigned char ra = (unsigned char)((1.0f - rt) * 58.0f * alpha);
+        nvgBeginPath(vg);
+        nvgCircle(vg, tapPos.x, tapPos.y, rr);
+        nvgFillColor(vg, nvgRGBA(255, 255, 255, ra));
+        nvgFill(vg);
+    }
+
+    float cx = (dir < 0) ? (x + w * 0.20f) : (x + w * 0.80f);
+    float cy = y + h * 0.50f;
+
+    Icon icon = (dir < 0) ? Icon::Rewind : Icon::Forward;
+    drawIcon(vg, icon, cx, cy - 20.5f, 76.0f,
+             nvgRGBA(0, 0, 0, (unsigned char)(140.0f * alpha)));
+    drawIcon(vg, icon, cx, cy - 22.0f, 76.0f,
+             nvgRGBA(255, 255, 255, (unsigned char)(245.0f * alpha)));
+
+    int font = brls::Application::getFont(brls::FONT_REGULAR);
+    if (font != brls::FONT_INVALID)
+    {
+        nvgFontFaceId(vg, font);
+        nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+        if (!deltaText.empty())
+        {
+            nvgFontSize(vg, 24.0f);
+            nvgFillColor(vg, nvgRGBA(0, 0, 0, (unsigned char)(140.0f * alpha)));
+            nvgText(vg, cx, cy + 17.5f, deltaText.c_str(), nullptr);
+            nvgFillColor(vg, nvgRGBA(255, 255, 255, (unsigned char)(245.0f * alpha)));
+            nvgText(vg, cx, cy + 16.0f, deltaText.c_str(), nullptr);
+
+            if (!targetText.empty())
+            {
+                nvgFontSize(vg, 17.0f);
+                nvgFillColor(vg, nvgRGBA(0, 0, 0, (unsigned char)(120.0f * alpha)));
+                nvgText(vg, cx, cy + 43.0f, targetText.c_str(), nullptr);
+                nvgFillColor(vg, nvgRGBA(255, 255, 255, (unsigned char)(205.0f * alpha)));
+                nvgText(vg, cx, cy + 42.0f, targetText.c_str(), nullptr);
+            }
+        }
+        else if (!targetText.empty())
+        {
+            nvgFontSize(vg, 22.0f);
+            nvgFillColor(vg, nvgRGBA(0, 0, 0, (unsigned char)(140.0f * alpha)));
+            nvgText(vg, cx, cy + 19.5f, targetText.c_str(), nullptr);
+            nvgFillColor(vg, nvgRGBA(255, 255, 255, (unsigned char)(235.0f * alpha)));
+            nvgText(vg, cx, cy + 18.0f, targetText.c_str(), nullptr);
+        }
+    }
+
+    nvgRestore(vg);
 }
 
 } // namespace player_ui

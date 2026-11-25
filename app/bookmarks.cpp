@@ -8,15 +8,19 @@
 #include "card.hpp"
 #include "i18n.hpp"
 #include "library.hpp"
+#include "platform_ui.hpp"
 #include "theme.hpp"
 #include "widgets.hpp"
 
 namespace
 {
 
-constexpr float kInset   = 60.0f;
-constexpr float kPosterW = 190.0f;
-constexpr float kGlow    = 24.0f;
+inline float inset() { return platform_ui::sideInset(); }
+inline float posterWidth()
+{
+    return (platform_ui::isMobile() && platform_ui::isPortrait()) ? 156.0f : 190.0f;
+}
+constexpr float kGlow = 24.0f;
 
 // Where an export goes and an import is read from: a fixed name, so it is
 // easy to find on the SD card and to copy to another console.
@@ -37,9 +41,9 @@ class BookmarksRoot : public brls::Box
         setAxis(brls::Axis::COLUMN);
         setGrow(1.0f);
 
+        float ins = inset();
         auto* top = new brls::Box();
-        top->setAxis(brls::Axis::ROW);
-        top->setPadding(18.0f, kInset, 4.0f, kInset);
+        top->setPadding(12.0f, ins, 4.0f, ins);
 
         newFolderBtn = ui::actionButton(tr("+ New folder"), false, [this]() {
             promptCreateFolder();
@@ -49,7 +53,6 @@ class BookmarksRoot : public brls::Box
         manageFoldersBtn = ui::actionButton(tr("Manage folders"), false, [this]() {
             manageFoldersMenu();
         });
-        manageFoldersBtn->setMarginLeft(10.0f);
         top->addView(manageFoldersBtn);
 
         exportBtn = ui::actionButton(tr("Export"), false, []() {
@@ -59,7 +62,6 @@ class BookmarksRoot : public brls::Box
             else
                 note(tr("Export failed: ") + err);
         });
-        exportBtn->setMarginLeft(10.0f);
         top->addView(exportBtn);
 
         auto* importBtn = ui::actionButton(tr("Import"), false, []() {
@@ -71,17 +73,18 @@ class BookmarksRoot : public brls::Box
                 note(tr("Import failed: ") + err + "\n" + tr("Expected file: ") +
                      std::string(kExportPath));
         });
-        importBtn->setMarginLeft(10.0f);
         top->addView(importBtn);
 
-        addView(top);
+        addView(ui::pillStrip(top, 56.0f));
 
         // Filter pills strip
         auto* filterStrip = new ui::NearestStrip();
+        filterStrip->setScrollingIndicatorVisible(false);
         filterStrip->setHeight(52.0f);
         filterBox = new brls::Box();
         filterBox->setAxis(brls::Axis::ROW);
-        filterBox->setPadding(4.0f, kInset, 6.0f, kInset);
+        filterBox->setAlignItems(brls::AlignItems::CENTER);
+        filterBox->setPadding(4.0f, ins, 6.0f, ins);
         filterStrip->setContentView(filterBox);
         addView(filterStrip);
 
@@ -286,7 +289,7 @@ class BookmarksRoot : public brls::Box
     brls::Box* buildCard(const content::Item& it)
     {
         auto* card = ui::posterCard(it.title, it.key(), it.posterUrl, alive,
-                                    [it]() { openContentCard(it); }, kPosterW);
+                                    [it]() { openContentCard(it); }, posterWidth());
         card->registerAction(tr("Actions"), brls::BUTTON_Y, [this, it](brls::View*) {
             openItemOptions(it);
             return true;
@@ -353,6 +356,9 @@ class BookmarksRoot : public brls::Box
 
         int shown = 0;
 
+        float ins = inset();
+        float pw  = posterWidth();
+
         if (activeFilter.empty())
         {
             // All: statuses first, then custom folders
@@ -362,15 +368,15 @@ class BookmarksRoot : public brls::Box
                 if (entries.empty()) continue;
                 list->addView(ui::heading(std::string(tr(sec.second)) + "  \xC2\xB7  " +
                                               std::to_string(entries.size()),
-                                          kInset));
+                                          ins));
                 auto* row = new brls::Box();
                 for (const auto& e : entries)
                 {
                     auto* card = buildCard(e.item);
-                    if (row->getChildren().empty()) card->setMarginLeft(kInset);
+                    if (row->getChildren().empty()) card->setMarginLeft(ins);
                     row->addView(card);
                 }
-                list->addView(ui::strip(row, kPosterW * 1.5f + kGlow));
+                list->addView(ui::strip(row, pw * 1.5f + kGlow));
                 shown++;
             }
 
@@ -380,15 +386,15 @@ class BookmarksRoot : public brls::Box
                 if (entries.empty()) continue;
                 list->addView(ui::heading("\xF0\x9F\x93\x81 " + f + "  \xC2\xB7  " +
                                               std::to_string(entries.size()),
-                                          kInset));
+                                          ins));
                 auto* row = new brls::Box();
                 for (const auto& e : entries)
                 {
                     auto* card = buildCard(e.item);
-                    if (row->getChildren().empty()) card->setMarginLeft(kInset);
+                    if (row->getChildren().empty()) card->setMarginLeft(ins);
                     row->addView(card);
                 }
-                list->addView(ui::strip(row, kPosterW * 1.5f + kGlow));
+                list->addView(ui::strip(row, pw * 1.5f + kGlow));
                 shown++;
             }
         }
@@ -408,15 +414,15 @@ class BookmarksRoot : public brls::Box
             {
                 list->addView(ui::heading(std::string(tr(label)) + "  \xC2\xB7  " +
                                               std::to_string(entries.size()),
-                                          kInset));
+                                          ins));
                 auto* row = new brls::Box();
                 for (const auto& e : entries)
                 {
                     auto* card = buildCard(e.item);
-                    if (row->getChildren().empty()) card->setMarginLeft(kInset);
+                    if (row->getChildren().empty()) card->setMarginLeft(ins);
                     row->addView(card);
                 }
-                list->addView(ui::strip(row, kPosterW * 1.5f + kGlow));
+                list->addView(ui::strip(row, pw * 1.5f + kGlow));
                 shown++;
             }
         }
@@ -426,7 +432,7 @@ class BookmarksRoot : public brls::Box
             auto entries = library::withFolder(activeFilter);
             auto* header = new brls::Box();
             header->setAxis(brls::Axis::ROW);
-            header->setPadding(4.0f, kInset, 12.0f, kInset);
+            header->setPadding(4.0f, ins, 12.0f, ins);
             header->setAlignItems(brls::AlignItems::CENTER);
 
             auto* headingLbl = ui::heading("\xF0\x9F\x93\x81 " + activeFilter + "  \xC2\xB7  " +
@@ -453,17 +459,17 @@ class BookmarksRoot : public brls::Box
                 for (const auto& e : entries)
                 {
                     auto* card = buildCard(e.item);
-                    if (row->getChildren().empty()) card->setMarginLeft(kInset);
+                    if (row->getChildren().empty()) card->setMarginLeft(ins);
                     row->addView(card);
                 }
-                list->addView(ui::strip(row, kPosterW * 1.5f + kGlow));
+                list->addView(ui::strip(row, pw * 1.5f + kGlow));
                 shown++;
             }
             else
             {
                 auto* box = new brls::Box();
                 box->setAxis(brls::Axis::COLUMN);
-                box->setMargins(20.0f, kInset, 0.0f, kInset);
+                box->setMargins(20.0f, ins, 0.0f, ins);
                 box->setPadding(26.0f, 30.0f, 26.0f, 30.0f);
                 box->setCornerRadius(14.0f);
                 box->setBackgroundColor(theme::scrim(20));
@@ -472,7 +478,9 @@ class BookmarksRoot : public brls::Box
                 t->setFontSize(26.0f);
                 box->addView(t);
                 auto* l = new brls::Label();
-                l->setText(tr("Open a film or a show card and press \"Folder\" to add it here, or press (Y) on a bookmark."));
+                l->setText(platform_ui::isMobile()
+                               ? tr("Open a film or a show card and press \"Folder\" to add it here.")
+                               : tr("Open a film or a show card and press \"Folder\" to add it here, or press (Y) on a bookmark."));
                 l->setFontSize(18.0f);
                 l->setTextColor(theme::textBody());
                 l->setMarginTop(10.0f);
@@ -486,7 +494,7 @@ class BookmarksRoot : public brls::Box
         {
             auto* box = new brls::Box();
             box->setAxis(brls::Axis::COLUMN);
-            box->setMargins(30.0f, kInset, 0.0f, kInset);
+            box->setMargins(30.0f, ins, 0.0f, ins);
             box->setPadding(26.0f, 30.0f, 26.0f, 30.0f);
             box->setCornerRadius(14.0f);
             box->setBackgroundColor(theme::scrim(20));

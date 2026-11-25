@@ -9,6 +9,7 @@
 
 #include <borealis.hpp>
 
+#include <chrono>
 #include <functional>
 #include <string>
 
@@ -29,6 +30,7 @@ enum class Icon
     Settings,
     LockOpen,
     LockClosed,
+    Back,
 };
 
 // Draws `icon` centred on (cx, cy), sized for a button `size` px across.
@@ -144,6 +146,35 @@ class StepperCell : public brls::DetailCell
     static constexpr float kChevronRoom = 30.0f;
     std::function<std::string()> value;
     std::function<bool(int)> step;
+};
+
+// Double-tap seek feedback (Android-player style): curved translucent side
+// wash on the left/right edge, subtle expanding tap ripple, rewind/forward
+// icon, accumulated delta ("+20 s") and target timestamp ("12:34").
+// Completely click-through (hitTest returns nullptr).
+class SeekRipple : public brls::Box
+{
+  public:
+    SeekRipple();
+
+    void trigger(int direction, std::string delta, std::string target,
+                 brls::Point pos, int holdMs = 650, int fadeMs = 250);
+    void clear();
+
+    brls::View* hitTest(brls::Point point) override { return nullptr; }
+    void draw(NVGcontext* vg, float x, float y, float width, float height,
+              brls::Style style, brls::FrameContext* ctx) override;
+
+  private:
+    bool active = false;
+    int dir     = 0;  // -1 left (rewind), +1 right (forward)
+    std::string deltaText;
+    std::string targetText;
+    brls::Point tapPos {};
+    int holdDurationMs = 650;
+    int fadeDurationMs = 250;
+    std::chrono::steady_clock::time_point tapAt;
+    std::chrono::steady_clock::time_point hideAt;
 };
 
 } // namespace player_ui

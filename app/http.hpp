@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <functional>
 #include <string>
+#include <vector>
 
 // The app's HTTP calls. Blocking: every caller here already runs them off the
 // UI thread (workers::run, brls::async) and syncs the result back.
@@ -52,6 +53,24 @@ bool downloadTorrent(const std::string& url, const std::string& path,
 
 // Percent-encodes a URL path segment.
 std::string urlEncode(const std::string& s);
+
+// Generic HTTP request options for REST / WebDAV / OAuth operations
+struct RequestOptions
+{
+    std::string method = "GET";  // GET, POST, PUT, DELETE, PROPFIND, MKCOL, PATCH
+    std::string body;
+    std::string contentType;     // e.g. "application/json", "application/x-www-form-urlencoded"
+    std::vector<std::string> headers; // e.g. "Authorization: Bearer ...", "Depth: 0"
+    std::string userPwd;         // "username:password" for HTTP Basic Auth
+    std::string username;        // Separate username/password (safe when containing ':')
+    std::string password;
+    long timeoutSec = 25;
+    bool followLocation = true;
+};
+
+// Generic HTTP request. Returns false on network/TLS failure.
+bool request(const std::string& url, const RequestOptions& opt, std::string& resp,
+             std::string& err, long* status = nullptr);
 
 // Re-reads the proxy from config (Options -> Network). Call after load and
 // after every change.

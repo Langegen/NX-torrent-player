@@ -23,6 +23,7 @@
 #include <borealis/core/cache_helper.hpp>  // TextureCache
 #include <borealis/views/applet_frame.hpp>
 #include <borealis/views/button.hpp>
+#include <borealis/views/h_scrolling_frame.hpp>
 #ifdef __SWITCH__
 #include <borealis/platforms/switch/switch_font.hpp>
 #endif
@@ -39,13 +40,21 @@
 #undef RELATIVE
 #endif
 
+#ifdef __SDL2__
+#include <SDL.h>
+#else
 #include <GLFW/glfw3.h>
+#endif
 
+#ifdef __SWITCH__
 #include <switch.h>  // Thread/Mutex/CondVar for the async log sink
+#endif
 
 #include "appdata.hpp"
+#include "android_bridge.hpp"
 #include "browse.hpp"
 #include "config.hpp"
+#include "platform_ui.hpp"
 #include "player.hpp"
 #include "settings.hpp"
 #include "theme.hpp"
@@ -64,6 +73,7 @@
 #include "bookmarks.hpp"
 #include "home.hpp"
 #include "library.hpp"
+#include "sync/sync_manager.hpp"
 
 extern "C" {
 #include "httpsrc.h"
@@ -886,15 +896,38 @@ void removeMagnetFromFile(const std::string& magnet)
 }
 
 // "Add magnet": the on-screen keyboard captures a magnet link or a bare hash.
-// On success it is appended to magnet.txt and the normalised URI returned (""
-// on cancel / invalid, which also shows a dialog). The caller adds it to the
-// list -- it does NOT auto-play.
-std::string promptMagnetInput()
+// On success it is appended to magnet.txt and the normalised URI passed to
+// `onDone` (not auto-played here -- the caller adds it to the list).
+void promptMagnetInput(std::function<void(std::string)> onDone)
 {
+    auto persistAndFinish = [onDone](const std::string& raw) {
+        std::string magnet = normalizeMagnet(raw);
+        if (magnet.empty())
+        {
+            auto* d = new brls::Dialog(
+                tr("That does not look like a magnet link or an info hash."));
+            d->addButton("OK", []() {});
+            d->open();
+            return;
+        }
+
+        // Persist the trimmed input (readable) so it also lists on the next launch.
+        std::string line = raw;
+        size_t a         = line.find_first_not_of(" \t\r\n");
+        size_t b         = line.find_last_not_of(" \t\r\n");
+        line             = a == std::string::npos ? "" : line.substr(a, b - a + 1);
+        if (FILE* f = std::fopen(APPDATA_MAGNETS, "a"))
+        {
+            std::fprintf(f, "%s\n", line.c_str());
+            std::fclose(f);
+        }
+        if (onDone) onDone(magnet);
+    };
+
 #ifdef __SWITCH__
     SwkbdConfig kbd;
     if (R_FAILED(swkbdCreate(&kbd, 0)))
-        return "";
+        return;
     swkbdConfigMakePresetDefault(&kbd);
     swkbdConfigSetHeaderText(&kbd, tr("Magnet link or info hash"));
     swkbdConfigSetGuideText(&kbd, tr("magnet:?xt=... or a 40-character hash"));
@@ -903,46 +936,90 @@ std::string promptMagnetInput()
     Result rc = swkbdShow(&kbd, raw, sizeof(raw));
     swkbdClose(&kbd);
     if (R_FAILED(rc) || !raw[0])
-        return "";
+        return;
+    persistAndFinish(raw);
 #else
-    char raw[2048] = { 0 };
-    const char* clip = glfwGetClipboardString(nullptr);
-    if (clip)
+    std::string initial;
+#ifdef __SDL2__
+    if (char* clip = SDL_GetClipboardText())
     {
-        snprintf(raw, sizeof(raw), "%s", clip);
+        if (!normalizeMagnet(clip).empty())
+        {
+            std::string tmp(clip);
+            size_t a = tmp.find_first_not_of(" \t\r\n");
+            size_t b = tmp.find_last_not_of(" \t\r\n");
+            if (a != std::string::npos) initial = tmp.substr(a, b - a + 1);
+        }
+        SDL_free(clip);
     }
-    if (!raw[0])
+#else
+    if (const char* clip = glfwGetClipboardString(nullptr))
     {
-        auto* d = new brls::Dialog(
-            tr("Clipboard is empty or does not contain text."));
-        d->addButton("OK", []() {});
-        d->open();
-        return "";
+        if (!normalizeMagnet(clip).empty())
+        {
+            std::string tmp(clip);
+            size_t a = tmp.find_first_not_of(" \t\r\n");
+            size_t b = tmp.find_last_not_of(" \t\r\n");
+            if (a != std::string::npos) initial = tmp.substr(a, b - a + 1);
+        }
     }
 #endif
-
-    std::string magnet = normalizeMagnet(raw);
-    if (magnet.empty())
-    {
-        auto* d = new brls::Dialog(
-            tr("That does not look like a magnet link or an info hash."));
-        d->addButton("OK", []() {});
-        d->open();
-        return "";
-    }
-
-    // Persist the trimmed input (readable) so it also lists on the next launch.
-    std::string line = raw;
-    size_t a = line.find_first_not_of(" \t\r\n");
-    size_t b = line.find_last_not_of(" \t\r\n");
-    line = a == std::string::npos ? "" : line.substr(a, b - a + 1);
-    if (FILE* f = std::fopen(APPDATA_MAGNETS, "a"))
-    {
-        std::fprintf(f, "%s\n", line.c_str());
-        std::fclose(f);
-    }
-    return magnet;
+    brls::Application::getImeManager()->openForText(
+        [persistAndFinish](std::string out) {
+            if (out.empty()) return;
+            persistAndFinish(out);
+        },
+        tr("Magnet link or info hash"),
+        tr("magnet:?xt=... or a 40-character hash"), 2000, initial);
+#endif
 }
+
+#if defined(__ANDROID__) || defined(ANDROID)
+void handleIncomingMagnet(const std::string& rawUri)
+{
+    std::string magnet = normalizeMagnet(rawUri);
+    if (magnet.empty()) return;
+
+    std::string wantHash = magnetHash(magnet);
+    std::string body;
+    bool alreadySaved = false;
+    if (fsutil::readFile(APPDATA_MAGNETS, body) && !wantHash.empty())
+    {
+        size_t i = 0;
+        while (i < body.size())
+        {
+            size_t nl = body.find('\n', i);
+            std::string line = body.substr(i, nl == std::string::npos ? nl : nl - i);
+            i = nl == std::string::npos ? body.size() : nl + 1;
+            size_t a = line.find_first_not_of(" \t\r");
+            if (a != std::string::npos && line[a] != '#')
+            {
+                std::string mg = normalizeMagnet(line);
+                if (!mg.empty() && magnetHash(mg) == wantHash)
+                {
+                    alreadySaved = true;
+                    break;
+                }
+            }
+        }
+    }
+
+    if (!alreadySaved)
+    {
+        std::string line = rawUri;
+        size_t a = line.find_first_not_of(" \t\r\n");
+        size_t b = line.find_last_not_of(" \t\r\n");
+        line = a == std::string::npos ? magnet : line.substr(a, b - a + 1);
+        if (FILE* f = std::fopen(APPDATA_MAGNETS, "a"))
+        {
+            std::fprintf(f, "%s\n", line.c_str());
+            std::fclose(f);
+        }
+    }
+
+    startPlaybackPrompt(magnet, {}, magnetName(magnet), -1, {}, "local");
+}
+#endif
 
 // Centered message shown when there are no torrents or magnets yet.
 brls::View* buildEmptyState()
@@ -952,7 +1029,8 @@ brls::View* buildEmptyState()
     box->setJustifyContent(brls::JustifyContent::CENTER);
     box->setAlignItems(brls::AlignItems::CENTER);
     box->setGrow(1.0f);
-    box->setPadding(0, 80, 0, 80);
+    float padX = platform_ui::isMobile() ? (platform_ui::isPortrait() ? 28.0f : 48.0f) : 80.0f;
+    box->setPadding(0, padX, 0, padX);
 
     auto* title = new brls::Label();
     title->setText(tr("No torrents found"));
@@ -962,8 +1040,15 @@ brls::View* buildEmptyState()
     box->addView(title);
 
     auto* hint = new brls::Label();
-    hint->setText(tr("Drop .torrent files in this folder on your SD card, or add "
-                  "magnet links to magnet.txt inside it (one per line):"));
+    if (platform_ui::isMobile())
+    {
+        hint->setText(tr("Tap \"+ Add magnet\" above or open any magnet link to start streaming."));
+    }
+    else
+    {
+        hint->setText(tr("Drop .torrent files in this folder on your SD card, or add "
+                      "magnet links to magnet.txt inside it (one per line):"));
+    }
     hint->setFontSize(20);
     hint->setTextColor(theme::textDim());  // light gray (text_disabled is
                                                 // too dark on the dark theme)
@@ -972,7 +1057,15 @@ brls::View* buildEmptyState()
     box->addView(hint);
 
     auto* path = new theme::AccentLabel();
-    path->setText("/switch/NX-torrent-player/torrents/");
+    if (platform_ui::isMobile())
+    {
+        path->setText("");
+        path->setVisibility(brls::Visibility::GONE);
+    }
+    else
+    {
+        path->setText("/switch/NX-torrent-player/torrents/");
+    }
     path->setFontSize(21);
     path->setHorizontalAlign(brls::HorizontalAlign::CENTER);
     box->addView(path);
@@ -1155,7 +1248,8 @@ brls::View* buildLocalTab()
     auto* list = new brls::Box();
     list->setAxis(brls::Axis::COLUMN);
     // setContentView forces the width and drops margins, so the inset is padding.
-    list->setPadding(24.0f, 60.0f, 47.0f, 60.0f);
+    float inset = platform_ui::sideInset();
+    list->setPadding(18.0f, inset, 36.0f, inset);
     scroll->setContentView(list);
     root->addView(scroll);
 
@@ -1195,25 +1289,26 @@ brls::View* buildLocalTab()
     addBtn->setText(tr("+  Add magnet"));
     addBtn->setMarginBottom(14.0f);
     addBtn->registerClickAction([list, widgets, alive, onStart, onEach](brls::View*) {
-        std::string magnet = promptMagnetInput();
-        if (magnet.empty()) return true;
-        TorrentEntry e;
-        e.isMagnet  = true;
-        e.path      = magnet;
-        e.name        = magnetName(magnet);
-        e.sizeText    = "magnet";
-        e.needsResolve = true;  // freshly added -> its files are not cached yet
-        LocalRow w  = makeLocalRow(e);
-        registerRowDelete(list, w.view, e, widgets);
-        list->addView(w.view, 1);  // just under the Add button
-        brls::Application::giveFocus(w.view);
-        if (e.needsResolve)
-        {
-            (*widgets)[magnetHash(magnet)] = { w.name, w.spinner, w.size };
-            auto one = std::make_shared<std::vector<std::string>>();
-            one->push_back(magnet);
-            resolveMagnetNames(alive, one, 0, onStart, onEach);
-        }
+        promptMagnetInput([list, widgets, alive, onStart, onEach](std::string magnet) {
+            if (!*alive || magnet.empty()) return;
+            TorrentEntry e;
+            e.isMagnet     = true;
+            e.path         = magnet;
+            e.name         = magnetName(magnet);
+            e.sizeText     = "magnet";
+            e.needsResolve = true;  // freshly added -> its files are not cached yet
+            LocalRow w     = makeLocalRow(e);
+            registerRowDelete(list, w.view, e, widgets);
+            list->addView(w.view, 1);  // just under the Add button
+            brls::Application::giveFocus(w.view);
+            if (e.needsResolve)
+            {
+                (*widgets)[magnetHash(magnet)] = { w.name, w.spinner, w.size };
+                auto one = std::make_shared<std::vector<std::string>>();
+                one->push_back(magnet);
+                resolveMagnetNames(alive, one, 0, onStart, onEach);
+            }
+        });
         return true;
     });
     list->addView(addBtn);
@@ -1284,14 +1379,21 @@ class BrowserFrame : public brls::AppletFrame
         // the same box, which is where we paint. AFTER the base draw, since the
         // header is one of its children -- and safe to batch normally, unlike the
         // player, because nothing here renders outside nanovg.
-        if (this->onStremio)
+        if (this->onStremio || platform_ui::isMobile())
         {
             if (!this->iconSlot)
                 this->iconSlot = this->getView("brls/applet_frame/title_icon");
             if (this->iconSlot)
-                theme::drawStremioMark(vg, this->iconSlot->getX(),
+            {
+                if (this->onStremio)
+                    theme::drawStremioMark(vg, this->iconSlot->getX(),
+                                           this->iconSlot->getY(),
+                                           this->iconSlot->getWidth());
+                else
+                    theme::drawAppMark(vg, this->iconSlot->getX(),
                                        this->iconSlot->getY(),
                                        this->iconSlot->getWidth());
+            }
         }
     }
 
@@ -1306,27 +1408,28 @@ class BrowserFrame : public brls::AppletFrame
 void applyTabIdentity(brls::AppletFrame* frame, config::Tab tab)
 {
     bool stremio = tab == config::Tab::STREMIO;
+    bool mobile  = platform_ui::isMobile();
 
     if (auto* browserFrame = dynamic_cast<BrowserFrame*>(frame))
         browserFrame->setOnStremio(stremio);
 
     frame->setTitle("");
-    // Local keeps its white PNG. Stremio's mark is drawn by BrowserFrame instead,
-    // so no texture is loaded for it at all -- romfs:/stremio-icon.png is a fixed
-    // violet that cannot follow the accent.
-    if (!stremio) frame->setIcon(APP_RES("local-icon.png"));
+    // Local keeps its white PNG on Switch/desktop; on mobile BrowserFrame paints
+    // the vector app mark in place of the Switch Joy-Con texture.
+    if (!stremio && !mobile) frame->setIcon(APP_RES("local-icon.png"));
 
     // The header icon is sized "auto", i.e. from the texture, and these two are
     // not the same pixel size -- pin both to the same box.
     if (auto* ic = dynamic_cast<brls::Image*>(
             frame->getView("brls/applet_frame/title_icon")))
     {
-        ic->setDimensions(54.0f, 54.0f);
+        float iconSz = mobile ? (platform_ui::isPortrait() ? 40.0f : 48.0f) : 54.0f;
+        ic->setDimensions(iconSz, iconSz);
         ic->setScalingType(brls::ImageScalingType::FIT);
         // INVISIBLE, not GONE: it must still reserve its slot in the header row,
         // because that box is exactly where the mark gets painted.
-        ic->setVisibility(stremio ? brls::Visibility::INVISIBLE
-                                  : brls::Visibility::VISIBLE);
+        ic->setVisibility((stremio || mobile) ? brls::Visibility::INVISIBLE
+                                              : brls::Visibility::VISIBLE);
     }
 }
 
@@ -1366,12 +1469,15 @@ void setStremioViewKeys(brls::AppletFrame* frame, bool on)
     if (on == registered) return;
     if (on)
     {
-        lb = frame->registerAction(std::string("\xEE\x83\xA5  ") + tr("View"), brls::BUTTON_LB,
+        bool mobile = platform_ui::isMobile();
+        std::string lbl = mobile ? std::string(tr("View"))
+                                 : std::string("\xEE\x83\xA5  ") + tr("View");
+        lb = frame->registerAction(lbl, brls::BUTTON_LB,
                                    [](brls::View*) {
                                        stremio::cycleActiveView(-1);
                                        return true;
                                    },
-                                   false, false, brls::SOUND_NONE);
+                                   mobile, false, brls::SOUND_NONE);
         rb = frame->registerAction(tr("View"), brls::BUTTON_RB,
                                    [](brls::View*) {
                                        stremio::cycleActiveView(+1);
@@ -1408,12 +1514,15 @@ void setMenuTabKeys(brls::AppletFrame* frame, bool on)
     if (on == registered) return;
     if (on)
     {
-        lb = frame->registerAction(std::string("\xEE\x83\xA5  ") + tr("Section"), brls::BUTTON_LB,
+        bool mobile = platform_ui::isMobile();
+        std::string lbl = mobile ? std::string(tr("Section"))
+                                 : std::string("\xEE\x83\xA5  ") + tr("Section");
+        lb = frame->registerAction(lbl, brls::BUTTON_LB,
                                    [](brls::View*) {
                                        if (g_menuTabCycler) g_menuTabCycler(-1);
                                        return true;
                                    },
-                                   false, false, brls::SOUND_CLICK);
+                                   mobile, false, brls::SOUND_CLICK);
         rb = frame->registerAction(tr("Section"), brls::BUTTON_RB,
                                    [](brls::View*) {
                                        if (g_menuTabCycler) g_menuTabCycler(+1);
@@ -1451,6 +1560,47 @@ void attachTopTabBar(brls::AppletFrame* frame, brls::Box* content)
     // and the focus highlight; main() has already applied it, but the tab bar is
     // also rebuilt on a colour change, and re-applying costs nothing.
     theme::applyAccent();
+
+    struct FadeHeaderBar : public brls::HScrollingFrame
+    {
+        brls::View* inner = nullptr;
+        void draw(NVGcontext* vg, float x, float y, float w, float h,
+                  brls::Style style, brls::FrameContext* ctx) override
+        {
+            brls::HScrollingFrame::draw(vg, x, y, w, h, style, ctx);
+            if (!inner) return;
+            const float fade = 22.0f;
+            float offset     = getContentOffsetX();
+            float rightLimit = inner->getWidth() - w;
+            float midY       = y + h * 0.5f;
+            if (offset > 2.0f)
+            {
+                NVGcolor edge = tabBgAt(x, midY);
+                NVGcolor gone = edge;
+                gone.a        = 0.0f;
+                nvgBeginPath(vg);
+                nvgRect(vg, x, y, fade, h);
+                nvgFillPaint(vg, nvgLinearGradient(vg, x, y, x + fade, y, edge, gone));
+                nvgFill(vg);
+            }
+            if (offset < rightLimit - 2.0f)
+            {
+                NVGcolor edge = tabBgAt(x + w, midY);
+                NVGcolor gone = edge;
+                gone.a        = 0.0f;
+                nvgBeginPath(vg);
+                nvgRect(vg, x + w - fade, y, fade, h);
+                nvgFillPaint(vg, nvgLinearGradient(vg, x + w - fade, y, x + w, y, gone, edge));
+                nvgFill(vg);
+            }
+        }
+    };
+
+    auto* barScroll = new FadeHeaderBar();
+    barScroll->setScrollingBehavior(brls::ScrollingBehavior::CENTERED);
+    barScroll->setScrollingIndicatorVisible(false);
+    barScroll->setFocusable(false);
+    barScroll->setHeight(52.0f);
 
     auto* bar = new brls::Box();
     bar->setAxis(brls::Axis::ROW);
@@ -1564,6 +1714,7 @@ void attachTopTabBar(brls::AppletFrame* frame, brls::Box* content)
         brls::Application::giveFocus(tabButtons[nextIdx].btn);
     };
     setMenuTabCycler(cycleMenuTabs);
+    setOpenStremioHook([select]() { select(config::Tab::STREMIO); });
 
     const char* tabNames[] = { "Home", "Movies", "Shows", "Anime", "Bookmarks", "History" };
     for (size_t i = 0; i < tabButtons.size(); i++)
@@ -1606,6 +1757,8 @@ void attachTopTabBar(brls::AppletFrame* frame, brls::Box* content)
         return true;
     });
     bar->addView(sourceBtn);
+    barScroll->inner = bar;
+    barScroll->setContentView(bar);
 
     // The Stremio sub-view switcher, centred in the header: one button per view
     // (Continue / Movies / Shows / Library). It says where you are and clicking
@@ -1625,6 +1778,7 @@ void attachTopTabBar(brls::AppletFrame* frame, brls::Box* content)
 
     std::vector<brls::Button*> viewBtns;
     std::vector<brls::Label*>  viewIcons;
+    std::vector<std::string>   viewTexts;
     const float btnFont    = brls::Application::getStyle()["brls/button/text_size"];
 
     // A Label measured by its own font makes its button a different size: the
@@ -1687,6 +1841,7 @@ void attachTopTabBar(brls::AppletFrame* frame, brls::Box* content)
         if (!iconOnly) ic->setMarginRight(6.0f);
         b->addView(ic, 0);   // before the text label
         viewIcons.push_back(ic);
+        viewTexts.push_back(iconOnly ? "" : text);
 
         int idx = (int)i;
         b->registerClickAction([idx](brls::View*) {
@@ -1726,6 +1881,7 @@ void attachTopTabBar(brls::AppletFrame* frame, brls::Box* content)
     // of Stremio's own search plus a word. The Stremio tab shows its own search
     // instead, so this one folds away there (see applyViewBar).
     auto* catSearchBtn = new brls::Button();
+    IconLabel* catSearchIcon = nullptr;
     {
         const std::string& full = viewLabels[searchIdx];
         size_t sp = full.find(' ');
@@ -1738,6 +1894,7 @@ void attachTopTabBar(brls::AppletFrame* frame, brls::Box* content)
         ic->setMarginRight(6.0f);
         ic->setTextColor(brls::Application::getTheme()["brls/button/default_enabled_text"]);
         catSearchBtn->addView(ic, 0);
+        catSearchIcon = ic;
         catSearchBtn->registerClickAction([](brls::View*) {
             openCatalogSearch();
             return true;
@@ -1774,28 +1931,129 @@ void attachTopTabBar(brls::AppletFrame* frame, brls::Box* content)
     viewBtns[searchIdx]->setCustomNavigationRoute(brls::FocusDirection::LEFT,
                                                   viewBtns[searchIdx - 1]);
 
-    // Where the centred group starts. At the 100% UI size the header is at its
-    // most crowded and the group comes up against "Jackett"; inset it there so it
-    // centres in the space beside the category bar instead. Every smaller UI has
-    // room to spare, and true centring reads better, so they keep it. The size
-    // is stored per mode, hence the docked check -- and hence recomputing this
-    // when the console is docked or undocked.
-    auto insetViewBar = [viewBar]() {
+    // Responsive header layout for both landscape (Switch/TV/tablet) and portrait (phones).
+    auto curView      = std::make_shared<int>(-1);
+    auto layoutHeader = [frame, barScroll, viewBar, rightBar, tabButtons, sourceBtn,
+                         catSearchBtn, catSearchIcon, profileBtn, settingsBtn,
+                         viewBtns, viewIcons, viewTexts, searchIdx, curView, btnFont,
+                         bareIcon, sizeIcon]() {
+        float cw      = brls::Application::contentWidth;
+        float ch      = brls::Application::contentHeight;
+        bool portrait = ch > cw;
+        bool mobile   = platform_ui::isMobile();
+        bool stremio  = *curView >= 0;
+
+        float headerW = cw;
+        if (mobile)
+        {
+            float sideMargin = portrait ? 0.0f : 12.0f;
+            float sidePad    = portrait ? 12.0f : 16.0f;
+            float headerH    = portrait ? 74.0f : 80.0f;
+            headerW          = cw - 2.0f * sideMargin;
+            if (auto* header = frame->getHeader())
+            {
+                header->setMargins(0.0f, sideMargin, 0.0f, sideMargin);
+                header->setPadding(0.0f, sidePad, 0.0f, sidePad);
+                header->setHeight(headerH);
+                if (!header->getChildren().empty())
+                {
+                    if (auto* titleBox = dynamic_cast<brls::Box*>(header->getChildren()[0]))
+                    {
+                        titleBox->setPadding(0.0f, 0.0f, 0.0f, 0.0f);
+                        titleBox->setAlignItems(brls::AlignItems::CENTER);
+                    }
+                }
+            }
+            if (auto* ic = dynamic_cast<brls::Image*>(
+                    frame->getView("brls/applet_frame/title_icon")))
+            {
+                float iconSz = portrait ? 40.0f : 48.0f;
+                ic->setDimensions(iconSz, iconSz);
+            }
+            float topY = (headerH - 48.0f) * 0.5f;
+            barScroll->setClipsToBounds(true);
+            barScroll->setHeight(48.0f);
+            barScroll->setPositionTop(topY);
+            rightBar->setPositionTop(topY);
+            viewBar->setPositionTop(topY);
+        }
+
+        float leftPad  = mobile ? (portrait ? 58.0f : 74.0f) : (portrait ? 78.0f : 105.0f);
+        float rightPad = mobile ? (portrait ? 8.0f : 16.0f) : (portrait ? 12.0f : 30.0f);
+        float tabPadV  = mobile && portrait ? 8.0f : (portrait ? 10.0f : 12.0f);
+        float tabPadH  = mobile && portrait ? 9.0f : (portrait ? 11.0f : 16.0f);
+        float tabFont  = mobile && portrait ? 17.0f : btnFont;
+
+        if (!tabButtons.empty())
+            tabButtons[0].btn->setMarginLeft(mobile ? 0.0f : 8.0f);
+        for (const auto& t : tabButtons)
+        {
+            t.btn->setPadding(tabPadV, tabPadH, tabPadV, tabPadH);
+            t.btn->setFontSize(tabFont);
+        }
+        sourceBtn->setPadding(tabPadV, tabPadH, tabPadV, tabPadH);
+        sourceBtn->setFontSize(tabFont);
+        sourceBtn->setMarginLeft(portrait ? 4.0f : 10.0f);
+
+        if (mobile)
+        {
+            float iconPadV = portrait ? 8.0f : 10.0f;
+            float iconPadH = portrait ? 10.0f : 12.0f;
+            profileBtn->setPadding(iconPadV, iconPadH, iconPadV, iconPadH);
+            settingsBtn->setPadding(iconPadV, iconPadH, iconPadV, iconPadH);
+        }
+
+        catSearchBtn->setText(portrait ? "" : std::string(tr("Search")));
+        catSearchBtn->setPadding(tabPadV, portrait ? 10.0f : 16.0f,
+                                 tabPadV, portrait ? 10.0f : 16.0f);
+        if (catSearchIcon)
+        {
+            sizeIcon(catSearchIcon, portrait ? bareIcon : btnFont, !portrait);
+            catSearchIcon->setMarginRight(portrait ? 0.0f : 6.0f);
+        }
+
+        rightBar->setPositionRight(rightPad);
+        barScroll->setPositionLeft(leftPad);
+
+        float rightReserve = mobile
+            ? (portrait ? (stremio ? 160.0f : 112.0f) : (stremio ? 210.0f : 220.0f))
+            : (portrait ? (stremio ? 155.0f : 110.0f) : (stremio ? 240.0f : 235.0f));
+        float avail = headerW - leftPad - rightReserve - rightPad - (mobile ? 8.0f : 0.0f);
+        if (portrait && stremio && avail > 160.0f) avail = 160.0f;
+        if (avail < 120.0f) avail = 120.0f;
+        barScroll->setWidth(avail);
+
         bool docked = brls::Application::windowWidth >= 1920;
         int  w      = docked ? config::get().dockedUiWidth
                              : config::get().handheldUiWidth;
-        viewBar->setPositionLeft(w <= config::kDefaultHandheldUiWidth ? 120.0f
-                                                                     : 0.0f);
+        if (portrait)
+        {
+            viewBar->setPositionLeft(leftPad + avail + 6.0f);
+            viewBar->setPositionRight(rightReserve + rightPad);
+        }
+        else
+        {
+            viewBar->setPositionRight(0.0f);
+            viewBar->setPositionLeft(w <= config::kDefaultHandheldUiWidth ? 120.0f
+                                                                          : 0.0f);
+        }
+        for (size_t i = 0; i < searchIdx && i < viewBtns.size(); i++)
+        {
+            viewBtns[i]->setText(portrait ? "" : viewTexts[i]);
+            viewBtns[i]->setPadding(tabPadV, portrait ? 8.0f : 16.0f,
+                                    tabPadV, portrait ? 8.0f : 16.0f);
+            sizeIcon(viewIcons[i], portrait ? bareIcon : btnFont, !portrait);
+            viewIcons[i]->setMarginRight(portrait ? 0.0f : 6.0f);
+        }
     };
-    brls::Application::getWindowSizeChangedEvent()->subscribe(insetViewBar);
+    brls::Application::getWindowSizeChangedEvent()->subscribe(layoutHeader);
     // Docking fires the event above; editing the UI size in Options does not
     // (applyUiScale resizes the logical space itself), hence the second route.
-    setUiScaleHook(insetViewBar);
+    setUiScaleHook(layoutHeader);
 
-    auto curView      = std::make_shared<int>(-1);
     auto applyViewBar = [viewBar, viewBtns, viewIcons, stremioBtn, localBtn, jackettBtn,
                          profileBtn, settingsBtn, searchIdx, curView, catSearchBtn,
-                         tabButtons, insetViewBar](int active) {
+                         tabButtons, layoutHeader](int active) {
         *curView  = active;
         bool show = active >= 0;
         // Stremio's view bar takes the middle of the header: the catalog tabs
@@ -1813,7 +2071,7 @@ void attachTopTabBar(brls::AppletFrame* frame, brls::Box* content)
         // Also here, not only on the window event: changing the UI size in
         // Options resizes the logical space without firing that event (see
         // applyUiScale), and this runs on the way back into a view.
-        insetViewBar();
+        layoutHeader();
         viewBar->setVisibility(show ? brls::Visibility::VISIBLE
                                     : brls::Visibility::GONE);
         // The account button is Stremio's, so it folds away with the bar --
@@ -1860,33 +2118,29 @@ void attachTopTabBar(brls::AppletFrame* frame, brls::Box* content)
     applyViewBar(-1);
     stremio::setViewTabSink(applyViewBar);
 
-    // Hard-anchor the three bars in the header: the category switcher top-left,
-    // next to the icon; the Stremio view switcher centred; Search / account /
-    // Options top-right.
+    // Hard-anchor the three bars in the header: the scrollable category switcher
+    // top-left next to the icon; the Stremio view switcher centred; Search /
+    // account / Options top-right.
     if (auto* header = frame->getHeader())
     {
-        // Left AND right pinned: that is what gives an absolute box a width to
-        // centre its buttons in -- there is no "centre me" for one. So this box
-        // spans the whole header, and it goes in FIRST on purpose: Box::hitTest
-        // walks its children in reverse and a box that contains the point
-        // returns ITSELF when no child matches, so a full-width box added last
-        // swallowed every touch in the header -- the category buttons under it
-        // stopped responding to the touchscreen. Tested last, it only catches
-        // the taps nothing else wanted. (insetViewBar owns its left edge.)
+        // viewBar goes in FIRST so Box::hitTest checks rightBar and barScroll
+        // ahead of it and touches are never swallowed.
         viewBar->setPositionType(brls::PositionType::ABSOLUTE);
         viewBar->setPositionRight(0.0f);
         viewBar->setPositionTop(20.0f);
         header->addView(viewBar);
 
-        bar->setPositionType(brls::PositionType::ABSOLUTE);
-        bar->setPositionLeft(105.0f);
-        bar->setPositionTop(20.0f);
-        header->addView(bar);
+        barScroll->setPositionType(brls::PositionType::ABSOLUTE);
+        barScroll->setPositionLeft(105.0f);
+        barScroll->setPositionTop(20.0f);
+        header->addView(barScroll);
 
         rightBar->setPositionType(brls::PositionType::ABSOLUTE);
         rightBar->setPositionRight(30.0f);
         rightBar->setPositionTop(20.0f);
         header->addView(rightBar);
+
+        layoutHeader();
     }
 
     // The library list cannot walk focus back out to the header on its own; hand
@@ -1952,6 +2206,7 @@ int main(int argc, char* argv[])
     }
 #endif
 
+    androidInitPlatform();
     ensureAppDataDir();
     // A magnet opened again (the next episode of a pack, a resume) loads its
     // metadata from here instead of asking peers for it.
@@ -1960,6 +2215,9 @@ int main(int argc, char* argv[])
     // https:// playback verifies against the same bundle as the app's own
     // requests (app/http.cpp): the console mounts no CA store.
     httpsrc_set_ca("romfs:/cacert.pem");
+#elif defined(__ANDROID__) || defined(ANDROID)
+    if (access(APPDATA_DIR "/cacert.pem", F_OK) == 0)
+        httpsrc_set_ca(APPDATA_DIR "/cacert.pem");
 #else
     if (access("resources/cacert.pem", F_OK) == 0)
         httpsrc_set_ca("resources/cacert.pem");
@@ -2061,6 +2319,11 @@ int main(int argc, char* argv[])
     }
 
     brls::Application::createWindow("NX Torrent Player");
+    if (platform_ui::isMobile())
+    {
+        brls::AppletFrame::HIDE_BOTTOM_BAR = true;
+        brls::Application::setInputType(brls::InputType::TOUCH);
+    }
     // Order matters: SwitchPlatform caches the console's ColorSetId at
     // construction and setThemeVariant() overwrites that same field, so the
     // console's own preference has to be read before applyVariant() runs -- it is
@@ -2096,12 +2359,30 @@ int main(int argc, char* argv[])
     // First run without Jackett: its setup on top, once.
     maybeOfferJackettSetup();
 
+#if defined(__ANDROID__) || defined(ANDROID)
+    SDL_AddEventWatch([](void*, SDL_Event* ev) -> int {
+        if (ev && ev->type == SDL_DROPFILE && ev->drop.file && ev->drop.file[0])
+        {
+            std::string uri = ev->drop.file;
+            brls::sync([uri]() { handleIncomingMagnet(uri); });
+        }
+        return 1;
+    }, nullptr);
+
+    std::string initialUri = androidConsumePendingIntentUri();
+    if (!initialUri.empty())
+        brls::sync([initialUri]() { handleIncomingMagnet(initialUri); });
+#endif
+
     // A quiet check: it only ever surfaces when there IS a newer release, so a
     // missing network or an unreachable GitHub costs nothing but a log line.
     if (config::get().checkUpdates)
         update::checkAsync([](update::Release r) {
             if (r.ok && r.installable()) update::promptInstall(r);
         });
+
+    cloud_sync::init();
+    cloud_sync::triggerAutoSync();
 
     // Application::exit(): exitEvent -> the activities are destroyed (the
     // player's last progress save is queued on brls::async) -> the task thread
@@ -2128,6 +2409,7 @@ int main(int argc, char* argv[])
     // The network pool's threads, joined before main() returns (see
     // workers.hpp): a request still running past it would crash on the Switch.
     workers::stop();
+    cloud_sync::shutdown();
     // The connections http::get/postJson kept open, now that every thread
     // that used them is joined (borealis' task thread in Application::exit).
     http::shutdown();

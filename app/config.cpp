@@ -2,17 +2,23 @@
 
 #include <borealis.hpp>
 
+#ifdef __SWITCH__
 #include <switch.h>
+#elif defined(__SDL2__)
+#include <SDL.h>
+#endif
 
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <mutex>
 #include <string>
 
 #include "appdata.hpp"
 #include "fsutil.hpp"
 #include "i18n.hpp"
+#include "platform_ui.hpp"
 
 namespace config
 {
@@ -22,6 +28,7 @@ namespace
 constexpr const char* kPath = APPDATA_DIR "/config.json";
 
 Config cfg;
+std::mutex g_saveLock;
 
 // The file is ours: a flat object of bools and one string, written by save()
 // below. That is small enough that finding "key": <value> beats pulling a JSON
@@ -51,6 +58,20 @@ int readInt(const std::string& body, const char* key, int dflt)
     // number -- which every caller has to reject anyway, since 0 is never a
     // valid value for the settings stored this way.
     return (int)std::strtol(body.c_str() + colon + 1, nullptr, 10);
+}
+
+int64_t readInt64(const std::string& body, const char* key, int64_t dflt)
+{
+    std::string pat = std::string("\"") + key + "\"";
+    size_t k        = body.find(pat);
+    if (k == std::string::npos) return dflt;
+    size_t colon = body.find(':', k + pat.size());
+    if (colon == std::string::npos) return dflt;
+    const char* p = body.c_str() + colon + 1;
+    char* end     = nullptr;
+    long long v   = std::strtoll(p, &end, 10);
+    if (end == p) return dflt;
+    return (int64_t)v;
 }
 
 std::string readStr(const std::string& body, const char* key,
@@ -191,6 +212,21 @@ std::string consoleLang()
     std::memcpy(buf, &code, 8);
     if (!buf[0] || !buf[1]) return "en";
     return std::string(buf, 2);
+#elif defined(__SDL2__)
+    if (SDL_Locale* locales = SDL_GetPreferredLocales())
+    {
+        std::string out;
+        if (locales[0].language && locales[0].language[0] && locales[0].language[1])
+        {
+            out += static_cast<char>(std::tolower(static_cast<unsigned char>(locales[0].language[0])));
+            out += static_cast<char>(std::tolower(static_cast<unsigned char>(locales[0].language[1])));
+        }
+        SDL_free(locales);
+        if (out.size() == 2) return out;
+    }
+    const char* l = std::getenv("LANG");
+    if (l && std::strlen(l) >= 2) return std::string(l, 2);
+    return "en";
 #else
     const char* l = std::getenv("LANG");
     if (l && std::strlen(l) >= 2) return std::string(l, 2);
@@ -220,19 +256,25 @@ const BufferPreset kBufferPresets[] = {
     { 256, 90, 180, 30.0, 64 },   // large
     { 512, 180, 300, 45.0, 128 }, // maximum
 };
+const BufferPreset kAppletBufferPreset = { 64, 20, 40, 10.0, 16 };
 } // namespace
+
+bool isAppletMode()
+{
+#ifdef __SWITCH__
+    AppletType at = appletGetAppletType();
+    return at != AppletType_Application && at != AppletType_SystemApplication;
+#else
+    return false;
+#endif
+}
 
 BufferPreset bufferPreset()
 {
+    if (isAppletMode())
+        return kAppletBufferPreset;
     int m = cfg.bufferMode;
     if (m < 0 || m > 2) m = 0;
-#ifdef __SWITCH__
-    // An applet launch (album, or a title held with R) gets a few hundred MB
-    // in all: the maximum preset would not fit next to mpv and the engine.
-    if (m > 1 && appletGetAppletType() != AppletType_Application &&
-        appletGetAppletType() != AppletType_SystemApplication)
-        m = 1;
-#endif
     return kBufferPresets[m];
 }
 
@@ -245,8 +287,11 @@ const std::vector<std::string>& bufferLabels()
 
 const std::vector<std::string>& endActionLabels()
 {
-    static std::vector<std::string> v = { tr("Next episode"), tr("Back to the menu"),
-                                          tr("Sleep the console"), tr("Close the app") };
+    static std::vector<std::string> v = {
+        tr("Next episode"), tr("Back to the menu"),
+        platform_ui::isMobile() ? tr("Stay paused") : tr("Sleep the console"),
+        tr("Close the app")
+    };
     return v;
 }
 
@@ -313,7 +358,13 @@ const std::vector<std::string>& langLabels()
         std::vector<std::string> o;
         // Translated here, not in kLangs: that table is built before main(),
         // where the language is not known yet. This runs on first use.
-        for (const auto& l : kLangs) o.push_back(tr(l.label));
+        for (const auto& l : kLangs)
+        {
+            if (platform_ui::isMobile() && std::strcmp(l.code, "auto") == 0)
+                o.push_back(tr("System language"));
+            else
+                o.push_back(tr(l.label));
+        }
         return o;
     }();
     return v;
@@ -374,6 +425,18 @@ void load()
     {
         cfg.tmdbProxyUrl.clear();
     }
+    cfg.syncProvider = readStr(body, "syncProvider", cfg.syncProvider);
+    cfg.syncAuto     = readBool(body, "syncAuto", cfg.syncAuto);
+    cfg.syncLastTime = readInt64(body, "syncLastTime", cfg.syncLastTime);
+    cfg.syncLastError = readStr(body, "syncLastError", cfg.syncLastError);
+    cfg.syncWebdavUrl = readStr(body, "syncWebdavUrl", cfg.syncWebdavUrl);
+    cfg.syncWebdavUser = readStr(body, "syncWebdavUser", cfg.syncWebdavUser);
+    cfg.syncWebdavPass = readStr(body, "syncWebdavPass", cfg.syncWebdavPass);
+    cfg.syncGdriveClientId = readStr(body, "syncGdriveClientId", cfg.syncGdriveClientId);
+    cfg.syncGdriveClientSecret = readStr(body, "syncGdriveClientSecret", cfg.syncGdriveClientSecret);
+    cfg.syncGdriveRefreshToken = readStr(body, "syncGdriveRefreshToken", cfg.syncGdriveRefreshToken);
+    cfg.syncGdriveUserEmail = readStr(body, "syncGdriveUserEmail", cfg.syncGdriveUserEmail);
+
     cfg.logging = readBool(body, "logging", cfg.logging);
     cfg.hide4k  = readBool(body, "hide4k", cfg.hide4k);
     cfg.rateGovernor = readBool(body, "rateGovernor", cfg.rateGovernor);
@@ -436,6 +499,7 @@ void load()
 
 bool save()
 {
+    std::lock_guard<std::mutex> guard(g_saveLock);
     const char* sTabStr = (cfg.startupTab == Tab::STREMIO) ? "stremio" :
                           (cfg.startupTab == Tab::JACKETT) ? "jackett" :
                           (cfg.startupTab == Tab::HISTORY) ? "history" :
@@ -467,6 +531,18 @@ bool save()
     // Only a choice the user made is kept: otherwise the proxy keeps following
     // the UI language.
     if (cfg.tmdbProxyUserSet) kv("tmdbProxyEnabled", b(cfg.tmdbProxyEnabled));
+    kv("syncProvider", jsonStr(cfg.syncProvider));
+    kv("syncAuto", b(cfg.syncAuto));
+    kv("syncLastTime", std::to_string(cfg.syncLastTime));
+    kv("syncLastError", jsonStr(cfg.syncLastError));
+    kv("syncWebdavUrl", jsonStr(cfg.syncWebdavUrl));
+    kv("syncWebdavUser", jsonStr(cfg.syncWebdavUser));
+    kv("syncWebdavPass", jsonStr(cfg.syncWebdavPass));
+    kv("syncGdriveClientId", jsonStr(cfg.syncGdriveClientId));
+    kv("syncGdriveClientSecret", jsonStr(cfg.syncGdriveClientSecret));
+    kv("syncGdriveRefreshToken", jsonStr(cfg.syncGdriveRefreshToken));
+    kv("syncGdriveUserEmail", jsonStr(cfg.syncGdriveUserEmail));
+
     kv("logging", b(cfg.logging));
     kv("hide4k", b(cfg.hide4k));
     kv("rateGovernor", b(cfg.rateGovernor));

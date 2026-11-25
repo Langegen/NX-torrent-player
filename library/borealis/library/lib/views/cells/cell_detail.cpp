@@ -35,15 +35,18 @@ const std::string detailCellXML = R"xml(
             width="auto"
             height="auto"
             grow="1"
+            shrink="1"
+            singleLine="true"
             fontSize="@style/brls/sidebar/item_font_size"
             marginRight="@style/brls/listitem/descriptionIndent" />
 
         <brls:Label
             id="brls/rediocell/detail"
             horizontalAlign="right"
-            maxWidth="300"
+            maxWidth="50%"
             height="auto"
-            shrink="0"
+            shrink="1"
+            singleLine="true"
             fontSize="@style/brls/sidebar/item_font_size"
             textColor="@theme/brls/list/listItem_value_color"/>
 
@@ -53,6 +56,8 @@ const std::string detailCellXML = R"xml(
 DetailCell::DetailCell()
 {
     this->inflateFromXMLString(detailCellXML);
+    this->title->setClipsToBounds(true);
+    this->detail->setClipsToBounds(true);
 
     this->registerStringXMLAttribute("title", [this](std::string value)
         { this->title->setText(value); });

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -173,6 +174,23 @@ struct Config
     // TMDB is often unreachable directly. Only a user's choice is saved.
     bool tmdbProxyEnabled = false;
     bool tmdbProxyUserSet = false;
+
+    // Cloud synchronization (Google Drive / WebDAV)
+    std::string syncProvider = "none";  // "none", "gdrive", "webdav"
+    bool syncAuto = true;
+    int64_t syncLastTime = 0;
+    std::string syncLastError = "";
+
+    // WebDAV settings
+    std::string syncWebdavUrl = "https://webdav.yandex.ru";
+    std::string syncWebdavUser = "";
+    std::string syncWebdavPass = "";
+
+    // Google Drive settings
+    std::string syncGdriveClientId = "";
+    std::string syncGdriveClientSecret = "";
+    std::string syncGdriveRefreshToken = "";
+    std::string syncGdriveUserEmail = "";
 };
 
 // The numbers behind Config::bufferMode.
@@ -187,6 +205,9 @@ struct BufferPreset
 // The preset for the current setting, already capped to what this launch can
 // afford (an applet launch has far less RAM than a full one).
 BufferPreset bufferPreset();
+// True when running on Switch as an applet (e.g. via Album) with ~440 MB
+// total RAM rather than a full-RAM title takeover.
+bool isAppletMode();
 const std::vector<std::string>& bufferLabels();
 
 // The values of Config::endAction.

@@ -20,7 +20,7 @@ include(${BOREALIS_LIBRARY}/cmake/toolchain.cmake)
 
 project(NX-torrent-player)
 set(VERSION_MAJOR "1")
-set(VERSION_MINOR "2")
+set(VERSION_MINOR "3")
 set(VERSION_ALTER "")
 set(PROJECT_AUTHOR "shodowlo")
 # On-device app name shown in the Homebrew Menu.
@@ -45,6 +45,9 @@ set(UPDATE_TAG_URL "https://api.github.com/repos/${UPDATE_REPO}/releases/tags/"
 set(TMDB_API_KEY "8cf43ad9c085135b9479ad5cf6bbcbda" CACHE STRING "Default TMDB API key / read token")
 # Default TMDB proxy base URL (empty = built-in fallback)
 set(TMDB_PROXY_URL "" CACHE STRING "Default TMDB proxy URL")
+# Optional default Google Drive OAuth credentials (TVs and Limited Input devices)
+set(GDRIVE_CLIENT_ID "" CACHE STRING "Default Google Drive OAuth Client ID")
+set(GDRIVE_CLIENT_SECRET "" CACHE STRING "Default Google Drive OAuth Client Secret")
 set(PROJECT_ICON ${CMAKE_CURRENT_SOURCE_DIR}/assets/icon.jpg)
 set(PROJECT_RESOURCES ${CMAKE_CURRENT_SOURCE_DIR}/library/borealis/resources)
 
@@ -113,7 +116,9 @@ target_compile_definitions(${PROJECT_NAME} PRIVATE
     UPDATE_API_URL="${UPDATE_API_URL}"
     UPDATE_TAG_URL="${UPDATE_TAG_URL}"
     TMDB_API_KEY="${TMDB_API_KEY}"
-    TMDB_PROXY_URL="${TMDB_PROXY_URL}")
+    TMDB_PROXY_URL="${TMDB_PROXY_URL}"
+    GDRIVE_CLIENT_ID="${GDRIVE_CLIENT_ID}"
+    GDRIVE_CLIENT_SECRET="${GDRIVE_CLIENT_SECRET}")
 
 if (PLATFORM_SWITCH)
     # Bundle borealis' resources into the nro's romfs (borealis reads them from

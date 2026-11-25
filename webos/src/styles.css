@@ -1,0 +1,964 @@
+/* ==========================================================================
+   NX Torrent Player — Borealis / Nintendo Switch Horizon UI Theme for webOS
+   ========================================================================== */
+
+:root {
+  --bg-ink: #0d0d18;
+  --bg-field: radial-gradient(circle at 85% 15%, #1a173e 0%, #0d0d18 55%, #05050a 100%) fixed;
+  --bg-surface: rgba(22, 22, 36, 0.96);
+  --bg-card: #1c1c2e;
+  --bg-card-hover: #26263e;
+  --border: rgba(255, 255, 255, 0.08);
+  --border-focus: rgba(45, 253, 157, 0.8);
+
+  /* Nintendo Switch Horizon Purple Accent (matching main.cpp / theme.cpp) */
+  --accent: #603cf3;
+  --accent-rgb: 96, 60, 243;
+  --accent-text: #ffffff;
+  --focus-glow: 0 0 0 3.5px #2dfd9d, 0 0 20px rgba(45, 253, 157, 0.65), inset 0 0 10px rgba(45, 253, 157, 0.2);
+
+  --text-primary: #ffffff;
+  --text-secondary: #9a9ab2;
+  --text-muted: #6e6e88;
+
+  --rating-gold: #f5a623;
+  --seed-green: #2ecc71;
+  --peer-red: #e74c3c;
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+body {
+  width: 1920px;
+  height: 1080px;
+  overflow: hidden;
+  background: var(--bg-field);
+  color: var(--text-primary);
+  font-family: 'Space Grotesk', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  font-size: 16px;
+  display: flex;
+  flex-direction: column;
+}
+
+/* --------------------------------------------------------------------------
+   Borealis AppletFrame Header Bar
+   -------------------------------------------------------------------------- */
+.app-header {
+  height: 68px;
+  min-height: 68px;
+  background: rgba(18, 18, 28, 0.98);
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 40px;
+  z-index: 100;
+}
+
+.brand-group {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.app-logo {
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+}
+
+.brand-title {
+  font-size: 20px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  color: var(--text-primary);
+}
+
+/* Switch Top Tab Bar (attachTopTabBar) */
+.nav-tabs {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.nav-tab {
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--text-secondary);
+  font-size: 16px;
+  font-weight: 600;
+  padding: 8px 18px;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  outline: none;
+}
+
+.nav-tab:hover {
+  color: var(--text-primary);
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.nav-tab.active {
+  background: var(--accent);
+  color: var(--accent-text);
+  font-weight: 700;
+}
+
+.nav-tab.focus, .nav-tab:focus {
+  outline: none;
+  box-shadow: var(--focus-glow);
+  transform: scale(1.04);
+}
+
+/* Header Right Group */
+.header-right-group {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.header-action-btn {
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--border);
+  color: var(--text-primary);
+  font-size: 14px;
+  font-weight: 600;
+  padding: 6px 14px;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  outline: none;
+}
+
+.header-action-btn.focus, .header-action-btn:focus {
+  box-shadow: var(--focus-glow);
+  border-color: var(--accent);
+  transform: scale(1.04);
+}
+
+.cloud-sync-status {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.05);
+  font-size: 18px;
+  color: var(--accent);
+}
+
+.header-clock {
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  min-width: 50px;
+  text-align: right;
+}
+
+/* --------------------------------------------------------------------------
+   App Content Area
+   -------------------------------------------------------------------------- */
+.app-content {
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding-bottom: 30px;
+}
+
+.app-content::-webkit-scrollbar {
+  width: 0;
+  display: none;
+}
+
+/* --------------------------------------------------------------------------
+   Switch Bottom Hints Bar
+   -------------------------------------------------------------------------- */
+.app-footer-hints {
+  height: 52px;
+  min-height: 52px;
+  background: rgba(18, 18, 28, 0.98);
+  border-top: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  padding: 0 50px;
+  gap: 32px;
+  z-index: 100;
+}
+
+.hint-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-secondary);
+  font-size: 14px;
+  font-weight: 500;
+}
+
+/* Switch Round Button Glyphs */
+.btn-glyph {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: #252538;
+  border: 1.5px solid #4a4a62;
+  color: #ffffff;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.btn-glyph.btn-lr {
+  width: auto;
+  padding: 0 8px;
+  border-radius: 12px;
+}
+
+/* --------------------------------------------------------------------------
+   Hero Banner (Home Tab)
+   -------------------------------------------------------------------------- */
+.hero-container {
+  margin: 20px 60px 24px 60px;
+  height: 240px;
+  border-radius: 14px;
+  position: relative;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  border: 1px solid var(--border);
+  background-size: cover;
+  background-position: center 25%;
+}
+
+.hero-overlay {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, rgba(7, 7, 26, 0.95) 0%, rgba(7, 7, 26, 0.85) 45%, rgba(7, 7, 26, 0.3) 100%);
+}
+
+.hero-content {
+  position: relative;
+  z-index: 1;
+  padding: 0 32px 28px 32px;
+  max-width: 650px;
+}
+
+.hero-title {
+  font-size: 34px;
+  font-weight: 700;
+  line-height: 1.2;
+  color: #ffffff;
+  text-shadow: 0 2px 6px rgba(0, 0, 0, 0.8);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.hero-meta {
+  font-size: 15px;
+  color: rgba(255, 255, 255, 0.8);
+  margin-top: 6px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.meta-dot {
+  color: var(--accent);
+}
+
+.hero-buttons {
+  margin-top: 18px;
+  display: flex;
+  gap: 12px;
+}
+
+/* Borealis Standard Buttons */
+.btn-primary {
+  background: var(--accent);
+  color: var(--accent-text);
+  border: none;
+  font-size: 15px;
+  font-weight: 700;
+  padding: 10px 24px;
+  border-radius: 8px;
+  cursor: pointer;
+  outline: none;
+  transition: all 0.15s ease;
+}
+
+.btn-secondary {
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid var(--border);
+  color: #ffffff;
+  font-size: 15px;
+  font-weight: 600;
+  padding: 10px 22px;
+  border-radius: 8px;
+  cursor: pointer;
+  outline: none;
+  transition: all 0.15s ease;
+}
+
+.btn-primary.focus, .btn-primary:focus,
+.btn-secondary.focus, .btn-secondary:focus {
+  box-shadow: var(--focus-glow);
+  transform: scale(1.05);
+}
+
+/* --------------------------------------------------------------------------
+   Sections & Rows
+   -------------------------------------------------------------------------- */
+.section-heading {
+  margin: 18px 60px 10px 60px;
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--text-primary);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.strip-container {
+  display: flex;
+  gap: 18px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 8px 60px 16px 60px;
+  scroll-behavior: smooth;
+}
+
+.strip-container::-webkit-scrollbar {
+  display: none;
+}
+
+/* --------------------------------------------------------------------------
+   Cards (Posters & Continue Watching)
+   -------------------------------------------------------------------------- */
+/* 2:3 Catalog Poster (width: 150px, height: 225px) */
+.poster-card {
+  flex: 0 0 150px;
+  width: 150px;
+  height: 225px;
+  border-radius: 10px;
+  position: relative;
+  background-color: var(--bg-card);
+  background-size: cover;
+  background-position: center;
+  border: 1px solid var(--border);
+  cursor: pointer;
+  outline: none;
+  transition: transform 0.15s ease, box-shadow 0.15s ease, border-color 0.15s ease;
+  overflow: hidden;
+}
+
+.poster-card.focus, .poster-card:focus {
+  box-shadow: var(--focus-glow);
+  border-color: var(--accent);
+  transform: scale(1.06);
+  z-index: 10;
+}
+
+.poster-info-bottom {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  padding: 24px 8px 8px 8px;
+  background: linear-gradient(180deg, transparent 0%, rgba(7, 7, 26, 0.95) 80%);
+}
+
+.poster-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: #ffffff;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.poster-subtitle {
+  font-size: 11px;
+  color: var(--text-secondary);
+  display: flex;
+  justify-content: space-between;
+  margin-top: 2px;
+}
+
+.rating-badge {
+  color: var(--rating-gold);
+  font-weight: 700;
+}
+
+/* 16:9 Continue Watching Card (width: 260px, height: 146px) */
+.continue-card {
+  flex: 0 0 260px;
+  width: 260px;
+  height: 146px;
+  border-radius: 10px;
+  position: relative;
+  background-color: var(--bg-card);
+  background-size: cover;
+  background-position: center;
+  border: 1px solid var(--border);
+  cursor: pointer;
+  outline: none;
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+  overflow: hidden;
+}
+
+.continue-card.focus, .continue-card:focus {
+  box-shadow: var(--focus-glow);
+  border-color: var(--accent);
+  transform: scale(1.05);
+  z-index: 10;
+}
+
+.continue-overlay {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(180deg, transparent 40%, rgba(7, 7, 26, 0.95) 90%);
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  padding: 10px 14px;
+}
+
+.continue-title {
+  font-size: 14px;
+  font-weight: 700;
+  color: #ffffff;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.continue-subtitle {
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-top: 2px;
+}
+
+.timeline-progress-track {
+  width: 100%;
+  height: 4px;
+  background: rgba(255, 255, 255, 0.2);
+  border-radius: 2px;
+  margin-top: 6px;
+  overflow: hidden;
+}
+
+.timeline-progress-fill {
+  height: 100%;
+  background: var(--accent);
+}
+
+/* --------------------------------------------------------------------------
+   Filter Chips Bar (Movies / Shows / Bookmarks)
+   -------------------------------------------------------------------------- */
+.filter-bar {
+  display: flex;
+  gap: 10px;
+  padding: 14px 60px;
+  overflow-x: auto;
+}
+
+.filter-chip {
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+  padding: 6px 16px;
+  border-radius: 16px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  outline: none;
+}
+
+.filter-chip.active {
+  background: var(--accent);
+  color: var(--accent-text);
+}
+
+.filter-chip.focus, .filter-chip:focus {
+  box-shadow: var(--focus-glow);
+  transform: scale(1.05);
+}
+
+/* Grid Layout for Catalog Pages */
+.catalog-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 20px 18px;
+  padding: 10px 60px 40px 60px;
+}
+
+/* --------------------------------------------------------------------------
+   Card Modal (openContentCard replica)
+   -------------------------------------------------------------------------- */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(5, 5, 12, 0.88);
+  backdrop-filter: blur(8px);
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  animation: fadeIn 0.15s ease;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+.card-modal-backdrop {
+  width: 1720px;
+  height: 940px;
+  border-radius: 16px;
+  position: relative;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  background-size: cover;
+  background-position: center;
+  display: flex;
+  flex-direction: column;
+}
+
+.card-modal-shade {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, rgba(10, 10, 18, 0.98) 0%, rgba(10, 10, 18, 0.92) 50%, rgba(10, 10, 18, 0.45) 100%);
+}
+
+.card-modal-body {
+  position: relative;
+  z-index: 1;
+  padding: 40px 50px;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow-y: auto;
+}
+
+.card-modal-top {
+  display: flex;
+  gap: 36px;
+}
+
+.card-modal-poster {
+  width: 220px;
+  height: 330px;
+  border-radius: 12px;
+  background-size: cover;
+  background-position: center;
+  border: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.card-modal-info {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-start;
+}
+
+.card-modal-title {
+  font-size: 38px;
+  font-weight: 700;
+  line-height: 1.2;
+}
+
+.card-chips-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.meta-chip {
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid var(--border);
+  color: var(--text-primary);
+  padding: 4px 12px;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.card-overview {
+  font-size: 15px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+  margin-top: 16px;
+  max-width: 900px;
+}
+
+.card-actions-row {
+  display: flex;
+  gap: 14px;
+  margin-top: 24px;
+}
+
+/* Season Switcher & Episodes Strip */
+.seasons-section {
+  margin-top: 28px;
+}
+
+.seasons-bar {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.season-btn {
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+  padding: 6px 16px;
+  border-radius: 8px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  outline: none;
+}
+
+.season-btn.active {
+  background: var(--accent);
+  color: var(--accent-text);
+  font-weight: 700;
+}
+
+.season-btn.focus, .season-btn:focus {
+  box-shadow: var(--focus-glow);
+  transform: scale(1.05);
+}
+
+.episodes-strip {
+  display: flex;
+  gap: 16px;
+  overflow-x: auto;
+  padding-bottom: 10px;
+}
+
+.episode-card {
+  flex: 0 0 240px;
+  width: 240px;
+  border-radius: 8px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  overflow: hidden;
+  cursor: pointer;
+  outline: none;
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+
+.episode-card.focus, .episode-card:focus {
+  box-shadow: var(--focus-glow);
+  border-color: var(--accent);
+  transform: scale(1.05);
+}
+
+.episode-thumb {
+  width: 100%;
+  height: 135px;
+  background-size: cover;
+  background-position: center;
+  position: relative;
+}
+
+.episode-number-badge {
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  background: rgba(0, 0, 0, 0.75);
+  color: #ffffff;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.episode-info {
+  padding: 8px 10px;
+}
+
+.episode-title {
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* --------------------------------------------------------------------------
+   Sources Modal (openSourcesScreen replica)
+   -------------------------------------------------------------------------- */
+.sources-dialog {
+  width: 1100px;
+  max-height: 860px;
+  background: #141422;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.8);
+}
+
+.sources-header {
+  padding: 24px 32px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.sources-title {
+  font-size: 22px;
+  font-weight: 700;
+}
+
+.sources-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px 32px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.release-item {
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 14px 20px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  cursor: pointer;
+  outline: none;
+  transition: all 0.15s ease;
+}
+
+.release-item.focus, .release-item:focus {
+  box-shadow: var(--focus-glow);
+  border-color: var(--accent);
+  background: rgba(var(--accent-rgb), 0.12);
+  transform: scale(1.02);
+}
+
+.release-name-col {
+  flex: 1;
+  margin-right: 20px;
+}
+
+.release-name {
+  font-size: 15px;
+  font-weight: 600;
+  color: #ffffff;
+  margin-bottom: 6px;
+}
+
+.release-tags {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.badge-tag {
+  background: #252538;
+  color: var(--text-primary);
+  font-size: 11px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 4px;
+}
+
+.badge-tag.quality {
+  background: var(--accent);
+  color: var(--accent-text);
+}
+
+.badge-tag.best {
+  background: #f1c40f;
+  color: #000000;
+}
+
+.release-meta-col {
+  display: flex;
+  align-items: center;
+  gap: 24px;
+  text-align: right;
+  flex-shrink: 0;
+}
+
+.release-size {
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.release-seeds {
+  color: var(--seed-green);
+  font-size: 14px;
+  font-weight: 700;
+}
+
+/* --------------------------------------------------------------------------
+   Settings Modal (Borealis TabFrame replica)
+   -------------------------------------------------------------------------- */
+.settings-dialog {
+  width: 1200px;
+  height: 800px;
+  background: #141422;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  display: flex;
+  overflow: hidden;
+  box-shadow: 0 20px 50px rgba(0, 0, 0, 0.9);
+}
+
+.settings-sidebar {
+  width: 280px;
+  background: rgba(0, 0, 0, 0.3);
+  border-right: 1px solid var(--border);
+  padding: 30px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.settings-tab-btn {
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--text-secondary);
+  font-size: 16px;
+  font-weight: 600;
+  padding: 12px 18px;
+  border-radius: 8px;
+  text-align: left;
+  cursor: pointer;
+  outline: none;
+}
+
+.settings-tab-btn.active {
+  background: var(--accent);
+  color: var(--accent-text);
+  font-weight: 700;
+}
+
+.settings-tab-btn.focus, .settings-tab-btn:focus {
+  box-shadow: var(--focus-glow);
+  transform: scale(1.03);
+}
+
+.settings-pane {
+  flex: 1;
+  padding: 40px 50px;
+  overflow-y: auto;
+}
+
+.settings-group-title {
+  font-size: 20px;
+  font-weight: 700;
+  margin-bottom: 20px;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 10px;
+}
+
+.settings-row {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 22px;
+}
+
+.settings-label {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.settings-desc {
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.settings-input {
+  background: #202030;
+  border: 1px solid var(--border);
+  color: #ffffff;
+  padding: 10px 16px;
+  border-radius: 8px;
+  font-size: 15px;
+  outline: none;
+}
+
+.settings-input.focus, .settings-input:focus {
+  border-color: var(--accent);
+  box-shadow: var(--focus-glow);
+}
+
+/* --------------------------------------------------------------------------
+   Torrent Manager Screen (TorrServer Tab)
+   -------------------------------------------------------------------------- */
+.torrents-view-header {
+  padding: 24px 60px 10px 60px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.torrents-table {
+  margin: 10px 60px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.torrent-card-item {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 16px 24px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  outline: none;
+  cursor: pointer;
+}
+
+.torrent-card-item.focus, .torrent-card-item:focus {
+  box-shadow: var(--focus-glow);
+  border-color: var(--accent);
+  transform: scale(1.02);
+}
+
+/* Spinner */
+.spinner {
+  width: 44px;
+  height: 44px;
+  border: 4px solid rgba(255, 255, 255, 0.1);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}

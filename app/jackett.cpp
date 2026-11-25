@@ -3,6 +3,11 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdio>
+
+#include "http.hpp"
+#include "json.hpp"
+
+#ifndef JACKETT_NO_UI
 #include <dirent.h>
 #include <set>
 #include <sys/stat.h>
@@ -13,10 +18,9 @@
 #include "config.hpp"
 #include "history.hpp"
 #include "library.hpp"
-#include "http.hpp"
 #include "i18n.hpp"
-#include "json.hpp"
 #include "workers.hpp"
+#endif
 
 namespace jackett
 {
@@ -34,6 +38,226 @@ std::string cleanBaseUrl(std::string url)
     return url;
 }
 
+std::string lowerAscii(std::string s)
+{
+    for (char& c : s) c = (char)std::tolower((unsigned char)c);
+    return s;
+}
+
+std::string trimSpaces(const std::string& s)
+{
+    size_t a = 0;
+    while (a < s.size() && std::isspace((unsigned char)s[a])) a++;
+    size_t b = s.size();
+    while (b > a && std::isspace((unsigned char)s[b - 1])) b--;
+    return s.substr(a, b - a);
+}
+
+// Converts a 32-char RFC 4648 base32 btih to 40-char lowercase hex so magnets
+// from different indexers deduplicate against each other.
+std::string base32ToHex(const std::string& b32)
+{
+    if (b32.size() != 32) return "";
+    uint8_t bytes[20] = {};
+    int bits = 0, val = 0, outIdx = 0;
+    for (char ch : b32)
+    {
+        char c = (char)std::toupper((unsigned char)ch);
+        int d = -1;
+        if (c >= 'A' && c <= 'Z') d = c - 'A';
+        else if (c >= '2' && c <= '7') d = 26 + (c - '2');
+        else return "";
+        val = (val << 5) | d;
+        bits += 5;
+        if (bits >= 8)
+        {
+            bits -= 8;
+            if (outIdx < 20) bytes[outIdx++] = (uint8_t)((val >> bits) & 0xFF);
+        }
+    }
+    if (outIdx != 20) return "";
+    static const char* const kHex = "0123456789abcdef";
+    std::string hex;
+    hex.reserve(40);
+    for (int i = 0; i < 20; i++)
+    {
+        hex += kHex[bytes[i] >> 4];
+        hex += kHex[bytes[i] & 0xF];
+    }
+    return hex;
+}
+
+} // namespace
+
+std::vector<std::string> splitTrackers(const std::string& tracker)
+{
+    std::vector<std::string> out;
+    std::vector<std::string> seenLow;
+    size_t from = 0;
+    while (from <= tracker.size())
+    {
+        size_t comma = tracker.find(',', from);
+        std::string part = trimSpaces(
+            comma == std::string::npos ? tracker.substr(from) : tracker.substr(from, comma - from));
+        if (!part.empty())
+        {
+            std::string low = lowerAscii(part);
+            if (std::find(seenLow.begin(), seenLow.end(), low) == seenLow.end())
+            {
+                seenLow.push_back(std::move(low));
+                out.push_back(std::move(part));
+            }
+        }
+        if (comma == std::string::npos) break;
+        from = comma + 1;
+    }
+    return out;
+}
+
+std::string compactTrackers(const std::vector<std::string>& trackers)
+{
+    if (trackers.empty()) return "";
+    if (trackers.size() == 1) return trackers[0];
+    return trackers[0] + " +" + std::to_string(trackers.size() - 1);
+}
+
+std::string extractInfoHash(const std::string& uri)
+{
+    if (uri.empty()) return "";
+    std::string low = lowerAscii(uri);
+    size_t p = low.find("btih:");
+    if (p == std::string::npos) return "";
+    p += 5;
+    size_t end = p;
+    while (end < low.size() && std::isalnum((unsigned char)low[end])) end++;
+    std::string raw = low.substr(p, end - p);
+    if (raw.size() == 40)
+    {
+        for (char c : raw)
+            if (!std::isxdigit((unsigned char)c)) return "";
+        return raw;
+    }
+    if (raw.size() == 32) return base32ToHex(raw);
+    return "";
+}
+
+std::vector<Item> parseResultsJson(const std::string& resp)
+{
+    std::vector<Item> items;
+    for (const auto& obj : json::objects(resp, "Results"))
+    {
+        std::string top = json::topLevel(obj);
+        Item it;
+        it.title = json::str(top, "Title");
+        if (it.title.empty()) continue;
+        it.tracker = json::str(top, "Tracker");
+        if (it.tracker.empty()) it.tracker = json::str(top, "TrackerId");
+        it.trackers     = splitTrackers(it.tracker);
+        it.size         = json::integer(top, "Size");
+        it.seeders      = (int)json::integer(top, "Seeders");
+        it.peers        = (int)json::integer(top, "Peers");
+        it.publishDate  = json::str(top, "PublishDate");
+        it.magnetUri    = json::str(top, "MagnetUri");
+        it.link         = json::str(top, "Link");
+        it.categoryDesc = json::str(top, "CategoryDesc");
+
+        for (long c : json::integers(obj, "Category"))
+            it.categories.push_back((int)c);
+        it.languages = json::strings(obj, "languages");
+
+        it.infoHash = extractInfoHash(it.magnetUri);
+        if (it.infoHash.empty() && it.link.rfind("magnet:", 0) == 0)
+            it.infoHash = extractInfoHash(it.link);
+
+        std::string infoObj = json::object(obj, "info");
+        if (!infoObj.empty())
+        {
+            it.hasJacredInfo    = true;
+            it.infoQuality      = (int)json::integer(infoObj, "quality", 0);
+            it.infoVideotype    = json::str(infoObj, "videotype");
+            it.infoVoices       = json::strings(infoObj, "voices");
+            for (long s : json::integers(infoObj, "seasons"))
+                if (s > 0 && s < 100) it.infoSeasons.push_back((int)s);
+            it.infoTypes        = json::strings(infoObj, "types");
+            it.infoName         = json::str(infoObj, "name");
+            it.infoOriginalName = json::str(infoObj, "originalname");
+            it.infoYear         = (int)json::integer(infoObj, "relased", 0);
+            if (it.infoYear <= 0) it.infoYear = (int)json::integer(infoObj, "released", 0);
+            it.infoImdb         = json::str(infoObj, "imdb");
+            it.seedersUnknown   = json::boolean(infoObj, "seedersUnknown", false);
+            it.seedersLive      = json::boolean(infoObj, "seedersLive", false);
+        }
+
+        items.push_back(std::move(it));
+    }
+    sortItems(items, SortBy::SEEDERS);
+    return items;
+}
+
+std::string buildSearchUrl(const std::string& baseUrl, const std::string& apiKey,
+                           const std::string& query, Category category,
+                           const TitleHint* hint)
+{
+    std::string base = cleanBaseUrl(baseUrl);
+    std::string url  = base + "/api/v2.0/indexers/all/results?";
+    if (!apiKey.empty())
+    {
+        url += "apikey=" + http::urlEncode(apiKey) + "&";
+    }
+    url += "Query=" + http::urlEncode(query);
+
+    if (category != Category::ALL)
+    {
+        url += "&Category[]=" + std::to_string(static_cast<int>(category));
+        if (hint && hint->anime && category != Category::ANIME)
+            url += "&Category[]=" + std::to_string(static_cast<int>(Category::ANIME));
+    }
+    // Lampa's extra parameters: a Jacred server then matches the title and
+    // year itself (a "Fallout" search stops returning game repacks).
+    if (hint)
+    {
+        if (!hint->title.empty()) url += "&title=" + http::urlEncode(hint->title);
+        if (!hint->titleOriginal.empty())
+            url += "&title_original=" + http::urlEncode(hint->titleOriginal);
+        if (!hint->year.empty()) url += "&year=" + http::urlEncode(hint->year);
+        const char* isSerial = hint->series ? "2" : (hint->anime ? "0" : "1");
+        url += std::string("&is_serial=") + isSerial;
+    }
+    return url;
+}
+
+void sortItems(std::vector<Item>& items, SortBy sort)
+{
+    switch (sort)
+    {
+        case SortBy::SEEDERS:
+            std::sort(items.begin(), items.end(), [](const Item& a, const Item& b) {
+                if (a.seeders != b.seeders) return a.seeders > b.seeders;
+                return a.size > b.size;
+            });
+            break;
+
+        case SortBy::SIZE:
+            std::sort(items.begin(), items.end(), [](const Item& a, const Item& b) {
+                if (a.size != b.size) return a.size > b.size;
+                return a.seeders > b.seeders;
+            });
+            break;
+
+        case SortBy::DATE:
+            std::sort(items.begin(), items.end(), [](const Item& a, const Item& b) {
+                if (a.publishDate != b.publishDate) return a.publishDate > b.publishDate;
+                return a.seeders > b.seeders;
+            });
+            break;
+    }
+}
+
+#ifndef JACKETT_NO_UI
+
+namespace
+{
+
 std::string sanitizeFilename(const std::string& name)
 {
     std::string out;
@@ -49,30 +273,6 @@ std::string sanitizeFilename(const std::string& name)
         out.pop_back();
     if (out.empty()) out = "torrent";
     return out;
-}
-
-// The releases of a search answer, most seeded first.
-std::vector<Item> parseResults(const std::string& resp)
-{
-    std::vector<Item> items;
-    for (const auto& obj : json::objects(resp, "Results"))
-    {
-        Item it;
-        it.title = json::str(obj, "Title");
-        if (it.title.empty()) continue;
-        it.tracker = json::str(obj, "Tracker");
-        if (it.tracker.empty()) it.tracker = json::str(obj, "TrackerId");
-        it.size         = json::integer(obj, "Size");
-        it.seeders      = (int)json::integer(obj, "Seeders");
-        it.peers        = (int)json::integer(obj, "Peers");
-        it.publishDate  = json::str(obj, "PublishDate");
-        it.magnetUri    = json::str(obj, "MagnetUri");
-        it.link         = json::str(obj, "Link");
-        it.categoryDesc = json::str(obj, "CategoryDesc");
-        items.push_back(std::move(it));
-    }
-    sortItems(items, SortBy::SEEDERS);
-    return items;
 }
 
 bool appendMagnetToFile(const std::string& path, const std::string& magnet)
@@ -140,33 +340,6 @@ std::string normalizeDownloadLink(const std::string& link)
     return out;
 }
 
-void sortItems(std::vector<Item>& items, SortBy sort)
-{
-    switch (sort)
-    {
-        case SortBy::SEEDERS:
-            std::sort(items.begin(), items.end(), [](const Item& a, const Item& b) {
-                if (a.seeders != b.seeders) return a.seeders > b.seeders;
-                return a.size > b.size;
-            });
-            break;
-
-        case SortBy::SIZE:
-            std::sort(items.begin(), items.end(), [](const Item& a, const Item& b) {
-                if (a.size != b.size) return a.size > b.size;
-                return a.seeders > b.seeders;
-            });
-            break;
-
-        case SortBy::DATE:
-            std::sort(items.begin(), items.end(), [](const Item& a, const Item& b) {
-                if (a.publishDate != b.publishDate) return a.publishDate > b.publishDate;
-                return a.seeders > b.seeders;
-            });
-            break;
-    }
-}
-
 void searchAsync(const std::string& query, Category category,
                  std::function<void(SearchResult)> cb, const TitleHint* hint)
 {
@@ -181,29 +354,7 @@ void searchAsync(const std::string& query, Category category,
     }
 
     std::string base = cleanBaseUrl(cfg.jackettUrl);
-    std::string url  = base + "/api/v2.0/indexers/all/results?";
-    if (!cfg.jackettApiKey.empty())
-    {
-        url += "apikey=" + http::urlEncode(cfg.jackettApiKey) + "&";
-    }
-    url += "Query=" + http::urlEncode(query);
-
-    if (category != Category::ALL)
-    {
-        url += "&Category[]=" + std::to_string(static_cast<int>(category));
-        if (hint && hint->anime && category != Category::ANIME)
-            url += "&Category[]=" + std::to_string(static_cast<int>(Category::ANIME));
-    }
-    // Lampa's extra parameters: a Jacred server then matches the title and
-    // year itself (a "Fallout" search stops returning game repacks).
-    if (hint)
-    {
-        if (!hint->title.empty()) url += "&title=" + http::urlEncode(hint->title);
-        if (!hint->titleOriginal.empty())
-            url += "&title_original=" + http::urlEncode(hint->titleOriginal);
-        if (!hint->year.empty()) url += "&year=" + http::urlEncode(hint->year);
-        url += std::string("&is_serial=") + (hint->series ? "2" : "1");
-    }
+    std::string url  = buildSearchUrl(base, cfg.jackettApiKey, query, category, hint);
 
     // Not the URL itself: it carries the API key, and the log is a plain file
     // on the SD card that people attach to bug reports.
@@ -226,7 +377,7 @@ void searchAsync(const std::string& query, Category category,
                 brls::Logger::error("[jackett] bad answer (HTTP {}): {}", status,
                                     resp.substr(0, 160));
             else
-                items = parseResults(resp);
+                items = parseResultsJson(resp);
             if (d.failed > 0)
                 brls::Logger::warning("[jackett] {} of {} indexers failed, first: {}",
                                       d.failed, d.indexers, d.detail);
@@ -458,5 +609,7 @@ void saveToLocalAsync(const Item& item,
 
     cb(false, tr("No playable link or magnet URI found for this torrent."));
 }
+
+#endif // JACKETT_NO_UI
 
 } // namespace jackett

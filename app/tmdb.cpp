@@ -310,9 +310,11 @@ bool parseDetails(const std::string& body, content::Kind kind,
                 if (enTitle.empty()) enTitle = json::str(dataObj, "name");
                 std::string enOverview = json::str(dataObj, "overview");
 
-                if (hadBadGlyphs && !enTitle.empty() && !hasUnsupportedGlyphs(enTitle))
+                if (!enTitle.empty() && !hasUnsupportedGlyphs(enTitle))
                 {
-                    out.item.title = enTitle;
+                    out.item.englishTitle = enTitle;
+                    if (hadBadGlyphs)
+                        out.item.title = enTitle;
                 }
                 if (out.item.overview.empty() && !enOverview.empty() && !hasUnsupportedGlyphs(enOverview))
                 {

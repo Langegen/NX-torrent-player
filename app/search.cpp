@@ -6,6 +6,7 @@
 
 #include "collection.hpp"  // PosterGrid
 #include "i18n.hpp"
+#include "platform_ui.hpp"
 #include "theme.hpp"
 #include "tmdb.hpp"
 #include "widgets.hpp"
@@ -21,7 +22,7 @@
 namespace
 {
 
-constexpr float kInset = 60.0f;
+inline float inset() { return platform_ui::sideInset(); }
 constexpr float kTileW = 230.0f;
 constexpr float kTileH = 96.0f;
 constexpr float kGap   = 16.0f;
@@ -66,12 +67,14 @@ class SearchScreen : public brls::Box
         setAxis(brls::Axis::COLUMN);
         setGrow(1.0f);
 
+        float ins = inset();
+
         // The search bar.
         bar = new brls::Box();
         bar->setAxis(brls::Axis::ROW);
         bar->setAlignItems(brls::AlignItems::CENTER);
         bar->setHeight(58.0f);
-        bar->setMargins(14.0f, kInset, 0.0f, kInset);
+        bar->setMargins(14.0f, ins, 0.0f, ins);
         bar->setPadding(0.0f, 22.0f, 0.0f, 22.0f);
         bar->setCornerRadius(10.0f);
         bar->setBackgroundColor(theme::scrim(22));
@@ -88,20 +91,22 @@ class SearchScreen : public brls::Box
         bar->addGestureRecognizer(new brls::TapGestureRecognizer(bar));
         addView(bar);
 
-        // The filters.
-        auto* filters = new brls::Box();
-        filters->setAxis(brls::Axis::ROW);
-        filters->setMargins(12.0f, kInset, 6.0f, kInset);
+        // The filters (scrollable strip so pills never wrap mid-word in portrait).
+        filtersRow = new brls::Box();
+        filtersRow->setPadding(4.0f, ins, 4.0f, ins);
         kindBtn  = ui::actionButton("", false, [this]() { pickKind(); });
         genreBtn = ui::actionButton("", false, [this]() { pickGenre(); });
         yearBtn  = ui::actionButton("", false, [this]() { pickYear(); });
         sortBtn  = ui::actionButton("", false, [this]() { pickSort(); });
-        filters->addView(kindBtn);
-        filters->addView(genreBtn);
-        filters->addView(yearBtn);
-        filters->addView(sortBtn);
-        filters->addView(ui::actionButton(tr("Reset"), false, [this]() { reset(); }));
-        addView(filters);
+        filtersRow->addView(kindBtn);
+        filtersRow->addView(genreBtn);
+        filtersRow->addView(yearBtn);
+        filtersRow->addView(sortBtn);
+        filtersRow->addView(ui::actionButton(tr("Reset"), false, [this]() { reset(); }));
+        auto* filterStrip = ui::pillStrip(filtersRow, 56.0f);
+        filterStrip->setMarginTop(8.0f);
+        filterStrip->setMarginBottom(4.0f);
+        addView(filterStrip);
 
         scroll = new brls::ScrollingFrame();
         scroll->setGrow(1.0f);
@@ -117,6 +122,14 @@ class SearchScreen : public brls::Box
 
         refreshLabels();
         showTiles();
+
+        resizeSub = brls::Application::getWindowSizeChangedEvent()->subscribe([this]() {
+            float s = inset();
+            if (bar) bar->setMargins(14.0f, s, 0.0f, s);
+            if (filtersRow) filtersRow->setPadding(4.0f, s, 4.0f, s);
+            if (tiles) showTiles();
+        });
+        resizeSubscribed = true;
     }
 
     void openKeyboard() { prompt(); }
@@ -136,6 +149,7 @@ class SearchScreen : public brls::Box
 
     brls::Box* bar = nullptr;
     brls::Label* barText = nullptr;
+    brls::Box* filtersRow = nullptr;
     brls::Button *kindBtn = nullptr, *genreBtn = nullptr, *yearBtn = nullptr,
                  *sortBtn = nullptr;
     brls::ScrollingFrame* scroll = nullptr;
@@ -144,6 +158,8 @@ class SearchScreen : public brls::Box
     brls::Box* sections = nullptr;  // "All": a heading and a grid per type
     PosterGrid* grid = nullptr;
     bool gridShown = false;
+    brls::VoidEvent::Subscription resizeSub;
+    bool resizeSubscribed = false;
 
     std::string genreName() const
     {
@@ -216,14 +232,18 @@ class SearchScreen : public brls::Box
         tiles = new brls::Box();
         tiles->setAxis(brls::Axis::COLUMN);
         tiles->setPadding(8.0f, 0.0f, 24.0f, 0.0f);
+        float ins = inset();
         auto* head = new brls::Label();
         head->setText(tr("Genres"));
         head->setFontSize(21.0f);
-        head->setMargins(6.0f, 0.0f, 10.0f, kInset);
+        head->setMargins(6.0f, 0.0f, 10.0f, ins);
         tiles->addView(head);
 
-        float usable = brls::Application::contentWidth - 2 * kInset + kGap;
-        int cols     = std::max(2, (int)(usable / (kTileW + kGap)));
+        bool mobile   = platform_ui::isMobile();
+        bool portrait = platform_ui::isPortrait();
+        float usable  = brls::Application::contentWidth - 2.0f * ins;
+        int cols      = (mobile && portrait) ? 2 : std::max(2, (int)((usable + kGap) / (kTileW + kGap)));
+        float tileW   = mobile ? std::floor((usable - (cols - 1) * kGap) / cols) : kTileW;
         brls::Box* row = nullptr;
         int i = 0;
         for (const auto& g : tmdb::genres(kind))
@@ -231,12 +251,12 @@ class SearchScreen : public brls::Box
             if (!row || (int)row->getChildren().size() >= cols)
             {
                 row = new ui::NearestRow();
-                row->setPaddingLeft(kInset);
+                row->setPaddingLeft(ins);
                 row->setMarginBottom(kGap);
                 tiles->addView(row);
             }
             int id = g.first;
-            row->addView(genreTile(tr(g.second), tileColor(i++), [this, id]() {
+            row->addView(genreTile(tr(g.second), tileColor(i++), tileW, [this, id]() {
                 genre = id;
                 refreshLabels();
                 grid->focusResultsOnce = true;  // the tile pressed is about to go
@@ -246,14 +266,15 @@ class SearchScreen : public brls::Box
         body->addView(tiles);
     }
 
-    brls::Box* genreTile(const std::string& name, NVGcolor color, std::function<void()> onClick)
+    brls::Box* genreTile(const std::string& name, NVGcolor color, float width,
+                         std::function<void()> onClick)
     {
         NVGcolor dark = color;
         dark.r *= 0.55f;
         dark.g *= 0.55f;
         dark.b *= 0.55f;
         auto* t = new ui::ShadeBox(true, color, dark, 1.0f);
-        t->setWidth(kTileW);
+        t->setWidth(width);
         t->setHeight(kTileH);
         t->setCornerRadius(10.0f);
         t->setMarginRight(kGap);
@@ -366,15 +387,16 @@ class SearchScreen : public brls::Box
         auto section = [this, &focusOnce](const std::string& title, const tmdb::ListQuery& q,
                                           std::function<bool(const content::Item&)> f,
                                           int pages) {
+            float ins = inset();
             if (!sections->getChildren().empty())
             {
                 auto* line = new brls::Box();
                 line->setHeight(2.0f);
-                line->setMargins(4.0f, kInset, 18.0f, kInset);
+                line->setMargins(4.0f, ins, 18.0f, ins);
                 line->setBackgroundColor(theme::scrim(60));
                 sections->addView(line);
             }
-            auto* head = ui::heading(title, kInset);
+            auto* head = ui::heading(title, ins);
             head->setMarginTop(8.0f);
             sections->addView(head);
             auto* g       = new PosterGrid();
@@ -564,6 +586,11 @@ class SearchScreen : public brls::Box
   public:
     ~SearchScreen() override
     {
+        if (resizeSubscribed)
+        {
+            brls::Application::getWindowSizeChangedEvent()->unsubscribe(resizeSub);
+            resizeSubscribed = false;
+        }
         // Not in the tree while the tiles are up: free it here then.
         if (!gridShown) delete grid;
     }

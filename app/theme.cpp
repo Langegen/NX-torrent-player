@@ -195,6 +195,42 @@ void drawStremioMark(NVGcontext* vg, float x, float y, float size)
     nvgFill(vg);
 }
 
+void drawAppMark(NVGcontext* vg, float x, float y, float size)
+{
+    NVGcolor base = accent();
+    NVGcolor topLeft = nvgRGBf(
+        base.r + (1.0f - base.r) * 0.22f,
+        base.g + (1.0f - base.g) * 0.22f,
+        base.b + (1.0f - base.b) * 0.22f);
+    NVGcolor botRight = nvgRGBf(base.r * 0.68f, base.g * 0.68f, base.b * 0.68f);
+
+    float r = size * 0.24f;
+    nvgBeginPath(vg);
+    nvgRoundedRect(vg, x, y, size, size, r);
+    nvgFillPaint(vg, nvgLinearGradient(vg, x, y, x + size, y + size, topLeft, botRight));
+    nvgFill(vg);
+
+    nvgBeginPath(vg);
+    nvgRoundedRect(vg, x + 0.5f, y + 0.5f, size - 1.0f, size - 1.0f, r);
+    nvgStrokeWidth(vg, 1.0f);
+    nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 45));
+    nvgStroke(vg);
+
+    // Crisp white centred play triangle (visually nudged right slightly for optical balance).
+    float px = x + size * 0.39f;
+    float pyTop = y + size * 0.30f;
+    float pyBot = y + size * 0.70f;
+    float pRight = x + size * 0.72f;
+    float pMidY = y + size * 0.50f;
+    nvgBeginPath(vg);
+    nvgMoveTo(vg, px, pyTop);
+    nvgLineTo(vg, pRight, pMidY);
+    nvgLineTo(vg, px, pyBot);
+    nvgClosePath(vg);
+    nvgFillColor(vg, nvgRGB(0xff, 0xff, 0xff));
+    nvgFill(vg);
+}
+
 void applyAccent()
 {
     // The focus highlight too: borealis' default glow is cyan, which clashes

@@ -14,6 +14,7 @@
 #include <memory>
 
 #include "config.hpp"
+#include "platform_ui.hpp"
 #include "player.hpp"
 #include "theme.hpp"
 #include "i18n.hpp"
@@ -366,7 +367,9 @@ class LoadingActivity : public brls::Activity
         l->setMargins(24, 0, 0, 0);
         box->addView(l);
 
-        auto* frame = new brls::AppletFrame();
+        brls::AppletFrame* frame = platform_ui::isMobile()
+            ? (brls::AppletFrame*)new ui::FieldFrame()
+            : new brls::AppletFrame();
         frame->pushContentView(box);
         // After pushContentView: it overwrites the title with the content
         // view's.
@@ -1249,17 +1252,21 @@ class MovieDetailActivity : public AddonSourcePicker
 
     brls::View* createContentView() override
     {
+        bool mobile   = platform_ui::isMobile();
+        bool portrait = mobile && platform_ui::isPortrait();
+        float ins     = platform_ui::sideInset();
+
         auto* root = new brls::Box();
-        root->setAxis(brls::Axis::ROW);
+        root->setAxis(portrait ? brls::Axis::COLUMN : brls::Axis::ROW);
         root->setGrow(1.0f);
         // No right padding: the addon and source rows run all the way to the
         // screen edge so their overflow scrolls off it (the text blocks carry
         // their own right margin instead).
-        root->setPadding(82.0f, 0.0f, 40.0f, 64.0f);  // top,right,bottom,left
+        root->setPadding(mobile ? 70.0f : 82.0f, 0.0f, 40.0f, mobile ? ins : 64.0f);  // top,right,bottom,left
 
         // ---- poster (left) ----------------------------------------------
         poster = new brls::Image();
-        poster->setDimensions(324.0f, 486.0f);  // 2:3
+        poster->setDimensions(portrait ? 140.0f : 324.0f, portrait ? 210.0f : 486.0f);  // 2:3
         poster->setScalingType(brls::ImageScalingType::FIT);
         poster->setCornerRadius(10.0f);
         poster->setShrink(0.0f);
@@ -1274,15 +1281,17 @@ class MovieDetailActivity : public AddonSourcePicker
         auto* right = new brls::Box();
         right->setAxis(brls::Axis::COLUMN);
         right->setGrow(1.0f);
-        right->setMarginLeft(56.0f);
+        right->setMarginLeft(portrait ? 0.0f : 56.0f);
+        if (portrait) right->setMarginTop(14.0f);
 
         // The text blocks keep a right margin off the screen edge; the scrolling
         // rows below deliberately do not (they run to the edge).
+        float rightTextPad = mobile ? ins : 60.0f;
         auto* titleL = new brls::Label();
         titleL->setText(item.name);
-        titleL->setFontSize(46.0f);
+        titleL->setFontSize(portrait ? 26.0f : 46.0f);
         titleL->setSingleLine(true);
-        titleL->setMarginRight(60.0f);
+        titleL->setMarginRight(rightTextPad);
         right->addView(titleL);
 
         metaLine = new brls::Label();
@@ -1290,7 +1299,7 @@ class MovieDetailActivity : public AddonSourcePicker
         metaLine->setFontSize(19.0f);
         metaLine->setTextColor(theme::textBody());
         metaLine->setMarginTop(14.0f);
-        metaLine->setMarginRight(60.0f);
+        metaLine->setMarginRight(rightTextPad);
         right->addView(metaLine);
 
         descLabel = new brls::Label();
@@ -1298,7 +1307,7 @@ class MovieDetailActivity : public AddonSourcePicker
         descLabel->setFontSize(18.0f);
         descLabel->setTextColor(theme::textBody());
         descLabel->setMarginTop(18.0f);
-        descLabel->setMarginRight(60.0f);
+        descLabel->setMarginRight(rightTextPad);
         right->addView(descLabel);
 
         // ---- addon tab bar (scrolls horizontally, like the sources) ------
@@ -1338,6 +1347,14 @@ class MovieDetailActivity : public AddonSourcePicker
         // designed). The footer -- battery/wifi/clock and the button hints --
         // stays, now over the gradient.
         frame->setHeaderVisibility(brls::Visibility::GONE);
+        if (mobile)
+        {
+            auto* back = ui::mobileBackButton([]() { brls::Application::popActivity(); }, true);
+            back->setPositionType(brls::PositionType::ABSOLUTE);
+            back->setPositionTop(14.0f);
+            back->setPositionLeft(16.0f);
+            frame->addView(back);
+        }
 
         loadPoster();
         loadMeta();
@@ -1417,18 +1434,22 @@ class EpisodeDetailActivity : public AddonSourcePicker
 
     brls::View* createContentView() override
     {
+        bool mobile   = platform_ui::isMobile();
+        bool portrait = mobile && platform_ui::isPortrait();
+        float ins     = platform_ui::sideInset();
+
         auto* root = new brls::Box();
         root->setAxis(brls::Axis::COLUMN);
         root->setGrow(1.0f);
-        root->setPadding(64.0f, 0.0f, 40.0f, 64.0f);
+        root->setPadding(mobile ? 70.0f : 64.0f, 0.0f, 40.0f, mobile ? ins : 64.0f);
 
         // ---- top row: still + episode meta ------------------------------
         auto* top = new brls::Box();
-        top->setAxis(brls::Axis::ROW);
-        top->setMarginRight(60.0f);
+        top->setAxis(portrait ? brls::Axis::COLUMN : brls::Axis::ROW);
+        top->setMarginRight(mobile ? ins : 60.0f);
 
         auto* still = new brls::Image();
-        still->setDimensions(360.0f, 202.0f);  // 16:9
+        still->setDimensions(portrait ? 280.0f : 360.0f, portrait ? 158.0f : 202.0f);  // 16:9
         still->setScalingType(brls::ImageScalingType::FIT);
         still->setCornerRadius(8.0f);
         still->setShrink(0.0f);
@@ -1445,12 +1466,13 @@ class EpisodeDetailActivity : public AddonSourcePicker
         auto* meta = new brls::Box();
         meta->setAxis(brls::Axis::COLUMN);
         meta->setGrow(1.0f);
-        meta->setMarginLeft(40.0f);
+        meta->setMarginLeft(portrait ? 0.0f : 40.0f);
+        if (portrait) meta->setMarginTop(14.0f);
         meta->setJustifyContent(brls::JustifyContent::CENTER);
 
         auto* titleL = new brls::Label();
         titleL->setText(label);
-        titleL->setFontSize(40.0f);
+        titleL->setFontSize(portrait ? 26.0f : 40.0f);
         titleL->setSingleLine(true);
         meta->addView(titleL);
 
@@ -1569,7 +1591,7 @@ class EpisodeDetailActivity : public AddonSourcePicker
                         trigger(b, id, tr("Previous episode"));
                         return true;
                     },
-                    false, false, brls::SOUND_CLICK);
+                    platform_ui::isMobile(), false, brls::SOUND_CLICK);
             }
             if (!nextId.empty())
             {
@@ -1582,7 +1604,7 @@ class EpisodeDetailActivity : public AddonSourcePicker
                         trigger(b, id, tr("Next episode"));
                         return true;
                     },
-                    false, false, brls::SOUND_CLICK);
+                    platform_ui::isMobile(), false, brls::SOUND_CLICK);
             }
             meta->addView(nav);
         }
@@ -1618,6 +1640,14 @@ class EpisodeDetailActivity : public AddonSourcePicker
         auto* frame = new GradientAppletFrame();
         frame->pushContentView(root);
         frame->setHeaderVisibility(brls::Visibility::GONE);
+        if (mobile)
+        {
+            auto* back = ui::mobileBackButton([]() { brls::Application::popActivity(); }, true);
+            back->setPositionType(brls::PositionType::ABSOLUTE);
+            back->setPositionTop(14.0f);
+            back->setPositionLeft(16.0f);
+            frame->addView(back);
+        }
 
         startAddonSources();
         return frame;
@@ -1706,13 +1736,17 @@ class SeriesDetailActivity : public brls::Activity
 
     brls::View* createContentView() override
     {
+        bool mobile   = platform_ui::isMobile();
+        bool portrait = mobile && platform_ui::isPortrait();
+        float ins     = platform_ui::sideInset();
+
         auto* root = new brls::Box();
-        root->setAxis(brls::Axis::ROW);
+        root->setAxis(portrait ? brls::Axis::COLUMN : brls::Axis::ROW);
         root->setGrow(1.0f);
-        root->setPadding(82.0f, 0.0f, 40.0f, 64.0f);
+        root->setPadding(mobile ? 70.0f : 82.0f, 0.0f, 40.0f, mobile ? ins : 64.0f);
 
         poster = new brls::Image();
-        poster->setDimensions(324.0f, 486.0f);
+        poster->setDimensions(portrait ? 140.0f : 324.0f, portrait ? 210.0f : 486.0f);
         poster->setScalingType(brls::ImageScalingType::FIT);
         poster->setCornerRadius(10.0f);
         poster->setShrink(0.0f);
@@ -1722,13 +1756,15 @@ class SeriesDetailActivity : public brls::Activity
         auto* right = new brls::Box();
         right->setAxis(brls::Axis::COLUMN);
         right->setGrow(1.0f);
-        right->setMarginLeft(56.0f);
+        right->setMarginLeft(portrait ? 0.0f : 56.0f);
+        if (portrait) right->setMarginTop(14.0f);
 
+        float rightTextPad = mobile ? ins : 60.0f;
         auto* titleL = new brls::Label();
         titleL->setText(item.name);
-        titleL->setFontSize(46.0f);
+        titleL->setFontSize(portrait ? 26.0f : 46.0f);
         titleL->setSingleLine(true);
-        titleL->setMarginRight(60.0f);
+        titleL->setMarginRight(rightTextPad);
         right->addView(titleL);
 
         metaLine = new brls::Label();
@@ -1736,7 +1772,7 @@ class SeriesDetailActivity : public brls::Activity
         metaLine->setFontSize(19.0f);
         metaLine->setTextColor(theme::textBody());
         metaLine->setMarginTop(14.0f);
-        metaLine->setMarginRight(60.0f);
+        metaLine->setMarginRight(rightTextPad);
         right->addView(metaLine);
 
         descLabel = new brls::Label();
@@ -1744,7 +1780,7 @@ class SeriesDetailActivity : public brls::Activity
         descLabel->setFontSize(18.0f);
         descLabel->setTextColor(theme::textBody());
         descLabel->setMarginTop(16.0f);
-        descLabel->setMarginRight(60.0f);
+        descLabel->setMarginRight(rightTextPad);
         right->addView(descLabel);
 
         // ---- season tab bar ---------------------------------------------
@@ -1778,6 +1814,14 @@ class SeriesDetailActivity : public brls::Activity
         auto* frame = new GradientAppletFrame();
         frame->pushContentView(root);
         frame->setHeaderVisibility(brls::Visibility::GONE);
+        if (mobile)
+        {
+            auto* back = ui::mobileBackButton([]() { brls::Application::popActivity(); }, true);
+            back->setPositionType(brls::PositionType::ABSOLUTE);
+            back->setPositionTop(14.0f);
+            back->setPositionLeft(16.0f);
+            frame->addView(back);
+        }
 
         loadPoster();
         loadMeta();
@@ -2217,7 +2261,8 @@ brls::View* ListActivity::createContentView()
     //    edge (getWidth() - 14), so any padding here pulled the bar inwards on
     //    top of the row text. The frame reaches the screen edge and the rows
     //    carry the inset instead (see RowCell).
-    box->setPadding(20.0f, 0.0f, 0.0f, 60.0f);
+    float ins = platform_ui::isMobile() ? platform_ui::sideInset() : 60.0f;
+    box->setPadding(20.0f, 0.0f, 0.0f, ins);
 
     if (!subtitle.empty())
     {
@@ -2225,7 +2270,7 @@ brls::View* ListActivity::createContentView()
         s->setText(subtitle);
         s->setFontSize(19);
         s->setTextColor(theme::textDim());
-        s->setMargins(0, 60.0f, 14, 0);  // matches the inset the rows carry
+        s->setMargins(0, ins, 14, 0);  // matches the inset the rows carry
         box->addView(s);
     }
 
@@ -2254,7 +2299,9 @@ brls::View* ListActivity::createContentView()
         focusSubbed = true;
     }
 
-    auto* frame = new brls::AppletFrame();
+    brls::AppletFrame* frame = platform_ui::isMobile()
+        ? (brls::AppletFrame*)new ui::FieldFrame()
+        : new brls::AppletFrame();
     frame->pushContentView(box);
     // After pushContentView: it overwrites the title with the content view's.
     frame->setTitle(title);

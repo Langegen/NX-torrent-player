@@ -327,7 +327,11 @@ int merge(std::vector<Entry>& into, const std::vector<Entry>& incoming,
                 if (std::find(it->folders.begin(), it->folders.end(), f) == it->folders.end())
                     it->folders.push_back(f);
             for (const auto& kv : eps)
-                if (!it->episodes.count(kv.first)) it->episodes[kv.first] = kv.second;
+            {
+                auto mine = it->episodes.find(kv.first);
+                if (mine == it->episodes.end() || kv.second.at > mine->second.at)
+                    it->episodes[kv.first] = kv.second;
+            }
         }
         else
             for (const auto& kv : in.episodes)
@@ -751,6 +755,32 @@ bool importFrom(const std::string& path, int& added, std::string& err)
     }
     saveAsync();
     return true;
+}
+
+std::string getJson()
+{
+    std::lock_guard<std::mutex> g(g_lock);
+    return toJson(g_entries, g_folders);
+}
+
+int mergeJson(const std::string& body)
+{
+    std::vector<std::string> inFolders;
+    std::vector<Entry> in = fromJson(body, &inFolders);
+    if (in.empty() && body.find("\"entries\"") == std::string::npos)
+        return 0;
+
+    int added    = 0;
+    bool changed = false;
+    {
+        std::lock_guard<std::mutex> g(g_lock);
+        std::string before = toJson(g_entries, g_folders);
+        added   = merge(g_entries, in, &g_folders, &inFolders);
+        changed = (added > 0) || (toJson(g_entries, g_folders) != before);
+    }
+    if (changed)
+        saveAsync();
+    return added;
 }
 
 #endif  // LIBRARY_NO_UI

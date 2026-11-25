@@ -126,6 +126,23 @@ void DesktopFontLoader::loadFonts()
         "/system/fonts/NotoSansSC-Regular",
         "/system/fonts/DroidSansChinese",
     };
+    if (Application::getFont(FONT_REGULAR) == FONT_INVALID)
+    {
+        std::vector<std::string> fallbackRegular = {
+            "/system/fonts/Roboto-Regular",
+            "/system/fonts/NotoSans-Regular",
+            "/system/fonts/DroidSans",
+        };
+        loadFontsExist(vg, fallbackRegular, FONT_REGULAR, "");
+    }
+    std::vector<std::string> androidSystemFonts = {
+        "/system/fonts/Roboto-Regular",
+        "/system/fonts/NotoSans-Regular",
+    };
+    if (Application::getFont(FONT_REGULAR) != FONT_INVALID)
+    {
+        loadFontsExist(vg, androidSystemFonts, "android_sys", FONT_REGULAR);
+    }
 #else
     std::vector<std::string> koreanFonts;
     std::vector<std::string> simplifiedChineseFonts;

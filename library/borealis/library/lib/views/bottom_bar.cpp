@@ -15,6 +15,7 @@
 */
 
 #include <borealis/views/bottom_bar.hpp>
+#include <borealis/views/applet_frame.hpp>
 #include <chrono>
 #include <ctime>
 #include <iomanip>
@@ -95,6 +96,9 @@ BottomBar::BottomBar()
     Platform* platform = Application::getPlatform();
     battery->setVisibility(platform->canShowBatteryLevel() ? Visibility::VISIBLE : Visibility::GONE);
     wireless->setVisibility(platform->canShowWirelessLevel() ? Visibility::VISIBLE : Visibility::GONE);
+
+    if (AppletFrame::HIDE_BOTTOM_BAR)
+        this->setVisibility(Visibility::GONE);
 }
 
 void BottomBar::draw(NVGcontext* vg, float x, float y, float width, float height, Style style, FrameContext* ctx)

@@ -22,17 +22,21 @@ namespace ui
 // frame -- header, content and footer alike. tabBgAt() samples the same.
 void paintField(NVGcontext* vg, float x, float y, float w, float h);
 
-// An AppletFrame on that field.
+// An AppletFrame on that field (with touch Back header support on mobile).
 class FieldFrame : public brls::AppletFrame
 {
   public:
-    using brls::AppletFrame::AppletFrame;
+    FieldFrame();
+    explicit FieldFrame(brls::View* contentView);
+    ~FieldFrame() override;
     void draw(NVGcontext* vg, float x, float y, float w, float h, brls::Style style,
-              brls::FrameContext* ctx) override
-    {
-        paintField(vg, x, y, w, h);
-        brls::AppletFrame::draw(vg, x, y, w, h, style, ctx);
-    }
+              brls::FrameContext* ctx) override;
+
+  private:
+    void initMobile();
+    void updateHeaderLayout();
+    brls::VoidEvent::Subscription resizeSub;
+    bool resizeSubscribed = false;
 };
 
 // A horizontal strip that, when the focus comes into it from outside (up or
@@ -189,6 +193,12 @@ brls::Label* heading(const std::string& text, float inset);
 // edges into the tab's background -- only right where that background is
 // behind the strip (not over a card's backdrop picture).
 brls::View* strip(brls::Box* row, float height, bool fade = true);
+
+// A clean touch-friendly Back arrow button for mobile headers and floating overlays.
+brls::Button* mobileBackButton(std::function<void()> onBack, bool floating = false);
+
+// A compact horizontally scrolling bar for pill filters or tab chips (no visible scrollbar).
+brls::HScrollingFrame* pillStrip(brls::Box* row, float height = 54.0f);
 
 // An upright poster card, as on the home screen: the artwork fills it, the
 // title sits on a dark band across the bottom. `badge` ("4K") goes top-left.

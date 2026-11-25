@@ -92,11 +92,23 @@ ${CXX:-g++} -O1 -g -Wall -std=c++17 \
     -o "$out/test_library"
 
 ${CXX:-g++} -O1 -g -Wall -std=c++17 \
-    -Iapp \
+    -DJACKETT_NO_UI -Iapp \
+    app/jackett.cpp \
     app/jackett_diag.cpp \
     app/json.cpp \
     pctest/test_jackett.cpp \
     -o "$out/test_jackett"
+
+${CXX:-g++} -O1 -g -Wall -std=c++17 \
+    -DLIBRARY_NO_UI -DHISTORY_NO_UI -Iapp \
+    app/history.cpp \
+    app/library.cpp \
+    app/json.cpp \
+    app/sync/qrcodegen.cpp \
+    app/sync/sync_webdav.cpp \
+    app/sync/sync_gdrive.cpp \
+    pctest/test_sync.cpp \
+    -o "$out/test_sync"
 
 "$out/test_suite"
 echo
@@ -116,6 +128,8 @@ echo
     --label "resume, back window 24 MB"
 "$out/test_stream" --size 128 --piece 2 --seeds 6000,6000 --resume 0 \
     --label "resume, no back window"
+"$out/test_stream" --size 32 --piece 4 --seeds 0,0,0 --corrupt 1 --strict \
+    --label "corrupt peer, strict verify"
 echo
 "$out/test_httpsrc"
 echo
@@ -128,3 +142,5 @@ echo
 "$out/test_library"
 echo
 "$out/test_jackett"
+echo
+"$out/test_sync"

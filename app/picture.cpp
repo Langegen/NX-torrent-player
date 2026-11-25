@@ -2,10 +2,22 @@
 
 #include <borealis.hpp>
 
+#ifdef __SWITCH__
 #include <switch.h>  // appletGetOperationMode
+#endif
 
+#ifdef __SDL2__
+#include <SDL.h>
+#ifdef USE_GLES2
+#include <GLES2/gl2.h>
+#include <GLES2/gl2ext.h>
+#elif defined(USE_GLES3)
+#include <GLES3/gl3.h>
+#endif
+#else
 #include <glad/glad.h>
 #include <GLFW/glfw3.h>
+#endif
 
 #ifdef ABSOLUTE
 #undef ABSOLUTE
@@ -92,9 +104,13 @@ bool step(int prop, int dir)
 
 bool handheld()
 {
-    // A cached read of what the applet message loop last heard, not an IPC
-    // call (see audioBoostWanted in player.cpp): fine per frame.
+#ifdef __SWITCH__
     return appletGetOperationMode() == AppletOperationMode_Handheld;
+#elif defined(__ANDROID__) || defined(ANDROID)
+    return true;
+#else
+    return false;
+#endif
 }
 
 namespace
@@ -159,17 +175,58 @@ std::string colorShader(int sat, int r, int g, int b)
     return path;
 }
 
-void applyColorShader(mpv_handle* mpv, int sat, int r, int g, int b)
+bool applyColorShader(mpv_handle* mpv, int sat, int r, int g, int b)
 {
-    // change-list, not a plain set: a set splits the list on ':' (and on the
-    // console every path has one, "sdmc:/").
-    const char* clr[] = { "change-list", "glsl-shaders", "clr", nullptr };
-    mpv_command(mpv, clr);
-    if (sat == 0 && r == 0 && g == 0 && b == 0) return;
-    std::string path = colorShader(sat, r, g, b);
+    std::string path;
+    if (sat != 0 || r != 0 || g != 0 || b != 0)
+    {
+        path = colorShader(sat, r, g, b);
+        if (path.empty())
+        {
+            brls::Logger::error("[picture] could not write color shader");
+            return false;
+        }
+    }
+
+    // Replace the shader list atomically (empty array clears all shaders) so
+    // previous steps can never accumulate, and paths with ':' are preserved.
+    mpv_node elem {};
+    mpv_node_list list {};
+    if (!path.empty())
+    {
+        elem.format   = MPV_FORMAT_STRING;
+        elem.u.string = const_cast<char*>(path.c_str());
+        list.num      = 1;
+        list.values   = &elem;
+    }
+    mpv_node node {};
+    node.format = MPV_FORMAT_NODE_ARRAY;
+    node.u.list = &list;
+
+    int rc = mpv_set_property(mpv, "glsl-shaders", MPV_FORMAT_NODE, &node);
+    if (rc >= 0) return true;
+
+    brls::Logger::warning("[picture] set glsl-shaders failed ({}), trying change-list",
+                          mpv_error_string(rc));
+    // change-list always requires 3 arguments, including "" for clr.
+    const char* clr[] = { "change-list", "glsl-shaders", "clr", "", nullptr };
+    int crc           = mpv_command(mpv, clr);
+    if (crc < 0)
+    {
+        brls::Logger::error("[picture] glsl-shaders clr failed: {}", mpv_error_string(crc));
+        return false;
+    }
+    if (path.empty()) return true;
+
     const char* add[] = { "change-list", "glsl-shaders", "append", path.c_str(), nullptr };
-    if (path.empty() || mpv_command(mpv, add) < 0)
-        brls::Logger::error("[picture] color shader did not load ({})", path);
+    int arc           = mpv_command(mpv, add);
+    if (arc < 0)
+    {
+        brls::Logger::error("[picture] color shader did not load ({}): {}", path,
+                            mpv_error_string(arc));
+        return false;
+    }
+    return true;
 }
 } // namespace
 
@@ -200,11 +257,13 @@ void sync(mpv_handle* mpv, Eq& applied)
         wantG   != applied.v[GREEN] ||
         wantB   != applied.v[BLUE])
     {
-        applyColorShader(mpv, wantSat, wantR, wantG, wantB);
-        applied.v[SATURATION] = wantSat;
-        applied.v[RED]        = wantR;
-        applied.v[GREEN]      = wantG;
-        applied.v[BLUE]       = wantB;
+        if (applyColorShader(mpv, wantSat, wantR, wantG, wantB))
+        {
+            applied.v[SATURATION] = wantSat;
+            applied.v[RED]        = wantR;
+            applied.v[GREEN]      = wantG;
+            applied.v[BLUE]       = wantB;
+        }
     }
 }
 
@@ -216,8 +275,12 @@ namespace
 
 void* getProcAddress(void*, const char* name)
 {
+#ifdef __SDL2__
+    return SDL_GL_GetProcAddress(name);
+#else
     glfwGetCurrentContext();
     return (void*)glfwGetProcAddress(name);
+#endif
 }
 
 // The test patterns (assets/patterns, made by tools/make_patterns.py). Each is
@@ -230,20 +293,26 @@ struct Pattern
     const char* hint;
 };
 
+#if defined(__ANDROID__) || defined(ANDROID)
+#define PATTERN_RES(p) APPDATA_DIR "/" p
+#else
+#define PATTERN_RES(p) APP_RES(p)
+#endif
+
 const Pattern kPatterns[] = {
-    { APP_RES("patterns/black.png"), "Black level",
+    { PATTERN_RES("patterns/black.png"), "Black level",
       "Bars 1 to 8 are 1% to 8% grey on black. Raise Brightness until bar 2 is "
       "just visible; lower it if the black background turns grey." },
-    { APP_RES("patterns/white.png"), "White level",
+    { PATTERN_RES("patterns/white.png"), "White level",
       "Bars 90 to 99 are on 100% white. Lower Contrast until the bars up to 98 "
       "stand apart from the background." },
-    { APP_RES("patterns/greyscale.png"), "Grey scale",
+    { PATTERN_RES("patterns/greyscale.png"), "Grey scale",
       "Every step should be distinct and a neutral grey. Dark steps merging: "
       "raise Gamma. Light steps merging: lower Contrast." },
-    { APP_RES("patterns/gamma.png"), "Gamma",
+    { PATTERN_RES("patterns/gamma.png"), "Gamma",
       "Hide the panel and look from arm's length: the patch that blends into "
       "its stripes is the screen's gamma. Adjust Gamma until it is 2.2." },
-    { APP_RES("patterns/colour.png"), "Colour",
+    { PATTERN_RES("patterns/colour.png"), "Colour",
       "Bars at 75% and 100%, and skin tones. Set Saturation so faces look "
       "natural, neither orange nor pale." },
 };
@@ -304,8 +373,9 @@ CalibrationView::CalibrationView()
         return true;
     };
     for (auto b : { brls::BUTTON_A, brls::BUTTON_B, brls::BUTTON_X, brls::BUTTON_Y,
-                    brls::BUTTON_NAV_UP, brls::BUTTON_NAV_DOWN, brls::BUTTON_NAV_LEFT,
-                    brls::BUTTON_NAV_RIGHT })
+                    brls::BUTTON_UP, brls::BUTTON_DOWN, brls::BUTTON_LEFT,
+                    brls::BUTTON_RIGHT, brls::BUTTON_NAV_UP, brls::BUTTON_NAV_DOWN,
+                    brls::BUTTON_NAV_LEFT, brls::BUTTON_NAV_RIGHT })
         catcher->registerAction("", b, back, true, false, brls::SOUND_NONE);
     addView(catcher);
 
@@ -449,7 +519,9 @@ bool CalibrationView::startMpv()
     mpv_set_option_string(mpv, "image-display-duration", "inf");
     mpv_set_option_string(mpv, "keep-open", "yes");
     mpv_set_option_string(mpv, "idle", "yes");
+#if !defined(__ANDROID__) && !defined(ANDROID)
     mpv_set_option_string(mpv, "opengl-glfinish", "yes");
+#endif
     if (mpv_initialize(mpv) < 0)
     {
         brls::Logger::error("[picture] mpv_initialize failed");

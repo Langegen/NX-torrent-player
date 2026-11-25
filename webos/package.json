@@ -1,0 +1,21 @@
+{
+  "name": "nx-torrent-player-webos",
+  "version": "1.0.0",
+  "description": "NX Torrent Player for LG webOS TV",
+  "main": "index.html",
+  "scripts": {
+    "start": "npx serve -l 3000 .",
+    "package": "ares-package . -o dist/",
+    "install:tv": "ares-install dist/org.nxtorrent.player_1.0.0_all.ipk",
+    "launch:tv": "ares-launch org.nxtorrent.player"
+  },
+  "keywords": [
+    "webos",
+    "lg-tv",
+    "torrent-player",
+    "torrserver",
+    "smart-tv"
+  ],
+  "author": "Langegen",
+  "license": "Apache-2.0"
+}

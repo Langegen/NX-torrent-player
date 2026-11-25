@@ -2,6 +2,7 @@
 #include <borealis/core/box.hpp>
 #include <borealis/views/label.hpp>
 #include <borealis/core/bind.hpp>
+#include <borealis/core/event.hpp>
 
 namespace brls
 {
@@ -31,6 +32,8 @@ class EditTextDialog : public Box
     Event<> backspaceEvent, cancelEvent, summitEvent;
     Event<std::string> clipboardEvent;
     bool init = false;
+    VoidEvent::Subscription resizeSub;
+    bool resizeSubActive = false;
 
     BRLS_BIND(brls::Label, header, "brls/dialog/header");
     BRLS_BIND(brls::Label, label, "brls/dialog/label");

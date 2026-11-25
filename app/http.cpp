@@ -136,6 +136,9 @@ static void verifyTls(CURL* curl, const std::string& url)
 {
 #ifdef __SWITCH__
     curl_easy_setopt(curl, CURLOPT_CAINFO, "romfs:/cacert.pem");
+#elif defined(__ANDROID__) || defined(ANDROID)
+    if (access(APPDATA_DIR "/cacert.pem", F_OK) == 0)
+        curl_easy_setopt(curl, CURLOPT_CAINFO, APPDATA_DIR "/cacert.pem");
 #else
     if (access(APP_RES("cacert.pem"), 0) == 0)
         curl_easy_setopt(curl, CURLOPT_CAINFO, APP_RES("cacert.pem"));
@@ -473,6 +476,103 @@ std::string urlEncode(const std::string& s)
         }
     }
     return out;
+}
+
+bool request(const std::string& url, const RequestOptions& opt, std::string& resp,
+             std::string& err, long* status)
+{
+    if (status) *status = 0;
+    resp.clear();
+    CURL* curl = threadHandle();
+    if (!curl)
+    {
+        err = "cannot initialise the network";
+        return false;
+    }
+
+    char errbuf[CURL_ERROR_SIZE] = { 0 };
+    struct curl_slist* hdrs = nullptr;
+
+    if (!opt.contentType.empty())
+        hdrs = curl_slist_append(hdrs, ("Content-Type: " + opt.contentType).c_str());
+    if (opt.method == "POST" || opt.method == "PUT" || opt.method == "PATCH")
+        hdrs = curl_slist_append(hdrs, "Expect:");
+    for (const auto& h : opt.headers)
+        hdrs = curl_slist_append(hdrs, h.c_str());
+
+    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+    curl_easy_setopt(curl, CURLOPT_USERAGENT, "NX-torrent-player");
+    if (hdrs)
+        curl_easy_setopt(curl, CURLOPT_HTTPHEADER, hdrs);
+
+    if (opt.method == "POST")
+    {
+        curl_easy_setopt(curl, CURLOPT_POST, 1L);
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDS, opt.body.c_str());
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, (long)opt.body.size());
+    }
+    else if (opt.method == "PUT")
+    {
+        curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, "PUT");
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDS, opt.body.c_str());
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, (long)opt.body.size());
+    }
+    else if (opt.method == "PROPFIND" || opt.method == "MKCOL" || opt.method == "DELETE" || opt.method == "PATCH")
+    {
+        curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, opt.method.c_str());
+        if (!opt.body.empty())
+        {
+            curl_easy_setopt(curl, CURLOPT_POSTFIELDS, opt.body.c_str());
+            curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, (long)opt.body.size());
+        }
+    }
+    else
+    {
+        curl_easy_setopt(curl, CURLOPT_HTTPGET, 1L);
+    }
+
+    if (!opt.username.empty() || !opt.password.empty())
+    {
+        curl_easy_setopt(curl, CURLOPT_HTTPAUTH, CURLAUTH_BASIC);
+        curl_easy_setopt(curl, CURLOPT_USERNAME, opt.username.c_str());
+        curl_easy_setopt(curl, CURLOPT_PASSWORD, opt.password.c_str());
+    }
+    else if (!opt.userPwd.empty())
+    {
+        curl_easy_setopt(curl, CURLOPT_HTTPAUTH, CURLAUTH_BASIC);
+        curl_easy_setopt(curl, CURLOPT_USERPWD, opt.userPwd.c_str());
+    }
+
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, writeCb);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &resp);
+    curl_easy_setopt(curl, CURLOPT_ERRORBUFFER, errbuf);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, opt.timeoutSec);
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, opt.followLocation ? 1L : 0L);
+    verifyTls(curl, url);
+    stoppable(curl);
+
+    CURLcode rc = curl_easy_perform(curl);
+    if (hdrs) curl_slist_free_all(hdrs);
+
+    if (status)
+    {
+        long s = 0;
+        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &s);
+        *status = s;
+    }
+
+    // Clear stack/transient pointers on the reused thread-local CURL handle.
+    curl_easy_setopt(curl, CURLOPT_ERRORBUFFER, nullptr);
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, nullptr);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, nullptr);
+    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, nullptr);
+
+    if (rc != CURLE_OK)
+    {
+        err = tlsAwareErr(rc, errbuf);
+        return false;
+    }
+    return true;
 }
 
 } // namespace http

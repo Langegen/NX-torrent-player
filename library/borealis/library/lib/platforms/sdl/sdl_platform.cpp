@@ -42,7 +42,8 @@ SDLPlatform::SDLPlatform()
 #ifdef ANDROID
     // Enable Fullscreen on Android
     VideoContext::FULLSCREEN = true;
-    SDL_SetHint(SDL_HINT_ORIENTATIONS, "LandscapeLeft LandscapeRight");
+    SDL_SetHint(SDL_HINT_ORIENTATIONS, "LandscapeLeft LandscapeRight Portrait");
+    SDL_SetHint(SDL_HINT_ANDROID_TRAP_BACK_BUTTON, "1");
     SDL_SetHint(SDL_HINT_ACCELEROMETER_AS_JOYSTICK, "0");
 #elif defined(IOS) || defined(TVOS)
     // Enable Fullscreen on iOS
@@ -180,7 +181,9 @@ std::string SDLPlatform::pasteFromClipboard()
     char *str = SDL_GetClipboardText();
     if (!str)
         return "";
-    return std::string{str};
+    std::string res{str};
+    SDL_free(str);
+    return res;
 }
 
 std::string SDLPlatform::getName()
@@ -233,6 +236,8 @@ bool SDLPlatform::processEvent(SDL_Event* event)
     {
         // 其它没有处理的事件
         this->otherEvent.fire(event);
+        if (event->type == SDL_DROPFILE && event->drop.file)
+            SDL_free(event->drop.file);
     }
     brls::Application::setActiveEvent(true);
     return true;

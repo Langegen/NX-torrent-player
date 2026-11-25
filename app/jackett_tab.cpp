@@ -1,7 +1,9 @@
 #include "jackett_tab.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <cstring>
+#include <map>
 #include <strings.h>
 #include <memory>
 #include <string>
@@ -14,10 +16,12 @@
 #include "config.hpp"
 #include "i18n.hpp"
 #include "jackett.hpp"
+#include "platform_ui.hpp"
 #include "player.hpp"
+#include "release.hpp"
 #include "torrent_play.hpp"
 #include "theme.hpp"
-#include "widgets.hpp"  // ui::FieldFrame
+#include "widgets.hpp"  // ui::FieldFrame, ui::actionButton, ui::pillStrip
 
 extern "C" {
 #include "torrent.h"
@@ -52,11 +56,42 @@ class JackettView
     JackettView(JackettTabRoot* root)
         : root(root), alive(root->alive)
     {
+        const std::string& al = config::get().audioLang;
+        want.preferRussian    = i18n::lang() == "ru" || al == "ru" ||
+                                (al == "auto" && config::consoleLang() == "ru");
+#ifdef __SWITCH__
+        want.switchProfile = true;
+#else
+        want.switchProfile = false;
+#endif
         setupLayout();
         refresh();
     }
 
   private:
+    struct ParsedRow
+    {
+        jackett::Item item;
+        release::Info info;
+        std::vector<std::string> trackers;
+        std::string trackerLabel;
+        int score = 0;
+    };
+
+    enum class SortMode
+    {
+        RECOMMENDED = 0,
+        SEEDERS     = 1,
+        SIZE        = 2,
+        DATE        = 3,
+    };
+
+    enum class Facet
+    {
+        Voice,
+        Tracker,
+    };
+
     JackettTabRoot* root = nullptr;
     std::shared_ptr<bool> alive;
 
@@ -70,30 +105,46 @@ class JackettView
     brls::Button* catAnimeBtn  = nullptr;
     brls::Button* sortBtn      = nullptr;
 
+    brls::Box* filterRow       = nullptr;
+    std::vector<std::pair<brls::Button*, int>> heightBtns;
+    brls::Button* aliveBtn     = nullptr;
+    brls::Button* voiceBtn     = nullptr;
+    brls::Button* trackerBtn   = nullptr;
+
     brls::Box* contentContainer = nullptr;
 
     std::string searchQuery;
     jackett::Category currentCategory = jackett::Category::ALL;
-    jackett::SortBy currentSort       = jackett::SortBy::SEEDERS;
-    std::vector<jackett::Item> searchResults;
+    SortMode currentSort              = SortMode::RECOMMENDED;
+    release::Want want;
+    int filterHeight                  = 0;
+    bool filterAliveOnly              = false;
+    std::string filterVoice;
+    std::string filterTracker;
+    std::vector<ParsedRow> searchResults;
     bool isSearching = false;
     std::string searchError;
 
     void setupLayout()
     {
-        // Top controls: search bar + categories + sort
+        bool mobile = platform_ui::isMobile();
+        float inset = platform_ui::sideInset();
+
+        // Top controls: search bar + categories + sort + release filters
         controlsBox = new brls::Box();
         controlsBox->setAxis(brls::Axis::COLUMN);
-        controlsBox->setPadding(20.0f, 60.0f, 10.0f, 60.0f);
+        controlsBox->setPadding(mobile ? 16.0f : 20.0f, mobile ? 0.0f : 60.0f, 6.0f,
+                                mobile ? 0.0f : 60.0f);
 
         // 1. Search Bar
         searchBar = new brls::Box();
         searchBar->setAxis(brls::Axis::ROW);
         searchBar->setAlignItems(brls::AlignItems::CENTER);
-        searchBar->setHeight(64.0f);
+        searchBar->setHeight(mobile ? 58.0f : 64.0f);
+        if (mobile) searchBar->setMargins(0.0f, inset, 0.0f, inset);
         searchBar->setPaddingLeft(20.0f);
         searchBar->setPaddingRight(24.0f);
-        searchBar->setCornerRadius(6.0f);
+        searchBar->setCornerRadius(mobile ? 10.0f : 6.0f);
         searchBar->setBackgroundColor(theme::scrim(20));
         searchBar->setFocusable(true);
         searchBar->addGestureRecognizer(new brls::TapGestureRecognizer(searchBar));
@@ -110,7 +161,7 @@ class JackettView
 
         barText = new brls::Label();
         barText->setText(tr("Search Jackett..."));
-        barText->setFontSize(22.0f);
+        barText->setFontSize(mobile ? 20.0f : 22.0f);
         barText->setTextColor(theme::textMuted());
         barText->setSingleLine(true);
         searchBar->addView(barText);
@@ -121,7 +172,10 @@ class JackettView
         categoryRow = new brls::Box();
         categoryRow->setAxis(brls::Axis::ROW);
         categoryRow->setAlignItems(brls::AlignItems::CENTER);
-        categoryRow->setMarginTop(12.0f);
+        if (mobile)
+            categoryRow->setPadding(4.0f, inset, 4.0f, inset);
+        else
+            categoryRow->setMarginTop(12.0f);
 
         catAllBtn    = makeCategoryButton(tr("All"), jackett::Category::ALL);
         catMovieBtn  = makeCategoryButton(tr("Movies"), jackett::Category::MOVIES);
@@ -133,11 +187,17 @@ class JackettView
         categoryRow->addView(catSeriesBtn);
         categoryRow->addView(catAnimeBtn);
 
-        auto* spacer = new brls::Box();
-        spacer->setGrow(1.0f);
-        categoryRow->addView(spacer);
+        if (!mobile)
+        {
+            auto* spacer = new brls::Box();
+            spacer->setGrow(1.0f);
+            categoryRow->addView(spacer);
+        }
 
         sortBtn = new brls::Button();
+        sortBtn->setShrink(0.0f);
+        if (auto* l = dynamic_cast<brls::Label*>(sortBtn->getView("brls/button/label")))
+            l->setSingleLine(true);
         sortBtn->setStyle(&brls::BUTTONSTYLE_BORDERLESS);
         updateSortButtonLabel();
         sortBtn->registerClickAction([this](brls::View*) {
@@ -146,22 +206,67 @@ class JackettView
         });
         categoryRow->addView(sortBtn);
 
-        controlsBox->addView(categoryRow);
+        if (mobile)
+        {
+            auto* strip = ui::pillStrip(categoryRow, 54.0f);
+            strip->setMarginTop(8.0f);
+            controlsBox->addView(strip);
+        }
+        else
+            controlsBox->addView(categoryRow);
+
+        // 3. Quality, alive-only, voice and tracker filters
+        filterRow = new brls::Box();
+        filterRow->setAxis(brls::Axis::ROW);
+        if (mobile) filterRow->setPadding(4.0f, inset, 4.0f, inset);
+        const std::pair<const char*, int> qualities[] = {
+            { "All", 0 }, { "2160p", 2160 }, { "1080p", 1080 }, { "720p", 720 }
+        };
+        for (const auto& q : qualities)
+        {
+            int height = q.second;
+            auto* b    = ui::actionButton(q.second ? q.first : tr(q.first), false, [this, height]() {
+                filterHeight = height;
+                updateFilterStyles();
+                if (!searchResults.empty()) refresh();
+            });
+            heightBtns.push_back({ b, height });
+            filterRow->addView(b);
+        }
+        aliveBtn = ui::actionButton(tr("Alive (>0)"), false, [this]() {
+            filterAliveOnly = !filterAliveOnly;
+            updateFilterStyles();
+            if (!searchResults.empty()) refresh();
+        });
+        voiceBtn   = ui::actionButton("", false, [this]() { pickFacet(Facet::Voice); });
+        trackerBtn = ui::actionButton("", false, [this]() { pickFacet(Facet::Tracker); });
+        filterRow->addView(aliveBtn);
+        filterRow->addView(voiceBtn);
+        filterRow->addView(trackerBtn);
+
+        auto* filterStrip = ui::pillStrip(filterRow, 50.0f);
+        filterStrip->setMarginTop(mobile ? 4.0f : 8.0f);
+        controlsBox->addView(filterStrip);
+
         root->addView(controlsBox);
 
-        // 3. Content container
+        // 4. Content container
         contentContainer = new brls::Box();
         contentContainer->setAxis(brls::Axis::COLUMN);
         contentContainer->setGrow(1.0f);
         root->addView(contentContainer);
 
         updateCategoryButtonStyles();
+        updateFilterStyles();
     }
 
     brls::Button* makeCategoryButton(const std::string& label, jackett::Category cat)
     {
         auto* btn = new brls::Button();
+        btn->setShrink(0.0f);
         btn->setText(label);
+        if (auto* l = dynamic_cast<brls::Label*>(btn->getView("brls/button/label")))
+            l->setSingleLine(true);
         btn->setStyle(&brls::BUTTONSTYLE_BORDERLESS);
         btn->setMarginRight(8.0f);
         btn->registerClickAction([this, cat](brls::View*) {
@@ -197,32 +302,127 @@ class JackettView
     {
         switch (currentSort)
         {
-            case jackett::SortBy::SEEDERS:
+            case SortMode::RECOMMENDED:
+                sortBtn->setText(tr("Sort: Recommended"));
+                break;
+            case SortMode::SEEDERS:
                 sortBtn->setText(tr("Sort: Seeders"));
                 break;
-            case jackett::SortBy::SIZE:
+            case SortMode::SIZE:
                 sortBtn->setText(tr("Sort: Size"));
                 break;
-            case jackett::SortBy::DATE:
+            case SortMode::DATE:
                 sortBtn->setText(tr("Sort: Date"));
                 break;
         }
     }
 
+    void updateFilterStyles()
+    {
+        for (auto& hb : heightBtns)
+            ui::setPillActive(hb.first, hb.second == filterHeight);
+        if (aliveBtn) ui::setPillActive(aliveBtn, filterAliveOnly);
+        if (voiceBtn)
+        {
+            voiceBtn->setText(filterVoice.empty() ? std::string(tr("Voice-over")) : filterVoice);
+            ui::setPillActive(voiceBtn, !filterVoice.empty());
+        }
+        if (trackerBtn)
+        {
+            trackerBtn->setText(filterTracker.empty() ? std::string(tr("Tracker")) : filterTracker);
+            ui::setPillActive(trackerBtn, !filterTracker.empty());
+        }
+    }
+
+    std::vector<std::string> facetValues(Facet f) const
+    {
+        std::map<std::string, int> count;
+        for (const auto& r : searchResults)
+        {
+            if (f == Facet::Voice)
+                for (const auto& v : r.info.voices) count[v]++;
+            else if (f == Facet::Tracker)
+            {
+                if (!r.trackers.empty())
+                    for (const auto& trk : r.trackers) count[trk]++;
+                else if (!r.trackerLabel.empty())
+                    count[r.trackerLabel]++;
+            }
+        }
+        std::vector<std::pair<std::string, int>> v(count.begin(), count.end());
+        std::stable_sort(v.begin(), v.end(),
+                         [](const auto& a, const auto& b) { return a.second > b.second; });
+        std::vector<std::string> out;
+        for (const auto& p : v) out.push_back(p.first);
+        return out;
+    }
+
+    void pickFacet(Facet f)
+    {
+        if (searchResults.empty()) return;
+        std::vector<std::string> labels, values;
+        labels.push_back(f == Facet::Voice ? tr("Any voice-over") : tr("Any tracker"));
+        values.push_back("");
+        for (const auto& v : facetValues(f))
+        {
+            labels.push_back(v);
+            values.push_back(v);
+        }
+        const std::string& cur = (f == Facet::Voice) ? filterVoice : filterTracker;
+        int sel = 0;
+        for (size_t i = 0; i < values.size(); i++)
+            if (values[i] == cur) sel = (int)i;
+        auto* dd = new brls::Dropdown(tr(f == Facet::Voice ? "Voice-over" : "Tracker"),
+                                      labels, [this, f, values](int i) {
+            if (i < 0 || i >= (int)values.size()) return;
+            if (f == Facet::Voice) filterVoice = values[i];
+            else filterTracker = values[i];
+            updateFilterStyles();
+            refresh();
+        }, sel);
+        brls::Application::pushActivity(new brls::Activity(dd));
+    }
+
+    void sortParsedResults()
+    {
+        std::stable_sort(searchResults.begin(), searchResults.end(),
+                         [this](const ParsedRow& a, const ParsedRow& b) {
+            switch (currentSort)
+            {
+                case SortMode::SEEDERS:
+                    if (a.item.seeders != b.item.seeders) return a.item.seeders > b.item.seeders;
+                    return a.item.size > b.item.size;
+                case SortMode::SIZE:
+                    if (a.item.size != b.item.size) return a.item.size > b.item.size;
+                    return a.item.seeders > b.item.seeders;
+                case SortMode::DATE:
+                    if (a.item.publishDate != b.item.publishDate)
+                        return a.item.publishDate > b.item.publishDate;
+                    return a.item.seeders > b.item.seeders;
+                case SortMode::RECOMMENDED:
+                default:
+                    if (a.score != b.score) return a.score > b.score;
+                    return a.item.seeders > b.item.seeders;
+            }
+        });
+    }
+
     void cycleSort()
     {
-        if (currentSort == jackett::SortBy::SEEDERS)
-            currentSort = jackett::SortBy::SIZE;
-        else if (currentSort == jackett::SortBy::SIZE)
-            currentSort = jackett::SortBy::DATE;
+        if (currentSort == SortMode::RECOMMENDED)
+            currentSort = SortMode::SEEDERS;
+        else if (currentSort == SortMode::SEEDERS)
+            currentSort = SortMode::SIZE;
+        else if (currentSort == SortMode::SIZE)
+            currentSort = SortMode::DATE;
         else
-            currentSort = jackett::SortBy::SEEDERS;
+            currentSort = SortMode::RECOMMENDED;
 
         updateSortButtonLabel();
         if (!searchResults.empty())
         {
-            jackett::sortItems(searchResults, currentSort);
-            renderResults();
+            sortParsedResults();
+            refresh();
         }
     }
 
@@ -277,6 +477,86 @@ class JackettView
             config::get().jackettUrl);
     }
 
+    void buildResultsFromItems(std::vector<jackett::Item>&& items)
+    {
+        want.series = (currentCategory == jackett::Category::SERIES ||
+                       currentCategory == jackett::Category::ANIME);
+        searchResults.clear();
+        std::map<std::string, size_t> seen;
+
+        for (const auto& it : items)
+        {
+            std::string key = !it.infoHash.empty()
+                                  ? ("ih:" + it.infoHash)
+                                  : (it.title + "|" + std::to_string(it.size / (1024 * 1024)));
+            ParsedRow row;
+            row.item     = it;
+            row.trackers = it.trackers;
+            if (row.trackers.empty() && !it.tracker.empty())
+                row.trackers = jackett::splitTrackers(it.tracker);
+            row.trackerLabel = row.trackers.empty() ? it.tracker
+                                                    : jackett::compactTrackers(row.trackers);
+            row.info         = release::parse(it.title);
+            if (it.hasJacredInfo || !it.languages.empty())
+            {
+                release::ExternalMeta meta;
+                meta.quality        = it.infoQuality;
+                meta.videotype      = it.infoVideotype;
+                meta.voices         = it.infoVoices;
+                meta.seasons        = it.infoSeasons;
+                meta.languages      = it.languages;
+                meta.trackers       = row.trackers;
+                meta.seedersUnknown = it.seedersUnknown;
+                release::enrich(row.info, meta);
+            }
+            row.score = release::score(row.info, it.seeders, it.size, want);
+
+            auto found = seen.find(key);
+            if (found != seen.end())
+            {
+                ParsedRow& ex = searchResults[found->second];
+                if (row.item.seeders > ex.item.seeders)
+                {
+                    ex.item.seeders        = row.item.seeders;
+                    ex.info.seedersUnknown = row.info.seedersUnknown;
+                }
+                if (ex.item.size <= 0 && row.item.size > 0) ex.item.size = row.item.size;
+                if (ex.item.publishDate.empty() && !row.item.publishDate.empty())
+                    ex.item.publishDate = row.item.publishDate;
+                for (const auto& trk : row.trackers)
+                {
+                    std::string tl = release::foldAscii(trk);
+                    for (char& c : tl) c = (char)std::tolower((unsigned char)c);
+                    bool dup = false;
+                    for (const auto& et : ex.trackers)
+                    {
+                        std::string el = release::foldAscii(et);
+                        for (char& c : el) c = (char)std::tolower((unsigned char)c);
+                        if (el == tl) { dup = true; break; }
+                    }
+                    if (!dup) ex.trackers.push_back(trk);
+                }
+                if (!ex.trackers.empty())
+                    ex.trackerLabel = jackett::compactTrackers(ex.trackers);
+                release::ExternalMeta m;
+                m.quality        = row.info.height;
+                m.videotype      = row.info.dolbyVision ? "dv" : (row.info.hdr ? "hdr" : "");
+                m.voices         = row.info.voices;
+                m.seasons        = row.info.seasons;
+                m.trackers       = ex.trackers;
+                m.seedersUnknown = ex.info.seedersUnknown && row.info.seedersUnknown;
+                if (row.info.russian) m.languages.push_back("rus");
+                if (row.info.ukrainian) m.languages.push_back("ukr");
+                release::enrich(ex.info, m);
+                ex.score = release::score(ex.info, ex.item.seeders, ex.item.size, want);
+                continue;
+            }
+            seen[key] = searchResults.size();
+            searchResults.push_back(std::move(row));
+        }
+        sortParsedResults();
+    }
+
     void runSearch()
     {
         if (searchQuery.empty()) return;
@@ -284,6 +564,9 @@ class JackettView
         isSearching = true;
         searchError.clear();
         searchResults.clear();
+        filterVoice.clear();
+        filterTracker.clear();
+        updateFilterStyles();
         refresh();
 
         jackett::searchAsync(
@@ -299,8 +582,7 @@ class JackettView
                 }
                 else
                 {
-                    searchResults = std::move(r.items);
-                    jackett::sortItems(searchResults, currentSort);
+                    buildResultsFromItems(std::move(r.items));
                 }
                 refresh();
             });
@@ -363,7 +645,8 @@ class JackettView
         box->setJustifyContent(brls::JustifyContent::CENTER);
         box->setAlignItems(brls::AlignItems::CENTER);
         box->setGrow(1.0f);
-        box->setPadding(0, 80, 0, 80);
+        float pad = platform_ui::isMobile() ? 28.0f : 80.0f;
+        box->setPadding(0, pad, 0, pad);
 
         auto* title = new brls::Label();
         title->setText(tr("Jackett is not configured"));
@@ -398,7 +681,8 @@ class JackettView
         box->setJustifyContent(brls::JustifyContent::CENTER);
         box->setAlignItems(brls::AlignItems::CENTER);
         box->setGrow(1.0f);
-        box->setPadding(0, 80, 0, 80);
+        float pad = platform_ui::isMobile() ? 28.0f : 80.0f;
+        box->setPadding(0, pad, 0, pad);
 
         auto* icon = new brls::Label();
         icon->setText("");
@@ -445,7 +729,8 @@ class JackettView
         box->setJustifyContent(brls::JustifyContent::CENTER);
         box->setAlignItems(brls::AlignItems::CENTER);
         box->setGrow(1.0f);
-        box->setPadding(0, 80, 0, 80);
+        float pad = platform_ui::isMobile() ? 28.0f : 80.0f;
+        box->setPadding(0, pad, 0, pad);
 
         auto* title = new brls::Label();
         title->setText(tr("Could not search Jackett"));
@@ -480,7 +765,8 @@ class JackettView
         box->setJustifyContent(brls::JustifyContent::CENTER);
         box->setAlignItems(brls::AlignItems::CENTER);
         box->setGrow(1.0f);
-        box->setPadding(0, 80, 0, 80);
+        float pad = platform_ui::isMobile() ? 28.0f : 80.0f;
+        box->setPadding(0, pad, 0, pad);
 
         auto* title = new brls::Label();
         title->setText(tr("No results found"));
@@ -499,106 +785,184 @@ class JackettView
         contentContainer->addView(box);
     }
 
+    bool rowPasses(const ParsedRow& r) const
+    {
+        if (filterHeight && r.info.height != filterHeight) return false;
+        if (filterAliveOnly && r.item.seeders == 0 && !r.info.seedersUnknown) return false;
+        if (!filterVoice.empty() &&
+            std::find(r.info.voices.begin(), r.info.voices.end(), filterVoice) ==
+                r.info.voices.end())
+            return false;
+        if (!filterTracker.empty())
+        {
+            bool match = !r.trackers.empty()
+                             ? std::find(r.trackers.begin(), r.trackers.end(), filterTracker) !=
+                                   r.trackers.end()
+                             : r.trackerLabel == filterTracker;
+            if (!match) return false;
+        }
+        return true;
+    }
+
     void renderResults()
     {
+        std::vector<const ParsedRow*> rows;
+        for (const auto& r : searchResults)
+            if (rowPasses(r)) rows.push_back(&r);
+
+        if (rows.empty())
+        {
+            auto* box = new brls::Box();
+            box->setAxis(brls::Axis::COLUMN);
+            box->setJustifyContent(brls::JustifyContent::CENTER);
+            box->setAlignItems(brls::AlignItems::CENTER);
+            box->setGrow(1.0f);
+            auto* lbl = new brls::Label();
+            lbl->setText(tr("Nothing matches this filter."));
+            lbl->setFontSize(22.0f);
+            lbl->setTextColor(theme::textMuted());
+            box->addView(lbl);
+            contentContainer->addView(box);
+            return;
+        }
+
         auto* scroll = new brls::ScrollingFrame();
         scroll->setGrow(1.0f);
         scroll->setScrollingBehavior(brls::ScrollingBehavior::CENTERED);
 
         auto* list = new brls::Box();
         list->setAxis(brls::Axis::COLUMN);
-        list->setPadding(10.0f, 60.0f, 40.0f, 60.0f);
+        float ins = platform_ui::sideInset();
+        list->setPadding(10.0f, ins, 40.0f, ins);
         scroll->setContentView(list);
 
-        for (const auto& item : searchResults)
+        for (const ParsedRow* r : rows)
         {
-            auto* row = buildItemRow(item);
+            auto* row = buildItemRow(*r);
             list->addView(row);
         }
 
         contentContainer->addView(scroll);
     }
 
-    brls::Box* buildItemRow(const jackett::Item& item)
+    brls::Box* buildItemRow(const ParsedRow& r)
     {
+        const jackett::Item& item = r.item;
+
         auto* row = new brls::Box();
-        row->setAxis(brls::Axis::COLUMN);
+        row->setAxis(brls::Axis::ROW);
+        row->setAlignItems(brls::AlignItems::CENTER);
         row->setFocusable(true);
-        row->setCornerRadius(6.0f);
-        row->setPadding(14.0f, 20.0f, 14.0f, 20.0f);
+        row->setCornerRadius(10.0f);
+        row->setHighlightCornerRadius(10.0f);
+        row->setPadding(12.0f, 18.0f, 12.0f, 18.0f);
         row->setMarginBottom(10.0f);
-        row->setBackgroundColor(theme::scrim(15));
+        row->setBackgroundColor(theme::scrim(14));
         row->addGestureRecognizer(new brls::TapGestureRecognizer(row));
 
-        // Line 1: Title
+        // Left: Quality
+        auto* q = new brls::Label();
+        q->setText(r.info.height > 0 ? std::to_string(r.info.height) + "p" : "\xE2\x80\x94");
+        q->setFontSize(24.0f);
+        q->setWidth(96.0f);
+        q->setSingleLine(true);
+        row->addView(q);
+
+        // Middle: Title + release tags + tracker
+        auto* mid = new brls::Box();
+        mid->setAxis(brls::Axis::COLUMN);
+        mid->setGrow(1.0f);
+        mid->setShrink(1.0f);
+        mid->setMarginRight(16.0f);
+
         auto* titleLbl = new brls::Label();
         titleLbl->setText(item.title);
-        titleLbl->setFontSize(20.0f);
+        titleLbl->setFontSize(19.0f);
         titleLbl->setSingleLine(true);
-        row->addView(titleLbl);
+        mid->addView(titleLbl);
 
-        // Line 2: Meta (Tracker, Size, Seeds/Peers, Category, Date)
-        auto* meta = new brls::Box();
-        meta->setAxis(brls::Axis::ROW);
-        meta->setAlignItems(brls::AlignItems::CENTER);
-        meta->setMarginTop(8.0f);
-
-        // Tracker badge
-        if (!item.tracker.empty())
+        auto* tags = new brls::Box();
+        tags->setAxis(brls::Axis::ROW);
+        tags->setMarginTop(8.0f);
+        auto tag = [tags](const std::string& text, NVGcolor color) {
+            auto* b = new brls::Box();
+            b->setCornerRadius(5.0f);
+            b->setPadding(4.0f, 8.0f, 2.0f, 8.0f);
+            b->setMarginRight(8.0f);
+            b->setBorderColor(color);
+            b->setBorderThickness(1.0f);
+            auto* l = new brls::Label();
+            l->setText(text);
+            l->setFontSize(14.0f);
+            l->setTextColor(color);
+            l->setSingleLine(true);
+            b->addView(l);
+            tags->addView(b);
+        };
+#ifdef __SWITCH__
+        const bool swCodec = release::isSoftwareDecodedOnSwitch(r.info);
+        const std::string codecTag =
+            r.info.codec.empty() ? "" : r.info.codec + (r.info.tenBit ? " 10-bit" : "");
+#endif
+        if (r.info.cam) tag("CAMRip", theme::textWarn());
+        for (const auto& x : release::tags(r.info))
         {
-            auto* trk = new brls::Label();
-            trk->setText("[" + item.tracker + "]");
-            trk->setFontSize(16.0f);
-            trk->setTextColor(theme::accentText());
-            trk->setMarginRight(14.0f);
-            meta->addView(trk);
+            if (r.info.cam && x == "CAMRip") continue;
+            bool warn = false;
+#ifdef __SWITCH__
+            if ((swCodec && x == codecTag) || x == "Dolby Vision") warn = true;
+#endif
+            tag(x, warn ? theme::textWarn() : theme::textDim());
         }
+        if (r.info.fullSeason && r.info.season > 0)
+            tag(r.info.seasonTo > r.info.season ? tr("several seasons") : tr("whole season"),
+                theme::textDim());
+#ifdef __SWITCH__
+        if (swCodec)
+            tag(tr("no HW decode"), theme::textWarn());
+        const bool isSeries = want.series || r.info.hasAnySeason() || r.info.fullSeason;
+        if (release::isHeavyForWifi(r.info, item.size, isSeries))
+            tag(tr("heavy for Wi-Fi"), theme::textWarn());
+#endif
+        if (!r.trackerLabel.empty()) tag(r.trackerLabel, theme::textMuted());
+        if (!item.categoryDesc.empty() && r.info.source.empty())
+            tag(item.categoryDesc, theme::textDim());
+        mid->addView(tags);
+        row->addView(mid);
 
-        // Size
+        // Right: Size, Seeders, Date
+        auto* right = new brls::Box();
+        right->setAxis(brls::Axis::COLUMN);
+        right->setAlignItems(brls::AlignItems::FLEX_END);
+        right->setWidth(140.0f);
         if (item.size > 0)
         {
             auto* sz = new brls::Label();
             sz->setText(jackett::formatSize(item.size));
-            sz->setFontSize(16.0f);
-            sz->setTextColor(theme::text());
-            sz->setMarginRight(16.0f);
-            meta->addView(sz);
+            sz->setFontSize(17.0f);
+            sz->setHorizontalAlign(brls::HorizontalAlign::RIGHT);
+            right->addView(sz);
         }
-
-        // Seeds & Peers
         auto* sp = new brls::Label();
-        std::string spText = "S: " + std::to_string(item.seeders) +
-                             "  P: " + std::to_string(item.peers);
-        sp->setText(spText);
-        sp->setFontSize(16.0f);
-        sp->setTextColor(item.seeders > 0 ? theme::textBody() : theme::textDim());
-        sp->setMarginRight(16.0f);
-        meta->addView(sp);
-
-        // Category
-        if (!item.categoryDesc.empty())
+        bool unk = (item.seeders == 0 && r.info.seedersUnknown);
+        sp->setText(unk ? std::string(tr("seeds ?"))
+                        : tr("seeds ") + std::to_string(item.seeders));
+        sp->setFontSize(15.0f);
+        sp->setTextColor((item.seeders > 0 || unk) ? theme::textMuted() : theme::textWarn());
+        sp->setHorizontalAlign(brls::HorizontalAlign::RIGHT);
+        sp->setMarginTop(4.0f);
+        right->addView(sp);
+        if (item.publishDate.size() >= 10)
         {
-            auto* cat = new brls::Label();
-            cat->setText(item.categoryDesc);
-            cat->setFontSize(15.0f);
-            cat->setTextColor(theme::textDim());
-            cat->setMarginRight(16.0f);
-            meta->addView(cat);
-        }
-
-        // Date
-        if (!item.publishDate.empty())
-        {
-            std::string dateStr = item.publishDate;
-            if (dateStr.size() >= 10) dateStr = dateStr.substr(0, 10);
             auto* dt = new brls::Label();
-            dt->setText(dateStr);
-            dt->setFontSize(15.0f);
-            dt->setTextColor(theme::textMuted());
-            meta->addView(dt);
+            dt->setText(item.publishDate.substr(0, 10));
+            dt->setFontSize(13.0f);
+            dt->setTextColor(theme::textDim());
+            dt->setHorizontalAlign(brls::HorizontalAlign::RIGHT);
+            dt->setMarginTop(3.0f);
+            right->addView(dt);
         }
-
-        row->addView(meta);
+        row->addView(right);
 
         // Action A: Play
         jackett::Item itemCopy = item;

@@ -6,6 +6,22 @@ The text under a version heading is the GitHub release description, which the
 app also shows in About → View changelog. So a section holds plain text and
 lists only, no headings or emphasis.
 
+## 1.3 — 25 November 2026
+
+Overhauled torrent search and Switch codec compatibility ranking (AV1 and Hi10P protection), playback freeze and artifact fixes, and double-tap seeking.
+
+Torrents, Search & Switch Compatibility
+- Fixed Russian season and episode title parsing (e.g. "5 сезон: 1-22 серии" no longer misparses the season) and added Jacred metadata enrichment (seasons, voice-overs, languages, trackers, btih).
+- Added hybrid 2-request search, per-episode pack sizing for ranking, non-video filtering, and false foreign dub filtering.
+- Added new filters and sorting in Sources and Jackett: Season selector, Alive (>0) filter, Custom search, and Sort by Date.
+- Protected Switch playback from ~5 fps software-decode stutters: AV1 (8/10-bit) and H.264 10-bit (Hi10P) releases lacking Tegra X1 NVDEC hardware decoding are heavily deprioritized on Switch, excluded from "best choice", and tagged "no HW decode", while "heavy for Wi-Fi" now reflects real per-episode/film size, 4K, and Remux.
+
+Player & Picture
+- Player now displays a warning toast on Switch when falling back to software decoding, automatically switches to lightweight bilinear scaling, and shows the active video codec and pixel format in the ZR diagnostics panel.
+- Fixed grey frames, chroma corruption, and playback freezes: enabled strict SHA-1 verification in RAM streaming, applet-mode RAM protection, cache-pause rebuffering on slow swarms, non-blocking libmpv rendering, 3-thread software decode cap on Switch, and a live hardware decoding toggle in the player Video settings.
+- Atomic color shader replacement (saturation and RGB calibration no longer stack) and blocked background seeking while settings overlays are open.
+- Added double-tap-to-seek (-/+10 s on left and right screen zones with rapid tap chaining).
+
 ## 1.2 — 20 November 2026
 
 Folders and categories in bookmarks, actor and director filtering, RGB color balance in screen settings, L/R tab navigation, expandable synopsis, and major stability fixes for docking and long playback sessions.
