@@ -3298,11 +3298,23 @@ void MpvView::pumpEvents()
                 // log the active decoder/codec/pixelformat once rather than polling per-frame.
                 char* hwc = mpv_get_property_string(mpv, "hwdec-current");
                 char* vc  = mpv_get_property_string(mpv, "video-codec");
+                char* vf  = mpv_get_property_string(mpv, "video-format");
                 char* pf  = mpv_get_property_string(mpv, "video-params/pixelformat");
+                obsVideoFormat = vf ? vf : "";
+                obsPixFmt      = pf ? pf : "";
+                bool sw        = (!hwc || !hwc[0] || std::strcmp(hwc, "no") == 0);
+                softwareDecode = sw;
+                if (lastVideoWidth > 0)
+                    applyRenderLoad(lastVideoWidth);
+#ifdef __SWITCH__
+                if (sw && config::get().hwDecode && !swDecodeWarned && !obsVideoFormat.empty())
+                    swDecodeWarnPending = true;
+#endif
                 brls::Logger::info("[mpv event] playback restart (hwdec={}, codec={}, pixfmt={})",
                                    hwc ? hwc : "none", vc ? vc : "-", pf ? pf : "-");
                 if (hwc) mpv_free(hwc);
                 if (vc)  mpv_free(vc);
+                if (vf)  mpv_free(vf);
                 if (pf)  mpv_free(pf);
                 break;
             }
@@ -3387,6 +3399,28 @@ void MpvView::applyBackWindow()
     torrentfs_set_back_window(tfs, (int64_t)(ahead + rate * kRewindSecs));
 }
 
+namespace
+{
+std::string shortCodecLabel(const std::string& fmt, const std::string& pixFmt)
+{
+    std::string out;
+    if (fmt == "av1") out = "AV1";
+    else if (fmt == "h264") out = "H.264";
+    else if (fmt == "hevc") out = "HEVC";
+    else if (fmt == "vp9") out = "VP9";
+    else if (fmt == "vp8") out = "VP8";
+    else
+    {
+        out = fmt;
+        for (char& c : out) c = (char)std::toupper((unsigned char)c);
+    }
+    if (!out.empty() &&
+        (pixFmt.find("p10") != std::string::npos || pixFmt.find("010") != std::string::npos))
+        out += " 10-bit";
+    return out;
+}
+} // namespace
+
 // The scalers for a picture `width` pixels wide. Up to 1080p mpv's own
 // (lanczos / hermite) cost little: the frame is at most the screen's size.
 // Above it -- 4K -- every one of them is a separable two-pass filter over the
@@ -3405,11 +3439,13 @@ void MpvView::applyRenderLoad(int64_t width)
     // Docked mode (1080p output): 2.25x the pixels of handheld; Lanczos upscaling
     // (for <= 720p) or chroma scaling (for 1080p YUV 4:2:0) over 2 million pixels
     // chokes the Tegra X1 GPU. Bilinear is hardware-accelerated for free.
-    bool light = (width > 1920) || docked;
+    // Software decode also switches to bilinear to spare shared LPDDR4 bandwidth.
+    bool light = (width > 1920) || docked || softwareDecode;
     if (light == lightScalers) return;
     lightScalers = light;
-    brls::Logger::info("[player] {}px wide video (docked: {}): {} scalers", width,
-                       docked ? "yes" : "no", light ? "bilinear" : "default");
+    brls::Logger::info("[player] {}px wide video (docked: {}, sw: {}): {} scalers", width,
+                       docked ? "yes" : "no", softwareDecode ? "yes" : "no",
+                       light ? "bilinear" : "default");
     const char* up   = light ? "bilinear" : "lanczos";
     const char* down = light ? "bilinear" : "hermite";
     mpv_set_property_string(mpv, "scale", up);
@@ -4365,10 +4401,15 @@ void MpvView::updateInfoOverlay()
     }
     if (dl.empty()) dl = "-";
 
+    std::string codecLine = obsVideoFormat.empty() ? "-" : obsVideoFormat;
+    if (!obsVideoFormat.empty() && !obsPixFmt.empty())
+        codecLine += " (" + obsPixFmt + ")";
+
     char right[1536];
     std::snprintf(right, sizeof(right),
                   "VIDEO\n"
                   "%lldx%lld @ %.3f fps\n"
+                  "Codec: %s\n"
                   "Decode: %s\n"
                   "Dropped: %lld (decoder %lld)\n"
                   "RAM buffer: %.0f MB\n"
@@ -4389,6 +4430,7 @@ void MpvView::updateInfoOverlay()
                   "DOWNLOADING\n"
                   "%s",
                   (long long)w, (long long)h, fps,
+                  codecLine.c_str(),
                   hw, (long long)drop, (long long)decDrop,
                   (double)ramBytes / (1024.0 * 1024.0),
                   torrentfs_name(tfs),
@@ -5490,6 +5532,15 @@ void MpvView::draw(NVGcontext* vg, float x, float y, float width, float height,
         }
         loadingOverlay->setVisibility(brls::Visibility::GONE);
         overlayHidden = true;
+    }
+    if (overlayHidden && swDecodeWarnPending && !swDecodeWarned)
+    {
+        swDecodeWarnPending = false;
+        swDecodeWarned      = true;
+        std::string msg = std::string(tr("No HW decode (")) +
+                          shortCodecLabel(obsVideoFormat, obsPixFmt) +
+                          tr(") \xE2\x80\x94 may lag");
+        flashPill(msg, 5000);
     }
     if (overlayHidden)
         updateBufferIndicator();

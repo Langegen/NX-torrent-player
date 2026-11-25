@@ -400,8 +400,13 @@ class MpvView : public brls::Box
     int videoSize = 0;
     void applyVideoSize(int mode);
 
-    // Bilinear scalers for video above 1080p (4K), mpv's own below.
-    bool lightScalers = false;
+    // Bilinear scalers for video above 1080p (4K), docked mode, or software decode.
+    bool lightScalers        = false;
+    bool softwareDecode      = false;
+    bool swDecodeWarned      = false;
+    bool swDecodeWarnPending = false;
+    std::string obsVideoFormat;  // mpv "video-format" (e.g. "av1", "h264", "hevc")
+    std::string obsPixFmt;       // mpv "video-params/pixelformat" (e.g. "yuv420p10le")
     int64_t lastVideoWidth = 0;
     void applyRenderLoad(int64_t width);
     // Sizes the engine's back window from the stream's bitrate (needs obsDur).

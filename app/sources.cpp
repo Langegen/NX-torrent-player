@@ -1216,10 +1216,13 @@ class SourcesView : public brls::Box
         }
         status->setVisibility(brls::Visibility::GONE);
 
-        // "Best choice": the top of the recommended order, whatever is shown.
+        // "Best choice": the top eligible release in recommended order.
         const Source* best = nullptr;
         for (const auto& r : found)
-            if (listable(r) && (!best || r.score > best->score)) best = &r;
+            if (listable(r) && r.score > 0 &&
+                release::isRecommendedEligible(r.info, r.seeders, want) &&
+                (!best || r.score > best->score))
+                best = &r;
 
         brls::View* refocus = nullptr;
         for (const Source* r : rows)
@@ -1289,18 +1292,29 @@ class SourcesView : public brls::Box
             b->addView(l);
             tags->addView(b);
         };
+#ifdef __SWITCH__
+        const bool swCodec = release::isSoftwareDecodedOnSwitch(s.info);
+        const std::string codecTag =
+            s.info.codec.empty() ? "" : s.info.codec + (s.info.tenBit ? " 10-bit" : "");
+#endif
         if (best) tag(tr("best choice"), theme::textGood());
         if (s.info.cam) tag("CAMRip", theme::textWarn());
         for (const auto& x : release::tags(s.info))
         {
             if (s.info.cam && x == "CAMRip") continue;
-            tag(x, theme::textDim());
+            bool warn = false;
+#ifdef __SWITCH__
+            if ((swCodec && x == codecTag) || x == "Dolby Vision") warn = true;
+#endif
+            tag(x, warn ? theme::textWarn() : theme::textDim());
         }
         if (item.isSeries() && s.info.fullSeason)
             tag(s.info.seasonTo > s.info.season ? tr("several seasons") : tr("whole season"),
                 theme::textDim());
 #ifdef __SWITCH__
-        if (s.info.height == 2160 || s.info.tenBit)
+        if (swCodec)
+            tag(tr("no HW decode"), theme::textWarn());
+        if (release::isHeavyForWifi(s.info, s.size, item.isSeries()))
             tag(tr("heavy for Wi-Fi"), theme::textWarn());
 #else
         if (platform_ui::isMobile())

@@ -576,7 +576,7 @@ Info parse(const std::string& title)
     else if (has(low, "x264") || has(low, "x.264") || has(low, "h264") || has(low, "h.264") ||
              hasWord(w, "avc") || has(w, " h 264 ") || has(w, " x 264 "))
         in.codec = "H.264";
-    else if (hasWord(w, "av1"))
+    else if (hasWord(w, "av1") || hasWord(w, "av01"))
         in.codec = "AV1";
     else if (has(low, "xvid") || has(low, "divx"))
         in.codec = "XviD";
@@ -587,6 +587,8 @@ Info parse(const std::string& title)
              in.dolbyVision;
     in.tenBit      = has(low, "10bit") || has(low, "10-bit") || has(low, "10 bit") ||
                 has(low, "hi10");
+    if (in.codec.empty() && has(low, "hi10"))
+        in.codec = "H.264";
 
     readScope(low, in);
     readVoices(low, w, in);
@@ -803,6 +805,36 @@ int packEpisodeEstimate(const Info& in)
     return 1;
 }
 
+bool isSoftwareDecodedOnSwitch(const Info& in)
+{
+    return in.codec == "AV1" || (in.codec == "H.264" && in.tenBit);
+}
+
+bool isHeavyForWifi(const Info& in, int64_t size, bool series)
+{
+    if (in.height == 2160 || in.source == "Remux") return true;
+    if (size <= 0) return false;
+    int64_t effSize = size;
+    if (series)
+    {
+        int epDiv = packEpisodeEstimate(in);
+        if (epDiv > 1) effSize /= epDiv;
+    }
+    return effSize > (series ? (10LL << 30) : (30LL << 30));
+}
+
+bool isRecommendedEligible(const Info& in, int seeders, const Want& want)
+{
+    if (in.cam) return false;
+    if (seeders == 0 && !in.seedersUnknown) return false;
+    if (want.switchProfile)
+    {
+        if (isSoftwareDecodedOnSwitch(in)) return false;
+        if (in.dolbyVision) return false;
+    }
+    return true;
+}
+
 int score(const Info& in, int seeders, int64_t size, const Want& want)
 {
     // Wrong season or wrong single episode: filtered out of the visible list.
@@ -834,12 +866,31 @@ int score(const Info& in, int seeders, int64_t size, const Want& want)
             case 480:  s += 10; break;
             default:   s += 16; break;
         }
-        // H.264 decodes cleanly in hardware everywhere; HEVC/10-bit is heavier.
-        if (in.codec == "H.264") s += 10;
-        else if (in.codec == "HEVC") s += 2;
-        else if (in.codec == "AV1") s -= 20;
-        else if (in.codec.empty() && in.height <= 1080 && !in.hdr && !in.dolbyVision) s += 6;
-        if (in.tenBit) s -= 4;
+        // Tegra X1 NVDEC hardware-decodes H.264 8-bit and HEVC 8/10-bit.
+        // AV1 (all bit depths) and H.264 10-bit (Hi10P) have no hardware decoder
+        // on Switch and fall back to CPU software decode (1080p AV1 10-bit drops
+        // to ~5 fps in complex scenes on stock 1.02 GHz Cortex-A57).
+        if (in.codec == "H.264")
+        {
+            if (in.tenBit) s -= (in.height > 0 && in.height <= 720) ? 35 : 60;
+            else s += 10;
+        }
+        else if (in.codec == "HEVC")
+        {
+            s += 2;
+            if (in.tenBit) s -= 4;
+        }
+        else if (in.codec == "AV1")
+        {
+            s -= (in.height > 0 && in.height <= 720) ? 75 : 110;
+            if (in.tenBit) s -= 20;
+        }
+        else
+        {
+            if (in.codec.empty() && in.height <= 1080 && !in.hdr && !in.dolbyVision && !in.tenBit)
+                s += 6;
+            if (in.tenBit) s -= 4;
+        }
         if (in.dolbyVision) s -= 20;  // profile 5 comes out green and purple
         else if (in.hdr) s -= 8;      // washed out without a tone-map
 
@@ -1141,7 +1192,8 @@ bool isNonVideo(const std::string& title,
                        has(low, ".mkv") || has(low, ".mp4") || has(low, ".avi") ||
                        has(low, "h264") || has(low, "h.264") || has(low, "x264") ||
                        has(low, "h265") || has(low, "h.265") || has(low, "x265") ||
-                       has(low, "hevc") || hasWord(w, "avc");
+                       has(low, "hevc") || hasWord(w, "avc") || hasWord(w, "av1") ||
+                       hasWord(w, "av01");
     if (!hasVideoTag)
     {
         if (hasWord(w, "ost") || hasWord(w, "flac") || hasWord(w, "pdf"))

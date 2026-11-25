@@ -453,6 +453,82 @@ static void test_jacred_formats_and_profiles()
     std::printf("      PASSED\n");
 }
 
+static void test_switch_compat_and_av1()
+{
+    std::printf("[10/10] Switch codec compatibility (AV1, Hi10P), badges, and ranking...\n");
+
+    // 1. Codec parsing: av01 -> AV1; Hi10P without explicit codec -> H.264 10-bit;
+    // HEVC Hi10P keeps HEVC.
+    auto av01 = release::parse("Show.2024.1080p.WEB-DL.AV01");
+    CHECK(av01.codec == "AV1" && !av01.tenBit);
+    auto hi10 = release::parse("Anime.S01.1080p.BDRip.Hi10P-Group");
+    CHECK(hi10.codec == "H.264" && hi10.tenBit);
+    auto hevcHi10 = release::parse("Anime.S01.1080p.HEVC.Hi10P-Group");
+    CHECK(hevcHi10.codec == "HEVC" && hevcHi10.tenBit);
+    CHECK(!release::isNonVideo("Movie.2024.1080p.AV1.FLAC"));
+    CHECK(!release::isNonVideo("Movie.2024.1080p.AV01.FLAC"));
+
+    // 2. Switch hardware decoder compatibility helpers.
+    auto av1_10 = release::parse("Сверхъестественное / Supernatural (1-15 сезоны) (2005-2020) "
+                                 "BDRip 1080p AV1 10-bit | NewStudio");
+    auto h264_8 = release::parse("Film.2024.1080p.WEB-DL.H264");
+    auto hevc_8 = release::parse("Film.2024.1080p.BluRay.x265");
+    auto unnamed = release::parse("Film.2024.1080p.WEB-DL");
+    CHECK(release::isSoftwareDecodedOnSwitch(av01));
+    CHECK(release::isSoftwareDecodedOnSwitch(av1_10));
+    CHECK(release::isSoftwareDecodedOnSwitch(hi10));
+    CHECK(!release::isSoftwareDecodedOnSwitch(h264_8));
+    CHECK(!release::isSoftwareDecodedOnSwitch(hevc_8));
+    CHECK(!release::isSoftwareDecodedOnSwitch(hevcHi10));
+    CHECK(!release::isSoftwareDecodedOnSwitch(unnamed));
+
+    // 3. Wi-Fi heaviness check: 88.2 GB over 15 seasons is light per episode,
+    // while 4K, Remux, and oversized movies are heavy.
+    CHECK(!release::isHeavyForWifi(av1_10, 94704000000LL, true));
+    CHECK(!release::isHeavyForWifi(hevcHi10, 15LL << 30, true));
+    CHECK(release::isHeavyForWifi(release::parse("Film.2024.2160p.WEB-DL.HEVC"), 20LL << 30, false));
+    CHECK(release::isHeavyForWifi(release::parse("Film.2024.1080p.BluRay.Remux"), 25LL << 30, false));
+    CHECK(release::isHeavyForWifi(h264_8, 35LL << 30, false));
+
+    // 4. Real-world Supernatural S05E17 scenario on Switch: AV1 10-bit (1 seed, Russian)
+    // must rank below both Russian 720p H.264 and well-seeded 1080p HEVC, and must
+    // never be eligible for "best choice".
+    release::Want swWant;
+    swWant.series        = true;
+    swWant.season        = 5;
+    swWant.episode       = 17;
+    swWant.preferRussian = true;
+    swWant.switchProfile = true;
+
+    auto hevcEn = release::parse("Supernatural Season 05 S05 (1080p Bluray x265 HEVC AAC 5.1 Joy)");
+    auto ru720  = release::parse("Сверхъестественное (5 сезон) / Supernatural (2009) BDRip 720p | Rus");
+    auto hevc10 = release::parse("Аниме (5 сезон) BDRip 1080p HEVC 10-bit | AniLibria");
+    auto hi10Ru = release::parse("Аниме (5 сезон) BDRip 1080p Hi10P | AniLibria");
+
+    CHECK(release::score(ru720, 5, 20LL << 30, swWant) >
+          release::score(av1_10, 1, 94704000000LL, swWant));
+    CHECK(release::score(hevcEn, 209, 7LL << 30, swWant) >
+          release::score(av1_10, 1, 94704000000LL, swWant));
+    CHECK(release::score(hevc10, 30, 15LL << 30, swWant) >
+          release::score(hi10Ru, 30, 15LL << 30, swWant));
+
+    CHECK(!release::isRecommendedEligible(av1_10, 1, swWant));
+    CHECK(!release::isRecommendedEligible(hi10Ru, 30, swWant));
+    CHECK(!release::isRecommendedEligible(release::parse("Show.2024.1080p.DV.HEVC"), 50, swWant));
+    CHECK(!release::isRecommendedEligible(ru720, 0, swWant));
+    CHECK(release::isRecommendedEligible(hevcEn, 209, swWant));
+    CHECK(release::isRecommendedEligible(hevc10, 30, swWant));
+
+    // 5. PC / Android profile stays unaffected: AV1 is eligible and keeps its priority.
+    release::Want pcWant = swWant;
+    pcWant.switchProfile = false;
+    CHECK(release::isRecommendedEligible(av1_10, 10, pcWant));
+    CHECK(release::score(av1_10, 10, 94704000000LL, pcWant) >
+          release::score(hevcEn, 209, 7LL << 30, pcWant));
+
+    std::printf("      PASSED\n");
+}
+
 int main()
 {
     std::printf("=========================================\n");
@@ -467,6 +543,7 @@ int main()
     test_title_match();
     test_russian_first();
     test_jacred_formats_and_profiles();
+    test_switch_compat_and_av1();
     std::printf("\nALL TESTS PASSED\n");
     return 0;
 }

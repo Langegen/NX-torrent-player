@@ -899,15 +899,31 @@ class JackettView
             b->addView(l);
             tags->addView(b);
         };
+#ifdef __SWITCH__
+        const bool swCodec = release::isSoftwareDecodedOnSwitch(r.info);
+        const std::string codecTag =
+            r.info.codec.empty() ? "" : r.info.codec + (r.info.tenBit ? " 10-bit" : "");
+#endif
         if (r.info.cam) tag("CAMRip", theme::textWarn());
         for (const auto& x : release::tags(r.info))
         {
             if (r.info.cam && x == "CAMRip") continue;
-            tag(x, theme::textDim());
+            bool warn = false;
+#ifdef __SWITCH__
+            if ((swCodec && x == codecTag) || x == "Dolby Vision") warn = true;
+#endif
+            tag(x, warn ? theme::textWarn() : theme::textDim());
         }
         if (r.info.fullSeason && r.info.season > 0)
             tag(r.info.seasonTo > r.info.season ? tr("several seasons") : tr("whole season"),
                 theme::textDim());
+#ifdef __SWITCH__
+        if (swCodec)
+            tag(tr("no HW decode"), theme::textWarn());
+        const bool isSeries = want.series || r.info.hasAnySeason() || r.info.fullSeason;
+        if (release::isHeavyForWifi(r.info, item.size, isSeries))
+            tag(tr("heavy for Wi-Fi"), theme::textWarn());
+#endif
         if (!r.trackerLabel.empty()) tag(r.trackerLabel, theme::textMuted());
         if (!item.categoryDesc.empty() && r.info.source.empty())
             tag(item.categoryDesc, theme::textDim());

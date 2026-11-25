@@ -37,7 +37,7 @@ export default {
           {
             status: "ok",
             service: "NX-torrent-player TMDB Proxy",
-            version: "1.2",
+            version: "1.3",
             endpoints: {
               api: "/3/{endpoint}",
               images: "/t/p/{size}/{path}",

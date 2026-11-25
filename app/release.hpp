@@ -110,6 +110,18 @@ int score(const Info& info, int seeders, int64_t size, const Want& want);
 // used to judge per-episode streaming size rather than whole-pack size.
 int packEpisodeEstimate(const Info& info);
 
+// True when Switch Tegra X1 NVDEC cannot hardware-decode this release
+// (AV1 of any bit depth, or 10-bit H.264 / Hi10P) and mpv falls back to CPU.
+bool isSoftwareDecodedOnSwitch(const Info& info);
+
+// True when a release's bitrate/size is heavy for Switch Wi-Fi streaming
+// (4K, Remux, or high per-episode / film size).
+bool isHeavyForWifi(const Info& info, int64_t size, bool series);
+
+// True when a release is healthy and compatible enough to carry the
+// "best choice" badge for `want`.
+bool isRecommendedEligible(const Info& info, int seeders, const Want& want);
+
 // Folds Latin diacritics (Shōgun -> Shogun) and ё -> е for comparison/queries.
 std::string foldAscii(const std::string& s);
 
