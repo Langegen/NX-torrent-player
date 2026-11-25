@@ -175,17 +175,58 @@ std::string colorShader(int sat, int r, int g, int b)
     return path;
 }
 
-void applyColorShader(mpv_handle* mpv, int sat, int r, int g, int b)
+bool applyColorShader(mpv_handle* mpv, int sat, int r, int g, int b)
 {
-    // change-list, not a plain set: a set splits the list on ':' (and on the
-    // console every path has one, "sdmc:/").
-    const char* clr[] = { "change-list", "glsl-shaders", "clr", nullptr };
-    mpv_command(mpv, clr);
-    if (sat == 0 && r == 0 && g == 0 && b == 0) return;
-    std::string path = colorShader(sat, r, g, b);
+    std::string path;
+    if (sat != 0 || r != 0 || g != 0 || b != 0)
+    {
+        path = colorShader(sat, r, g, b);
+        if (path.empty())
+        {
+            brls::Logger::error("[picture] could not write color shader");
+            return false;
+        }
+    }
+
+    // Replace the shader list atomically (empty array clears all shaders) so
+    // previous steps can never accumulate, and paths with ':' are preserved.
+    mpv_node elem {};
+    mpv_node_list list {};
+    if (!path.empty())
+    {
+        elem.format   = MPV_FORMAT_STRING;
+        elem.u.string = const_cast<char*>(path.c_str());
+        list.num      = 1;
+        list.values   = &elem;
+    }
+    mpv_node node {};
+    node.format = MPV_FORMAT_NODE_ARRAY;
+    node.u.list = &list;
+
+    int rc = mpv_set_property(mpv, "glsl-shaders", MPV_FORMAT_NODE, &node);
+    if (rc >= 0) return true;
+
+    brls::Logger::warning("[picture] set glsl-shaders failed ({}), trying change-list",
+                          mpv_error_string(rc));
+    // change-list always requires 3 arguments, including "" for clr.
+    const char* clr[] = { "change-list", "glsl-shaders", "clr", "", nullptr };
+    int crc           = mpv_command(mpv, clr);
+    if (crc < 0)
+    {
+        brls::Logger::error("[picture] glsl-shaders clr failed: {}", mpv_error_string(crc));
+        return false;
+    }
+    if (path.empty()) return true;
+
     const char* add[] = { "change-list", "glsl-shaders", "append", path.c_str(), nullptr };
-    if (path.empty() || mpv_command(mpv, add) < 0)
-        brls::Logger::error("[picture] color shader did not load ({})", path);
+    int arc           = mpv_command(mpv, add);
+    if (arc < 0)
+    {
+        brls::Logger::error("[picture] color shader did not load ({}): {}", path,
+                            mpv_error_string(arc));
+        return false;
+    }
+    return true;
 }
 } // namespace
 
@@ -216,11 +257,13 @@ void sync(mpv_handle* mpv, Eq& applied)
         wantG   != applied.v[GREEN] ||
         wantB   != applied.v[BLUE])
     {
-        applyColorShader(mpv, wantSat, wantR, wantG, wantB);
-        applied.v[SATURATION] = wantSat;
-        applied.v[RED]        = wantR;
-        applied.v[GREEN]      = wantG;
-        applied.v[BLUE]       = wantB;
+        if (applyColorShader(mpv, wantSat, wantR, wantG, wantB))
+        {
+            applied.v[SATURATION] = wantSat;
+            applied.v[RED]        = wantR;
+            applied.v[GREEN]      = wantG;
+            applied.v[BLUE]       = wantB;
+        }
     }
 }
 
@@ -330,8 +373,9 @@ CalibrationView::CalibrationView()
         return true;
     };
     for (auto b : { brls::BUTTON_A, brls::BUTTON_B, brls::BUTTON_X, brls::BUTTON_Y,
-                    brls::BUTTON_NAV_UP, brls::BUTTON_NAV_DOWN, brls::BUTTON_NAV_LEFT,
-                    brls::BUTTON_NAV_RIGHT })
+                    brls::BUTTON_UP, brls::BUTTON_DOWN, brls::BUTTON_LEFT,
+                    brls::BUTTON_RIGHT, brls::BUTTON_NAV_UP, brls::BUTTON_NAV_DOWN,
+                    brls::BUTTON_NAV_LEFT, brls::BUTTON_NAV_RIGHT })
         catcher->registerAction("", b, back, true, false, brls::SOUND_NONE);
     addView(catcher);
 

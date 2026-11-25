@@ -130,6 +130,7 @@ const Entry kFr[] = {
     { "Sleep timer: one minute left", "Minuterie de veille : encore une minute" },
     { "End of the video", "Fin de la vidéo" },
     { " min", " min" },
+    { " s", " s" },
     { "When it ends", "À la fin" },
     { "When a video ends", "À la fin d'une vidéo" },
     { "Back to the menu", "Retour au menu" },

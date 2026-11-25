@@ -191,6 +191,14 @@ constexpr float kStickStep     = 0.5f;
 constexpr int kStickRepeatMs   = 420;  // first repeat
 constexpr int kStickRepeatNext = 160;  // then every
 
+// Double-tap-to-seek (Android player style): left/right 35% zones jump -/+10s,
+// rapid taps chain and commit in one seek after input settles.
+constexpr double kDoubleTapStepSecs = 10.0;
+constexpr int kDoubleTapWindowMs    = 280;
+constexpr int kDoubleTapCommitMs    = 650;
+constexpr int kDoubleTapFadeMs      = 250;
+constexpr float kDoubleTapZoneFrac  = 0.35f;
+
 // Material Icons padlock glyphs (present in the bundled MaterialIcons-Regular.ttf,
 // same font as the Options gear): the control-lock pill shows the open one as a
 // hint / while unlocked, the closed one while locked.
@@ -1031,8 +1039,14 @@ void MpvView::registerPlayerActions()
     }
 }
 
+bool MpvView::hasOverlay() const
+{
+    return overlayDepth > 0 || !ui::isOnTop(const_cast<MpvView*>(this));
+}
+
 bool MpvView::command(Cmd c)
 {
+    if (hasOverlay()) return true;
     if (c == Cmd::Lock)
     {
         toggleLock();
@@ -1257,6 +1271,7 @@ void MpvView::toggleLock()
     {
         // Locking: leave any scrub/pause state and hide the panel so the video
         // runs undisturbed. A blocked input then only flashes the lock pill.
+        singleTapPending = false;
         if (seeking) cancelSeek();
         if (userPaused && mpv)
         {
@@ -1305,6 +1320,7 @@ void MpvView::onPlayPause()
 {
     if (!ready || !mpv)
         return;
+    singleTapPending = false;
     if (seeking)
     {
         commitSeek();
@@ -1326,8 +1342,9 @@ void MpvView::commitSeek()
 {
     if (!seeking || !mpv)
         return;
-    seeking  = false;
-    seekHold = false;
+    seeking   = false;
+    seekHold  = false;
+    dtSeeking = false;
     char t[32];
     std::snprintf(t, sizeof(t), "%.3f", seekTarget);
     const char* cmd[] = { "seek", t, "absolute", nullptr };
@@ -1355,6 +1372,8 @@ void MpvView::commitSeek()
 
 void MpvView::cancelSeek()
 {
+    dtSeeking = false;
+    if (seekRipple) seekRipple->clear();
     if (!seeking)
         return;
     seeking  = false;
@@ -1368,6 +1387,8 @@ void MpvView::cancelSeek()
 
 void MpvView::stepSeek(int dir, bool toTimeline)
 {
+    dtSeeking = false;
+    if (seekRipple) seekRipple->clear();
     if (!seeking)
     {
         beginSeek(false);
@@ -1393,6 +1414,9 @@ void MpvView::seekToFraction(double frac)
 {
     if (!ready || !mpv || obsDur <= 0.0)
         return;
+    singleTapPending = false;
+    dtSeeking        = false;
+    if (seekRipple) seekRipple->clear();
     if (frac < 0.0) frac = 0.0;
     if (frac > 1.0) frac = 1.0;
     if (!seeking) beginSeek(false);
@@ -1500,6 +1524,7 @@ bool MpvView::subsOn() const
 void MpvView::toggleSubtitles()
 {
     if (!ready || !mpv) return;
+    singleTapPending = false;
     if (subsOn())
     {
         lastSid = std::strtoll(obsSid.c_str(), nullptr, 10);
@@ -1554,6 +1579,7 @@ void MpvView::setZone(Zone z)
 
 void MpvView::activateButton(int b)
 {
+    singleTapPending = false;
     switch (b)
     {
         case BTN_PREV:     goToEpisode(-1); break;
@@ -1879,7 +1905,7 @@ void MpvView::updateNextCard()
     if (!nextCard) return;
 
     double left = obsDur - obsPos;
-    bool want   = ready && !ended && !switching && !settingsOpen && isEpisodic() && hasNextEpisode()
+    bool want   = ready && !ended && !switching && !hasOverlay() && isEpisodic() && hasNextEpisode()
                 && obsDur > 0.0 && left > 0.0 && left <= kNextCardSecs;
     // Ride above the panel while it is up, so the two never overlap.
     if (want)
@@ -1919,7 +1945,7 @@ void MpvView::updateSleepTimer()
         userPaused = true;
         mpv_set_property_string(mpv, "pause", "yes");
     }
-    if (!settingsOpen) setControlsVisible(true);
+    if (!hasOverlay()) setControlsVisible(true);
     maybePushWatchState(true);
     maybeUpdateHistory(true);
     // After this frame: the pause and the panel are drawn before it sleeps.
@@ -2416,6 +2442,12 @@ brls::Box* sidePanel(const std::string& titleText, brls::Box* content,
             return true;
         },
         false, false, brls::SOUND_BACK);
+    // Absorb D-pad left/right on non-stepper rows (e.g. "Reset all") so
+    // background player actions never see them.
+    panel->registerAction("", brls::BUTTON_LEFT, [](brls::View*) { return true; }, true, true,
+                          brls::SOUND_NONE);
+    panel->registerAction("", brls::BUTTON_RIGHT, [](brls::View*) { return true; }, true, true,
+                          brls::SOUND_NONE);
 
     auto* title = new brls::Label();
     title->setText(titleText);
@@ -2527,9 +2559,12 @@ void MpvView::openChoicePanel(const std::string& titleText,
                               const std::vector<std::string>& details, int current,
                               std::function<void(int)> onPick)
 {
+    if (hasOverlay()) return;
+    singleTapPending = false;
+    if (seeking) cancelSeek();
     controlsBeforePanel = controlsShown;
     setControlsVisible(false);
-    settingsOpen = true;
+    overlayDepth++;
 
     brls::Box* panel = nullptr;
     auto* content    = new brls::Box();
@@ -2539,7 +2574,7 @@ void MpvView::openChoicePanel(const std::string& titleText,
     auto liveFlag = this->alive;
     brls::Application::pushActivity(new PlayerSettingsActivity(root, [this, liveFlag]() {
         if (!*liveFlag) return;
-        settingsOpen = false;
+        if (overlayDepth > 0) overlayDepth--;
         if (controlsBeforePanel) setControlsVisible(true);
     }));
 }
@@ -2643,7 +2678,7 @@ void MpvView::openEpisodesPanel()
 
 void MpvView::openTrackMenu()
 {
-    if (!ready || !mpv)
+    if (!ready || !mpv || hasOverlay())
         return;
 
     // Playback is deliberately NOT paused here. The panel leaves the picture
@@ -2651,9 +2686,11 @@ void MpvView::openTrackMenu()
     // can only be judged against moving video. The control panel does come
     // down, though: it would be clutter over the very frame this exists to
     // let you watch.
+    singleTapPending = false;
+    if (seeking) cancelSeek();
     controlsBeforePanel = controlsShown;
     setControlsVisible(false);
-    settingsOpen = true;
+    overlayDepth++;
 
     TrackList tracks = readTracks();
 
@@ -2958,7 +2995,7 @@ void MpvView::openTrackMenu()
         new PlayerSettingsActivity(root, [this, liveFlag, panelAlive]() {
             *panelAlive = false;
             if (!*liveFlag) return;
-            settingsOpen = false;
+            if (overlayDepth > 0) overlayDepth--;
             subDelaySink = nullptr;  // the row it fed is about to be freed
             if (pictureDirty)
             {
@@ -3010,11 +3047,14 @@ void MpvView::openPicturePanel(brls::View* under, std::shared_ptr<bool> underAli
     });
     content->addView(reset);
 
+    overlayDepth++;
+    auto liveFlag = this->alive;
     // The settings panel sits right under this one at the same place, and is
     // translucent: hidden, or its rows show through.
     under->setVisibility(brls::Visibility::INVISIBLE);
     brls::Application::pushActivity(
-        new PlayerSettingsActivity(root, [under, underAlive, onClose]() {
+        new PlayerSettingsActivity(root, [this, liveFlag, under, underAlive, onClose]() {
+            if (*liveFlag && overlayDepth > 0) overlayDepth--;
             if (!*underAlive) return;
             under->setVisibility(brls::Visibility::VISIBLE);
             if (onClose) onClose();
@@ -3593,6 +3633,15 @@ void MpvView::buildLoadingOverlay(const std::string& title)
 
     this->addView(bufferOverlay);
 
+    // Double-tap seek feedback overlay (click-through via SeekRipple::hitTest).
+    seekRipple = new player_ui::SeekRipple();
+    seekRipple->setPositionType(brls::PositionType::ABSOLUTE);
+    seekRipple->setPositionTop(0.0f);
+    seekRipple->setPositionLeft(0.0f);
+    seekRipple->setWidthPercentage(100.0f);
+    seekRipple->setHeightPercentage(100.0f);
+    this->addView(seekRipple);
+
     // Centre play/pause button, shown with the controls overlay. The overlay box
     // spans the screen (to centre the button) but is NOT tappable itself -- only
     // the bounded button below is, so a tap anywhere else falls through to the
@@ -3758,6 +3807,7 @@ void MpvView::buildLoadingOverlay(const std::string& title)
     // paused (A resumes then).
     nextCard->addGestureRecognizer(
         new brls::TapGestureRecognizer(nextCard, [this]() {
+            singleTapPending = false;
             if (controlsLocked) { flashLock(); return; }
             goToEpisode(+1);
         }));
@@ -3767,14 +3817,14 @@ void MpvView::buildLoadingOverlay(const std::string& title)
     buildControls();
 
     // --- Touch controls --------------------------------------------------
-    // Tap the video to show/hide the panel. Taps on the children (the buttons,
-    // the timeline, the centre play button, the lock pill) interrupt this one
-    // -- borealis lets a child gesture win over its ancestor -- so they act on
-    // their own areas instead of toggling the panel.
-    this->addGestureRecognizer(
-        new brls::TapGestureRecognizer(this, [this]() {
-            if (controlsLocked) { flashLock(); return; }
-            if (ready) setControlsVisible(!controlsShown);
+    // Tap the video to show/hide the panel; double-tap left/right to seek
+    // -/+10s. Taps on the children (buttons, timeline, centre play button,
+    // lock pill) interrupt this one -- borealis lets a child gesture win over
+    // its ancestor -- so they act on their own areas.
+    this->addGestureRecognizer(new brls::TapGestureRecognizer(
+        [this](brls::TapGestureStatus status, brls::Sound* sound) {
+            if (status.state != brls::GestureState::END) return;
+            onVideoTap(status.position, sound);
         }));
 
     // Tap the padlock pill to toggle the lock -- like the Y button, and NOT
@@ -3783,7 +3833,10 @@ void MpvView::buildLoadingOverlay(const std::string& title)
     // it then unlocks.)
     if (lockHint)
         lockHint->addGestureRecognizer(
-            new brls::TapGestureRecognizer(lockHint, [this]() { toggleLock(); }));
+            new brls::TapGestureRecognizer(lockHint, [this]() {
+                singleTapPending = false;
+                toggleLock();
+            }));
 
     // Semi-transparent network/torrent info panel, toggled with ZR. Two columns:
     // the network/worker counters alone are longer than the screen is tall, so a
@@ -4609,8 +4662,132 @@ void MpvView::beginSeek(bool pause)
 void MpvView::updateSeekCommit()
 {
     if (!seeking || seekHold) return;
-    auto idle = std::chrono::steady_clock::now() - seekLastInput;
-    if (idle >= std::chrono::milliseconds(seekPaused ? 1200 : 900)) commitSeek();
+    auto idle  = std::chrono::steady_clock::now() - seekLastInput;
+    int waitMs = seekPaused ? 1200 : (dtSeeking ? kDoubleTapCommitMs : 900);
+    if (idle >= std::chrono::milliseconds(waitMs)) commitSeek();
+}
+
+void MpvView::onVideoTap(brls::Point pos, brls::Sound* sound)
+{
+    if (hasOverlay()) return;
+    if (controlsLocked)
+    {
+        singleTapPending = false;
+        flashLock();
+        return;
+    }
+    if (!ready || !mpv) return;
+
+    float w  = getWidth();
+    float rx = (w > 0.0f) ? (pos.x - getX()) / w : 0.5f;
+    int dir  = (rx < kDoubleTapZoneFrac) ? -1 : (rx > 1.0f - kDoubleTapZoneFrac ? 1 : 0);
+    if (obsDur <= 0.0) dir = 0;
+    // Empty areas of the visible bars should only toggle the panel, not seek.
+    if (controlsShown &&
+        ((topBar && topBar->getFrame().pointInside(pos)) ||
+         (bottomBar && bottomBar->getFrame().pointInside(pos))))
+        dir = 0;
+
+    auto now = std::chrono::steady_clock::now();
+    if (dtSeeking)
+    {
+        if (dir != 0 && dir == dtDir)
+        {
+            singleTapPending = false;
+            applyDoubleTapSeek(dir, pos);
+            if (sound) *sound = brls::SOUND_FOCUS_CHANGE;
+            return;
+        }
+        if (dir != 0 && dir != dtDir)
+        {
+            commitSeek();
+            // Fall through to arm singleTapPending for the opposite side.
+        }
+        else
+        {
+            commitSeek();
+            setControlsVisible(!controlsShown);
+            return;
+        }
+    }
+
+    if (singleTapPending)
+    {
+        auto elapsed =
+            std::chrono::duration_cast<std::chrono::milliseconds>(now - singleTapAt).count();
+        if (dir != 0 && dir == singleTapDir && elapsed <= kDoubleTapWindowMs)
+        {
+            singleTapPending = false;
+            dtSeeking        = true;
+            dtDir            = dir;
+            dtStartPos       = seeking ? seekTarget : obsPos;
+            applyDoubleTapSeek(dir, pos);
+            if (sound) *sound = brls::SOUND_FOCUS_CHANGE;
+            return;
+        }
+        if (dir == 0)
+        {
+            singleTapPending = false;
+            setControlsVisible(!controlsShown);
+            return;
+        }
+        singleTapPending = true;
+        singleTapDir     = dir;
+        singleTapAt      = now;
+        return;
+    }
+
+    if (dir == 0)
+    {
+        setControlsVisible(!controlsShown);
+        return;
+    }
+    singleTapPending = true;
+    singleTapDir     = dir;
+    singleTapAt      = now;
+}
+
+void MpvView::applyDoubleTapSeek(int dir, brls::Point pos)
+{
+    if (!seeking)
+    {
+        beginSeek(false);
+        seekSteps  = 0;
+        dtStartPos = seekTarget;
+    }
+    seekTarget += dir * kDoubleTapStepSecs;
+    if (seekTarget < 0.0) seekTarget = 0.0;
+    if (seekDur > 0.0 && seekTarget > seekDur) seekTarget = seekDur;
+    auto now      = std::chrono::steady_clock::now();
+    dtLastTapAt   = now;
+    seekLastInput = now;
+    if (controlsShown) pokeControls();
+
+    double delta = seekTarget - dtStartPos;
+    int secs     = (int)std::round(std::fabs(delta));
+    std::string dStr =
+        (secs > 0)
+            ? (std::string(delta >= 0.0 ? "+" : "-") + std::to_string(secs) + tr(" s"))
+            : "";
+    if (seekRipple)
+        seekRipple->trigger(dir, dStr, fmtTime(seekTarget), pos, kDoubleTapCommitMs,
+                            kDoubleTapFadeMs);
+}
+
+void MpvView::updateDoubleTap()
+{
+    if (singleTapPending)
+    {
+        if (hasOverlay() || controlsLocked || !ready)
+            singleTapPending = false;
+        else if (std::chrono::steady_clock::now() - singleTapAt >=
+                 std::chrono::milliseconds(kDoubleTapWindowMs))
+        {
+            singleTapPending = false;
+            setControlsVisible(!controlsShown);
+        }
+    }
+    if (dtSeeking && !seeking) dtSeeking = false;
 }
 
 // The sticks, driven every frame from the axes rather than from button events:
@@ -4629,10 +4806,12 @@ void MpvView::updateStickSeek()
     // A side panel has the cursor, but the stick is polled straight off the
     // controller rather than routed through focus -- so without this it would
     // go on scrubbing the video from under an open menu. The push in progress
-    // is dropped: it belonged to the panel.
-    if (settingsOpen)
+    // is dropped and the stick must return to centre before acting again.
+    if (hasOverlay())
     {
-        stickMode = StickMode::None;
+        stickMode        = StickMode::None;
+        seekHeld         = 0.0;
+        stickWaitNeutral = true;
         return;
     }
 
@@ -4647,6 +4826,15 @@ void MpvView::updateStickSeek()
     float ax = std::fabs(x), ay = std::fabs(y);
 
     bool pushed = ax >= kStickDeadzone || ay >= kStickDeadzone;
+
+    if (stickWaitNeutral)
+    {
+        if (!pushed) stickWaitNeutral = false;
+        stickWasPushed = pushed;
+        stickMode      = StickMode::None;
+        seekHeld       = 0.0;
+        return;
+    }
 
     // Locked: the stick is a blocked input like any other, so it flashes the
     // pill. Once per push, not once per frame: re-arming the timer every frame
@@ -4781,6 +4969,7 @@ void MpvView::buildControls()
         backBtn = new player_ui::Button(player_ui::Icon::Back, tr("Back"), 48.0f);
         backBtn->setMargins(0.0f, 14.0f, 0.0f, -6.0f);
         backBtn->addGestureRecognizer(new brls::TapGestureRecognizer(backBtn, [this]() {
+            singleTapPending = false;
             if (controlsLocked) { flashLock(); return; }
             brls::Application::popActivity();
         }));
@@ -4940,6 +5129,7 @@ void MpvView::buildControls()
             auto* b = new player_ui::Button(d.icon, d.caption, d.size);
             int id  = d.id;
             b->addGestureRecognizer(new brls::TapGestureRecognizer(b, [this, id]() {
+                singleTapPending = false;
                 if (controlsLocked && id != BTN_LOCK) { flashLock(); return; }
                 focusBtn = id;
                 zone     = Zone::Buttons;
@@ -4963,6 +5153,7 @@ void MpvView::buildControls()
     subChip->setPositionType(brls::PositionType::ABSOLUTE);
     subChip->setVisibility(brls::Visibility::GONE);
     subChip->addGestureRecognizer(new brls::TapGestureRecognizer(subChip, [this]() {
+        singleTapPending = false;
         if (controlsLocked) { flashLock(); return; }
         pokeControls();
         toggleSubtitles();
@@ -4973,12 +5164,14 @@ void MpvView::buildControls()
     // on release -- one seek instead of one per pixel.
     timeRow->addGestureRecognizer(new brls::TapGestureRecognizer(
         [this](brls::TapGestureStatus status, brls::Sound*) {
+            singleTapPending = false;
             if (controlsLocked) { flashLock(); return; }
             if (status.state != brls::GestureState::END || !timeline) return;
             seekToFraction(timeline->fractionAt(status.position.x));
         }));
     timeRow->addGestureRecognizer(new brls::PanGestureRecognizer(
         [this](brls::PanGestureStatus status, brls::Sound*) {
+            singleTapPending = false;
             if (controlsLocked) { flashLock(); return; }
             if (!ready || !mpv || !timeline || obsDur <= 0.0) return;
             double frac = timeline->fractionAt(status.position.x);
@@ -4994,6 +5187,8 @@ void MpvView::buildControls()
                 seekHold = false;  // let go some other way: the timer does it
                 return;
             }
+            dtSeeking = false;
+            if (seekRipple) seekRipple->clear();
             // Pause while aiming, like the stick -- without it the video kept
             // playing under the preview and the two fought.
             if (!seeking) beginSeek(true);
@@ -5251,7 +5446,8 @@ void MpvView::draw(NVGcontext* vg, float x, float y, float width, float height,
     // gamepad press after that is consumed just to switch back -- so A took two
     // presses to pause/resume once the screen had been tapped. Nothing here uses
     // touch, so keep it in GAMEPAD mode; the next A then acts on the first press.
-    if (brls::Application::getInputType() == brls::InputType::TOUCH)
+    // Do not override input mode while an overlay panel is open on top of us.
+    if (!hasOverlay() && brls::Application::getInputType() == brls::InputType::TOUCH)
         brls::Application::setInputType(brls::InputType::GAMEPAD);
 
     // No render context yet: the engine is still opening (a magnet spends up to
@@ -5300,6 +5496,7 @@ void MpvView::draw(NVGcontext* vg, float x, float y, float width, float height,
     if (ready)
         updateStickSeek();  // must run every frame: the stick is an axis, not an event
     updateSeekCommit();    // a seek that has been aimed, once input stops
+    updateDoubleTap();     // delayed single-tap toggle after double-tap window
     updateControls();      // the panel's timeline, times and clock
     updateControlsAutoHide();  // hide the panel after a few seconds of playback
     updateLockHint();  // fades the lock flash out after its moment
