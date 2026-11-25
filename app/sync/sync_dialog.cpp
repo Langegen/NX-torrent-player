@@ -125,6 +125,13 @@ void showGoogleAuthDialog(std::function<void(bool success)> onComplete)
     auto* dialog = new brls::Dialog(box);
     auto alive = std::make_shared<std::atomic<bool>>(true);
 
+#if defined(__ANDROID__) || defined(ANDROID)
+    dialog->addButton(tr("Open in Browser"), [info]() {
+        brls::Application::getPlatform()->pasteToClipboard(info.userCode);
+        brls::Application::getPlatform()->openBrowser(info.verificationUrl);
+    });
+#endif
+
     dialog->addButton(tr("Cancel"), [alive, onComplete]() {
         *alive = false;
         if (onComplete) onComplete(false);
@@ -145,7 +152,7 @@ void showGoogleAuthDialog(std::function<void(bool success)> onComplete)
             if (res == 1) // Approved
             {
                 *alive = false;
-                brls::async([dialog, onComplete]() {
+                brls::sync([dialog, onComplete]() {
                     dialog->close([onComplete]() {
                         if (onComplete) onComplete(true);
                     });
@@ -155,7 +162,7 @@ void showGoogleAuthDialog(std::function<void(bool success)> onComplete)
             else if (res == -1) // Error / expired
             {
                 std::string msg = pollErr;
-                brls::async([statusLabel, msg]() {
+                brls::sync([statusLabel, msg]() {
                     statusLabel->setText(msg);
                     statusLabel->setTextColor(nvgRGB(240, 80, 80));
                 });

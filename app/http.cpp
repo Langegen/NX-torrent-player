@@ -136,6 +136,9 @@ static void verifyTls(CURL* curl, const std::string& url)
 {
 #ifdef __SWITCH__
     curl_easy_setopt(curl, CURLOPT_CAINFO, "romfs:/cacert.pem");
+#elif defined(__ANDROID__) || defined(ANDROID)
+    if (access(APPDATA_DIR "/cacert.pem", F_OK) == 0)
+        curl_easy_setopt(curl, CURLOPT_CAINFO, APPDATA_DIR "/cacert.pem");
 #else
     if (access(APP_RES("cacert.pem"), 0) == 0)
         curl_easy_setopt(curl, CURLOPT_CAINFO, APP_RES("cacert.pem"));

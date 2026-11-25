@@ -1,6 +1,7 @@
 #pragma once
 
 #include "sync_provider.hpp"
+#include <cstdint>
 #include <string>
 
 namespace cloud_sync

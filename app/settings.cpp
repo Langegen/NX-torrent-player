@@ -12,6 +12,7 @@
 #include <borealis/views/cells/cell_selector.hpp>
 
 #include <cctype>
+#include <cmath>
 #include <cstdio>
 
 #include "config.hpp"
@@ -34,6 +35,7 @@ extern "C" {
 }
 
 #include "i18n.hpp"
+#include "platform_ui.hpp"
 #include "widgets.hpp"  // ui::FieldFrame
 
 namespace
@@ -47,6 +49,7 @@ void note(const std::string& msg)
 }
 
 std::function<void()> uiScaleHook;
+std::function<void()> openStremioHook;
 
 // A Label an outstanding background job can safely give up on: the Options
 // screen is popped long before a slow SD-card scan of the poster cache is
@@ -108,7 +111,10 @@ brls::ScrollingFrame* newPane(brls::Box** list)
     // No margin: setContentView detaches the box and forces its width, so only
     // padding survives. Right padding stays clear of the scrolling indicator,
     // which the frame pins to its own edge.
-    box->setPadding(16.0f, 40.0f, 40.0f, 40.0f);
+    float inset = platform_ui::isMobile()
+        ? (platform_ui::isPortrait() ? 16.0f : 32.0f)
+        : 40.0f;
+    box->setPadding(14.0f, inset, 40.0f, inset);
     scroll->setContentView(box);
 
     *list = box;
@@ -212,7 +218,9 @@ brls::View* generalPane()
                                                           "system" };
     auto* variant = new brls::SelectorCell();
     variant->init(
-        tr("Theme"), { tr("Dark (default)"), tr("Light"), tr("Follow the console") },
+        tr("Theme"),
+        { tr("Dark (default)"), tr("Light"),
+          platform_ui::isMobile() ? tr("Follow system") : tr("Follow the console") },
         [] {
             for (size_t i = 0; i < kVariantIds.size(); i++)
                 if (kVariantIds[i] == config::get().themeVariant) return (int)i;
@@ -274,26 +282,40 @@ brls::View* generalPane()
     sizeHdr->setTitle(tr("UI size"));
     list->addView(sizeHdr);
 
-    auto* dockedUi = new brls::SelectorCell();
-    dockedUi->init(tr("Docked"), uiLabels(config::kDefaultDockedUiWidth),
-                   uiIndex(config::get().dockedUiWidth), [](int sel) {
-                       config::get().dockedUiWidth = config::uiWidths()[sel];
-                       config::save();
-                       // Next frame, not now: the selector's dropdown is still
-                       // closing, and relaying out the activity stack from under
-                       // it is asking for trouble.
-                       brls::sync([] { applyUiScale(); });
-                   });
-    list->addView(dockedUi);
+    if (platform_ui::isMobile())
+    {
+        auto* mobileUi = new brls::SelectorCell();
+        mobileUi->init(tr("Interface scale"), uiLabels(config::kDefaultHandheldUiWidth),
+                       uiIndex(config::get().handheldUiWidth), [](int sel) {
+                           config::get().handheldUiWidth = config::uiWidths()[sel];
+                           config::save();
+                           brls::sync([] { applyUiScale(); });
+                       });
+        list->addView(mobileUi);
+    }
+    else
+    {
+        auto* dockedUi = new brls::SelectorCell();
+        dockedUi->init(tr("Docked"), uiLabels(config::kDefaultDockedUiWidth),
+                       uiIndex(config::get().dockedUiWidth), [](int sel) {
+                           config::get().dockedUiWidth = config::uiWidths()[sel];
+                           config::save();
+                           // Next frame, not now: the selector's dropdown is still
+                           // closing, and relaying out the activity stack from under
+                           // it is asking for trouble.
+                           brls::sync([] { applyUiScale(); });
+                       });
+        list->addView(dockedUi);
 
-    auto* handheldUi = new brls::SelectorCell();
-    handheldUi->init(tr("Handheld"), uiLabels(config::kDefaultHandheldUiWidth),
-                     uiIndex(config::get().handheldUiWidth), [](int sel) {
-                         config::get().handheldUiWidth = config::uiWidths()[sel];
-                         config::save();
-                         brls::sync([] { applyUiScale(); });
-                     });
-    list->addView(handheldUi);
+        auto* handheldUi = new brls::SelectorCell();
+        handheldUi->init(tr("Handheld"), uiLabels(config::kDefaultHandheldUiWidth),
+                         uiIndex(config::get().handheldUiWidth), [](int sel) {
+                             config::get().handheldUiWidth = config::uiWidths()[sel];
+                             config::save();
+                             brls::sync([] { applyUiScale(); });
+                         });
+        list->addView(handheldUi);
+    }
 
     return pane;
 }
@@ -328,7 +350,9 @@ brls::View* playbackPane()
     list->addView(subs);
 
     auto* audioBoost = new brls::BooleanCell();
-    audioBoost->init(tr("Boost quiet audio in handheld"), cfg.audioBoost, [](bool on) {
+    audioBoost->init(
+        platform_ui::isMobile() ? tr("Boost quiet audio") : tr("Boost quiet audio in handheld"),
+        cfg.audioBoost, [](bool on) {
         config::get().audioBoost = on;
         config::save();
         // The player re-reads this every frame, so it reaches a video that is
@@ -362,7 +386,7 @@ brls::View* playbackPane()
     // themselves are on the calibration screen, next to the patterns they are
     // judged against -- and in the player's panel, against the film.
     auto* picHdr = new brls::Header();
-    picHdr->setTitle(tr("Picture in handheld"));
+    picHdr->setTitle(platform_ui::isMobile() ? tr("Picture") : tr("Picture in handheld"));
     list->addView(picHdr);
 
     auto* pic = new brls::DetailCell();
@@ -381,8 +405,10 @@ brls::View* playbackPane()
     });
     list->addView(pic);
     list->addView(caption(
-        tr("Brightness, contrast, gamma, saturation and RGB balance of the video on the console's "
-           "screen. Docked they are off: the TV sets the picture.")));
+        platform_ui::isMobile()
+            ? tr("Brightness, contrast, gamma, saturation and RGB balance of the video.")
+            : tr("Brightness, contrast, gamma, saturation and RGB balance of the video on the console's "
+                 "screen. Docked they are off: the TV sets the picture.")));
 
     return pane;
 }
@@ -399,19 +425,22 @@ brls::View* streamingPane()
     // toggle (the end of its scale animation), so its text cannot be overridden
     // from here.
     auto* ramStream = new brls::SelectorCell();
-    ramStream->init(tr("Stream to RAM (no SD cache)"),
-                    { tr("Off (Not recommended)"), tr("On (Recommended)") },
-                    cfg.ramStream ? 1 : 0, [](int sel) {
-                        config::get().ramStream = sel == 1;
-                        config::save();
-                        // Latched when the engine opens, so it takes effect on
-                        // the next video.
-                    });
+    ramStream->init(
+        platform_ui::isMobile() ? tr("Stream to RAM (no disk cache)") : tr("Stream to RAM (no SD cache)"),
+        { tr("Off (Not recommended)"), tr("On (Recommended)") },
+        cfg.ramStream ? 1 : 0, [](int sel) {
+            config::get().ramStream = sel == 1;
+            config::save();
+            // Latched when the engine opens, so it takes effect on
+            // the next video.
+        });
     list->addView(ramStream);
     list->addView(caption(
-        tr("Keep pieces in memory instead of writing them to the SD card. Removes "
-        "the stutter on each finished piece, at the cost of no resume and a "
-        "limited seek-back range.")));
+        platform_ui::isMobile()
+            ? tr("Keep pieces in memory instead of writing them to storage. Reduces stutter, at the cost of no resume and a limited seek-back range.")
+            : tr("Keep pieces in memory instead of writing them to the SD card. Removes "
+                 "the stutter on each finished piece, at the cost of no resume and a "
+                 "limited seek-back range.")));
 
     auto* buffer = new brls::SelectorCell();
     buffer->init(tr("Buffer size"), config::bufferLabels(), cfg.bufferMode,
@@ -745,7 +774,7 @@ brls::View* syncPane()
             std::thread([testBtn, live = testBtn->alive]() {
                 std::string err;
                 bool ok = cloud_sync::Manager::instance().webdavProvider()->testConnection(err);
-                brls::async([testBtn, live, ok, err]() {
+                brls::sync([testBtn, live, ok, err]() {
                     if (*live)
                     {
                         testBtn->setState(brls::ButtonState::ENABLED);
@@ -844,9 +873,11 @@ brls::View* networkPane()
     });
     list->addView(tsCell);
     list->addView(caption(
-        tr("When set, torrents are streamed by your TorrServer and played here as "
-           "a plain video stream, instead of being downloaded by the console. "
-           "Leave empty to use the built-in engine.")));
+        platform_ui::isMobile()
+            ? tr("When set, torrents are streamed by your TorrServer and played here as a plain video stream, instead of being downloaded by the device. Leave empty to use the built-in engine.")
+            : tr("When set, torrents are streamed by your TorrServer and played here as "
+                 "a plain video stream, instead of being downloaded by the console. "
+                 "Leave empty to use the built-in engine.")));
 
     auto* tsTest = new AsyncButton();
     tsTest->setText(tr("Test connection"));
@@ -1086,12 +1117,19 @@ brls::View* aboutPane()
             else if (!r.newer)
                 note(tr("You are on the latest version (") +
                      std::string(APP_VERSION) + ").");
-            else if (r.url.empty())
+            else if (!r.installable())
+            {
+#if defined(__ANDROID__) || defined(ANDROID)
+                note(tr("Version ") + r.version +
+                     tr(" is available on GitHub."));
+#else
                 // Newer, but nothing we can install: say so rather than claim
                 // this is the latest.
                 note(tr("Version ") + r.version +
                      tr(" is out, but that release has no .nro to install. "
                         "Get it from GitHub."));
+#endif
+            }
             else
                 update::promptInstall(r);
         });
@@ -1110,33 +1148,189 @@ brls::View* aboutPane()
     });
     list->addView(logging);
     list->addView(caption(
-        tr("The log is written to the SD card continuously. Turn it on to diagnose "
-        "a problem, then restart the app.")));
+        platform_ui::isMobile()
+            ? tr("The log is written to app storage continuously. Turn it on to diagnose "
+                 "a problem, then restart the app.")
+            : tr("The log is written to the SD card continuously. Turn it on to diagnose "
+                 "a problem, then restart the app.")));
 
     return pane;
 }
 
+class MobileSettingsView : public brls::Box
+{
+  public:
+    MobileSettingsView()
+    {
+        setAxis(brls::Axis::COLUMN);
+        setGrow(1.0f);
+
+        struct TabDef
+        {
+            std::string label;
+            std::function<brls::View*()> create;
+        };
+        std::vector<TabDef> defs = {
+            { tr("General"),   [] { return generalPane(); } },
+            { tr("Playback"),  [] { return playbackPane(); } },
+            { tr("Streaming"), [] { return streamingPane(); } },
+            { "Stremio",       [] { return stremioPane(); } },
+            { "Jackett",       [] { return jackettPane(); } },
+            { tr("Sync"),      [] { return syncPane(); } },
+            { tr("Network"),   [] { return networkPane(); } },
+            { tr("About"),     [] { return aboutPane(); } },
+        };
+
+        tabRow = new brls::Box();
+        float inset = platform_ui::sideInset();
+        tabRow->setPadding(8.0f, inset, 6.0f, inset);
+
+        for (size_t i = 0; i < defs.size(); i++)
+        {
+            creators.push_back(std::move(defs[i].create));
+            int idx = (int)i;
+            auto* b = ui::actionButton(defs[i].label, i == 0, [this, idx]() {
+                selectTab(idx);
+            });
+            tabRow->addView(b);
+            tabBtns.push_back(b);
+        }
+        addView(ui::pillStrip(tabRow, 56.0f));
+
+        auto* sep = new brls::Rectangle();
+        sep->setHeight(1.0f);
+        sep->setColor(theme::scrim(22));
+        addView(sep);
+
+        paneHost = new brls::Box();
+        paneHost->setAxis(brls::Axis::COLUMN);
+        paneHost->setGrow(1.0f);
+        addView(paneHost);
+
+        selectTab(0);
+
+        resizeSub = brls::Application::getWindowSizeChangedEvent()->subscribe(
+            [this]() { updatePadding(); });
+        resizeSubscribed = true;
+    }
+
+    ~MobileSettingsView() override
+    {
+        if (resizeSubscribed)
+        {
+            brls::Application::getWindowSizeChangedEvent()->unsubscribe(resizeSub);
+            resizeSubscribed = false;
+        }
+    }
+
+  private:
+    brls::Box* tabRow = nullptr;
+    brls::Box* paneHost = nullptr;
+    std::vector<brls::Button*> tabBtns;
+    std::vector<std::function<brls::View*()>> creators;
+    brls::VoidEvent::Subscription resizeSub;
+    bool resizeSubscribed = false;
+
+    void selectTab(int idx)
+    {
+        if (idx < 0 || idx >= (int)creators.size()) return;
+        for (size_t i = 0; i < tabBtns.size(); i++)
+            ui::setPillActive(tabBtns[i], (int)i == idx);
+        paneHost->clearViews();
+        if (brls::View* v = creators[idx]())
+        {
+            v->setGrow(1.0f);
+            paneHost->addView(v);
+        }
+    }
+
+    void updatePadding()
+    {
+        float inset = platform_ui::sideInset();
+        if (tabRow) tabRow->setPadding(8.0f, inset, 6.0f, inset);
+        float paneInset = platform_ui::isPortrait() ? 16.0f : 32.0f;
+        if (paneHost && !paneHost->getChildren().empty())
+        {
+            if (auto* sf = dynamic_cast<brls::ScrollingFrame*>(paneHost->getChildren()[0]))
+            {
+                if (!sf->getChildren().empty())
+                {
+                    if (auto* b = dynamic_cast<brls::Box*>(sf->getChildren()[0]))
+                        b->setPadding(14.0f, paneInset, 40.0f, paneInset);
+                }
+            }
+        }
+    }
+};
+
 }  // namespace
 
 void setUiScaleHook(std::function<void()> fn) { uiScaleHook = std::move(fn); }
+void setOpenStremioHook(std::function<void()> fn) { openStremioHook = std::move(fn); }
 
 void applyUiScale()
 {
-    // borealis lays out in a fixed 1280x720 logical space and multiplies it by
-    // windowScale to fill the output, so the UI keeps the same relative size
-    // whatever it is drawn to -- docked it is simply 1.5x bigger, with no more
-    // content on screen. Widening the logical space shrinks the UI instead; how
-    // far is the user's call, separately per mode, since a 1080p TV metres away
-    // and a 6" panel at arm's length do not want the same thing.
-    bool docked = brls::Application::windowWidth >= 1920;
-    uint32_t w  = (uint32_t)(docked ? config::get().dockedUiWidth
-                                    : config::get().handheldUiWidth);
-    uint32_t h  = w * 9 / 16;  // every offered width is 16:9, so this is exact
+    if (platform_ui::isMobile())
+    {
+        int winW = brls::Application::windowWidth;
+        int winH = brls::Application::windowHeight;
+        uint32_t baseW = (uint32_t)config::get().handheldUiWidth;
+        uint32_t baseH = baseW * 9 / 16;
+        uint32_t w, h;
+        if (winH > winW && winW > 0)
+        {
+            // Portrait phone or tablet: keep physical scale legible vs landscape
+            double scale = (double)baseW / 1280.0;
+            uint32_t targetW = (uint32_t)std::lround((winW >= 1400 ? 800.0 : 720.0) * scale);
+            if (targetW < 640) targetW = 640;
+            if (targetW > 960) targetW = 960;
+            w = targetW;
+            h = (uint32_t)std::ceil((double)w * winH / winW);
+        }
+        else
+        {
+            // Landscape phone (e.g. 20:9), tablet (16:10), or Android TV (16:9):
+            // guarantee at least baseH (720 at 100%) vertical logical pixels.
+            w = baseW;
+            if (winW > 0 && winH > 0)
+            {
+                uint32_t minWForHeight = (uint32_t)std::ceil((double)baseH * winW / winH);
+                if (minWForHeight > w) w = minWForHeight;
+                h = (uint32_t)std::ceil((double)w * winH / winW);
+            }
+            else
+            {
+                h = baseH;
+            }
+        }
 
-    if (brls::Application::ORIGINAL_WINDOW_WIDTH == w) return;
+        if (brls::Application::ORIGINAL_WINDOW_WIDTH == w &&
+            brls::Application::ORIGINAL_WINDOW_HEIGHT == h)
+            return;
 
-    brls::Application::ORIGINAL_WINDOW_WIDTH  = w;
-    brls::Application::ORIGINAL_WINDOW_HEIGHT = h;
+        brls::Application::ORIGINAL_WINDOW_WIDTH  = w;
+        brls::Application::ORIGINAL_WINDOW_HEIGHT = h;
+    }
+    else
+    {
+        // borealis lays out in a fixed 1280x720 logical space and multiplies it by
+        // windowScale to fill the output, so the UI keeps the same relative size
+        // whatever it is drawn to -- docked it is simply 1.5x bigger, with no more
+        // content on screen. Widening the logical space shrinks the UI instead; how
+        // far is the user's call, separately per mode, since a 1080p TV metres away
+        // and a 6" panel at arm's length do not want the same thing.
+        bool docked = brls::Application::windowWidth >= 1920;
+        uint32_t w  = (uint32_t)(docked ? config::get().dockedUiWidth
+                                        : config::get().handheldUiWidth);
+        uint32_t h  = w * 9 / 16;  // every offered width is 16:9, so this is exact
+
+        if (brls::Application::ORIGINAL_WINDOW_WIDTH == w &&
+            brls::Application::ORIGINAL_WINDOW_HEIGHT == h)
+            return;
+
+        brls::Application::ORIGINAL_WINDOW_WIDTH  = w;
+        brls::Application::ORIGINAL_WINDOW_HEIGHT = h;
+    }
 
     // Recomputes windowScale/contentWidth and relayouts the activity stack.
     // Safe to call from the window-size-changed listener: that event is fired by
@@ -1152,8 +1346,25 @@ void applyUiScale()
     if (uiScaleHook) uiScaleHook();
 }
 
+SettingsActivity::~SettingsActivity()
+{
+    if (resizeSubscribed)
+    {
+        brls::Application::getWindowSizeChangedEvent()->unsubscribe(resizeSub);
+        resizeSubscribed = false;
+    }
+}
+
 brls::View* SettingsActivity::createContentView()
 {
+    if (platform_ui::isMobile())
+    {
+        auto* frame = new ui::FieldFrame();
+        frame->pushContentView(new MobileSettingsView());
+        frame->setTitle(tr("Options"));
+        return frame;
+    }
+
     // A sidebar with a pane per category, rather than the one long scroll this
     // used to be. Twenty-odd cells with a prose caption under half of them ran
     // to several screens, and the section headers went past too fast to serve
@@ -1174,6 +1385,16 @@ brls::View* SettingsActivity::createContentView()
     tabs->addTab(tr("Sync"), [] { return syncPane(); });
     tabs->addTab(tr("Network"), [] { return networkPane(); });
     tabs->addTab(tr("About"), [] { return aboutPane(); });
+
+    brls::View* sidebar = tabs->getView("brls/tab_frame/sidebar");
+    auto updateSidebar = [sidebar]() {
+        if (!sidebar) return;
+        bool portrait = brls::Application::contentHeight > brls::Application::contentWidth;
+        sidebar->setWidth(portrait ? 200.0f : 410.0f);
+    };
+    updateSidebar();
+    resizeSub = brls::Application::getWindowSizeChangedEvent()->subscribe(updateSidebar);
+    resizeSubscribed = true;
 
     auto* frame = new ui::FieldFrame();
     frame->pushContentView(tabs);
@@ -1204,19 +1425,32 @@ brls::View* AccountActivity::createContentView()
         box->setGrow(1.0f);
         box->setJustifyContent(brls::JustifyContent::CENTER);
         box->setAlignItems(brls::AlignItems::CENTER);
+        box->setPadding(0.0f, 28.0f, 0.0f, 28.0f);
 
         auto* title = new brls::Label();
         title->setText(tr("Not signed in"));
-        title->setFontSize(30.0f);
+        title->setFontSize(28.0f);
         title->setTextColor(theme::text());
+        title->setHorizontalAlign(brls::HorizontalAlign::CENTER);
         box->addView(title);
 
         auto* sub = new brls::Label();
-        sub->setText(tr("The sign-in form is on the Stremio tab."));
+        sub->setText(platform_ui::isMobile()
+                         ? tr("Sign in to Stremio to sync your Stremio library and addons.")
+                         : tr("The sign-in form is on the Stremio tab."));
         sub->setFontSize(18.0f);
         sub->setTextColor(theme::textMuted());
+        sub->setHorizontalAlign(brls::HorizontalAlign::CENTER);
         sub->setMarginTop(10.0f);
         box->addView(sub);
+
+        auto* goBtn = ui::actionButton(tr("Go to Stremio"), true, []() {
+            brls::Application::popActivity();
+            if (openStremioHook) brls::sync([]() { openStremioHook(); });
+        });
+        goBtn->setMarginTop(24.0f);
+        goBtn->setMarginRight(0.0f);
+        box->addView(goBtn);
 
         root->addView(box);
 
@@ -1226,11 +1460,13 @@ brls::View* AccountActivity::createContentView()
         return frame;
     }
 
+    float inset = platform_ui::sideInset();
+
     // ---- identity ---------------------------------------------------------
     auto* head = new brls::Box();
     head->setAxis(brls::Axis::ROW);
     head->setAlignItems(brls::AlignItems::CENTER);
-    head->setMargins(0.0f, 60.0f, 28.0f, 60.0f);
+    head->setMargins(0.0f, inset, 28.0f, inset);
 
     // A monogram rather than an avatar: the API gives us no picture, and a
     // letter in the accent reads as an account at a glance where a generic
@@ -1262,7 +1498,7 @@ brls::View* AccountActivity::createContentView()
         auto* addr = new brls::Label();
         // The address is only kept so this screen can name the account -- the
         // API has no use for it once there is an authKey.
-        addr->setText(email.empty() ? tr("this console") : email);
+        addr->setText(email.empty() ? (platform_ui::isMobile() ? tr("this device") : tr("this console")) : email);
         addr->setFontSize(28.0f);
         addr->setTextColor(theme::text());
         addr->setSingleLine(true);
@@ -1281,18 +1517,18 @@ brls::View* AccountActivity::createContentView()
     // ---- the two figures --------------------------------------------------
     auto* stats = new brls::Box();
     stats->setAxis(brls::Axis::ROW);
-    stats->setMargins(0.0f, 60.0f, 26.0f, 60.0f);
+    stats->setMargins(0.0f, inset, 26.0f, inset);
 
     // Returns the value label, so a count that is not known yet can be filled
     // in when it lands.
     auto stat = [&](const std::string& name, const std::string& value) {
         auto* card = new brls::Box();
         card->setAxis(brls::Axis::COLUMN);
-        card->setWidth(200.0f);
+        card->setWidth(platform_ui::isMobile() ? 160.0f : 200.0f);
         card->setPadding(18.0f, 20.0f, 18.0f, 22.0f);
         card->setCornerRadius(10.0f);
         card->setBackgroundColor(theme::surface());
-        card->setMarginRight(20.0f);
+        card->setMarginRight(16.0f);
 
         auto* v = new brls::Label();
         v->setText(value);
@@ -1319,7 +1555,7 @@ brls::View* AccountActivity::createContentView()
     // ---- the addons -------------------------------------------------------
     auto* addonHdr = new brls::Header();
     addonHdr->setTitle(tr("Installed addons"));
-    addonHdr->setMargins(0.0f, 60.0f, 0.0f, 60.0f);
+    addonHdr->setMargins(0.0f, inset, 0.0f, inset);
     root->addView(addonHdr);
 
     auto* scroll = new brls::ScrollingFrame();
@@ -1327,7 +1563,7 @@ brls::View* AccountActivity::createContentView()
     scroll->setScrollingBehavior(brls::ScrollingBehavior::CENTERED);
     auto* addonList = new AsyncBox();
     addonList->setAxis(brls::Axis::COLUMN);
-    addonList->setPadding(6.0f, 40.0f, 20.0f, 60.0f);
+    addonList->setPadding(6.0f, inset, 20.0f, inset);
     scroll->setContentView(addonList);
     root->addView(scroll);
 
@@ -1424,7 +1660,7 @@ brls::View* AccountActivity::createContentView()
     // ---- sign out ---------------------------------------------------------
     auto* logout = new brls::Button();
     logout->setText(tr("Sign out of Stremio"));
-    logout->setMargins(4.0f, 60.0f, 24.0f, 60.0f);
+    logout->setMargins(4.0f, inset, 24.0f, inset);
     logout->registerClickAction([logout](brls::View*) {
         stremio::clearAuthKey();
         // The addon collection -- and every meta answer cached behind it --

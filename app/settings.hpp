@@ -7,7 +7,12 @@
 class SettingsActivity : public brls::Activity
 {
   public:
+    ~SettingsActivity() override;
     brls::View* createContentView() override;
+
+  private:
+    brls::VoidEvent::Subscription resizeSub;
+    bool resizeSubscribed = false;
 };
 
 // The account screen, opened from the header's profile button: who is signed in
@@ -29,3 +34,6 @@ void applyUiScale();
 // change comes from setWindowSize, which does NOT fire the window-size-changed
 // event (that event is what calls us, not the other way round).
 void setUiScaleHook(std::function<void()> fn);
+
+// Hook allowing the Account screen's empty-state CTA to jump directly to the Stremio tab.
+void setOpenStremioHook(std::function<void()> fn);

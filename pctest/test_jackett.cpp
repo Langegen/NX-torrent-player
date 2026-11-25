@@ -2,12 +2,36 @@
 // Jackett does not answer the way it should, and how a typed address is
 // cleaned up.
 
+#include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
 
+#include "http.hpp"
+#include "jackett.hpp"
 #include "jackett_diag.hpp"
 #include "json.hpp"
+
+namespace http
+{
+std::string urlEncode(const std::string& s)
+{
+    static const char* hex = "0123456789ABCDEF";
+    std::string out;
+    for (unsigned char c : s)
+    {
+        if (std::isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~')
+            out += (char)c;
+        else
+        {
+            out += '%';
+            out += hex[c >> 4];
+            out += hex[c & 0xF];
+        }
+    }
+    return out;
+}
+} // namespace http
 
 #define CHECK(cond)                                                            \
     do                                                                         \
@@ -122,12 +146,99 @@ static void test_urls()
     std::printf("      PASSED\n");
 }
 
+static void test_jacred_results_and_urls()
+{
+    std::printf("[5/5] Jacred JSON metadata, trackers, btih and search URLs...\n");
+    const char* resp = R"J({"Results":[
+      {
+        "Tracker": "rutracker, bitru, kinozal, rutor",
+        "Title": "\u0424\u043E\u043B\u043B\u0430\u0443\u0442 (2 \u0441\u0435\u0437\u043E\u043D: 1-8 \u0441\u0435\u0440\u0438\u0438 \u0438\u0437 8) / Fallout / 2025",
+        "Size": 31933081845,
+        "PublishDate": "2026-05-09T09:57:00",
+        "Category": [5000],
+        "Seeders": 277,
+        "Peers": 27,
+        "MagnetUri": "magnet:?xt=urn:btih:B4F8206402E6DAAE109D8A487A3E21B21A495DE5&dn=Fallout",
+        "languages": ["eng", "rus"],
+        "info": {
+          "quality": 1080,
+          "videotype": "hdr",
+          "voices": ["\u0414\u0443\u0431\u043B\u044F\u0436", "Jaskier"],
+          "seasons": [2],
+          "types": ["serial"],
+          "name": "\u0424\u043E\u043B\u043B\u0430\u0443\u0442",
+          "originalname": "Fallout",
+          "relased": 2025,
+          "imdb": "tt12637874",
+          "seedersLive": true,
+          "seedersUnknown": false
+        }
+      },
+      {
+        "Tracker": "nyaa",
+        "Title": "Anime.Movie.2001.1080p",
+        "Size": 2147483648,
+        "Category": [5070],
+        "Seeders": 0,
+        "MagnetUri": "magnet:?xt=urn:btih:MFRGGZDFMZTWQ2LKNNWG23TPOBZGS43U",
+        "info": {
+          "quality": 1080,
+          "types": ["anime"],
+          "seedersUnknown": true
+        }
+      }
+    ],"jacred":true})J";
+
+    auto items = jackett::parseResultsJson(resp);
+    CHECK(items.size() == 2);
+    const auto& f = items[0];
+    CHECK(f.title.find("Фоллаут") == 0);
+    CHECK(f.size == 31933081845LL);
+    CHECK(f.seeders == 277);
+    CHECK(f.trackers.size() == 4 && f.trackers[0] == "rutracker" && f.trackers[3] == "rutor");
+    CHECK(jackett::compactTrackers(f.trackers) == "rutracker +3");
+    CHECK(f.categories.size() == 1 && f.categories[0] == 5000);
+    CHECK(f.languages.size() == 2 && f.languages[0] == "eng" && f.languages[1] == "rus");
+    CHECK(f.infoHash == "b4f8206402e6daae109d8a487a3e21b21a495de5");
+    CHECK(f.hasJacredInfo && f.infoQuality == 1080 && f.infoVideotype == "hdr");
+    CHECK(f.infoVoices.size() == 2 && f.infoVoices[0] == "Дубляж" && f.infoVoices[1] == "Jaskier");
+    CHECK(f.infoSeasons.size() == 1 && f.infoSeasons[0] == 2);
+    CHECK(f.infoTypes.size() == 1 && f.infoTypes[0] == "serial");
+    CHECK(f.infoName == "Фоллаут" && f.infoOriginalName == "Fallout");
+    CHECK(f.infoYear == 2025 && f.infoImdb == "tt12637874");
+    CHECK(f.seedersLive && !f.seedersUnknown);
+
+    // Base32 btih decodes to 40-char lowercase hex.
+    CHECK(items[1].infoHash.size() == 40);
+    CHECK(items[1].seedersUnknown);
+    CHECK(jackett::compactTrackers(items[1].trackers) == "nyaa");
+    CHECK(jackett::splitTrackers("rutor, RuTor , kinozal").size() == 2);
+
+    jackett::TitleHint animeMovie;
+    animeMovie.title = "Унесённые призраками";
+    animeMovie.titleOriginal = "Spirited Away";
+    animeMovie.year = "2001";
+    animeMovie.series = false;
+    animeMovie.anime = true;
+    std::string u1 = jackett::buildSearchUrl("https://ru.jac.black/", "", "Spirited Away 2001",
+                                             jackett::Category::MOVIES, &animeMovie);
+    CHECK(u1.find("is_serial=0") != std::string::npos);
+    CHECK(u1.find("Category[]=2000") != std::string::npos);
+    CHECK(u1.find("Category[]=5070") != std::string::npos);
+
+    std::string u2 = jackett::buildSearchUrl("https://ru.jac.black", "", "Фоллаут",
+                                             jackett::Category::ALL, nullptr);
+    CHECK(u2 == "https://ru.jac.black/api/v2.0/indexers/all/results?Query=%D0%A4%D0%BE%D0%BB%D0%BB%D0%B0%D1%83%D1%82");
+    std::printf("      PASSED\n");
+}
+
 int main()
 {
     test_transport();
     test_answers();
     test_indexers();
     test_urls();
+    test_jacred_results_and_urls();
     std::printf("ALL TESTS PASSED\n");
     return 0;
 }

@@ -1,6 +1,7 @@
 #include "widgets.hpp"
 
 #include "i18n.hpp"
+#include "platform_ui.hpp"
 #include "stremio.hpp"  // fetchPosterAsync / fetchHqArtAsync: the shared art cache
 #include "theme.hpp"
 #include "workers.hpp"
@@ -27,8 +28,94 @@ void paintField(NVGcontext* vg, float x, float y, float w, float h)
     nvgRestore(vg);
 }
 
+FieldFrame::FieldFrame() : brls::AppletFrame()
+{
+    initMobile();
+}
+
+FieldFrame::FieldFrame(brls::View* contentView) : brls::AppletFrame(contentView)
+{
+    initMobile();
+}
+
+FieldFrame::~FieldFrame()
+{
+    if (resizeSubscribed)
+    {
+        brls::Application::getWindowSizeChangedEvent()->unsubscribe(resizeSub);
+        resizeSubscribed = false;
+    }
+}
+
+void FieldFrame::draw(NVGcontext* vg, float x, float y, float w, float h,
+                      brls::Style style, brls::FrameContext* ctx)
+{
+    paintField(vg, x, y, w, h);
+    brls::AppletFrame::draw(vg, x, y, w, h, style, ctx);
+}
+
+void FieldFrame::initMobile()
+{
+    if (!platform_ui::isMobile()) return;
+
+    if (auto* header = this->getHeader())
+    {
+        const auto& kids = header->getChildren();
+        if (!kids.empty())
+        {
+            if (auto* leftBox = dynamic_cast<brls::Box*>(kids[0]))
+            {
+                leftBox->setAlignItems(brls::AlignItems::CENTER);
+                leftBox->setPadding(0.0f, 0.0f, 0.0f, 0.0f);
+                leftBox->setGrow(1.0f);
+                leftBox->setShrink(1.0f);
+
+                auto* backBtn = mobileBackButton([this]() { this->popContentView(); });
+                backBtn->setMarginRight(12.0f);
+                leftBox->addView(backBtn, 0);
+            }
+        }
+        if (auto* title = dynamic_cast<brls::Label*>(this->getView("brls/applet_frame/title_label")))
+        {
+            title->setMarginTop(0.0f);
+            title->setSingleLine(true);
+            title->setShrink(1.0f);
+            title->setClipsToBounds(true);
+        }
+    }
+
+    updateHeaderLayout();
+    resizeSub = brls::Application::getWindowSizeChangedEvent()->subscribe(
+        [this]() { updateHeaderLayout(); });
+    resizeSubscribed = true;
+}
+
+void FieldFrame::updateHeaderLayout()
+{
+    if (!platform_ui::isMobile()) return;
+    bool portrait = platform_ui::isPortrait();
+    if (auto* header = this->getHeader())
+    {
+        header->setMargins(0.0f, portrait ? 0.0f : 12.0f, 0.0f, portrait ? 0.0f : 12.0f);
+        header->setPadding(0.0f, portrait ? 12.0f : 16.0f, 0.0f, portrait ? 12.0f : 16.0f);
+        header->setHeight(portrait ? 72.0f : 78.0f);
+    }
+    if (auto* title = dynamic_cast<brls::Label*>(this->getView("brls/applet_frame/title_label")))
+        title->setFontSize(portrait ? 24.0f : 26.0f);
+}
+
 namespace
 {
+class MobileIconLabel : public brls::Label
+{
+  public:
+    MobileIconLabel()
+    {
+        int f = brls::Application::getFont(brls::FONT_MATERIAL_ICONS);
+        if (f >= 0) this->font = f;
+    }
+};
+
 constexpr float kRadius = 8.0f;
 
 void makeFocusable(brls::Box* card, std::function<void()> onClick)
@@ -353,6 +440,49 @@ brls::View* strip(brls::Box* row, float height, bool fade)
     return s;
 }
 
+brls::Button* mobileBackButton(std::function<void()> onBack, bool floating)
+{
+    auto* b = new brls::Button();
+    b->setStyle(&brls::BUTTONSTYLE_BORDERLESS);
+    b->setDimensions(44.0f, 44.0f);
+    b->setCornerRadius(22.0f);
+    b->setHighlightCornerRadius(22.0f);
+    b->setPadding(0.0f);
+    b->setShrink(0.0f);
+    b->setJustifyContent(brls::JustifyContent::CENTER);
+    b->setAlignItems(brls::AlignItems::CENTER);
+    b->setBackgroundColor(floating ? nvgRGBA(0, 0, 0, 150) : theme::scrim(22));
+    if (auto* stockLbl = b->getView("brls/button/label"))
+        stockLbl->setVisibility(brls::Visibility::GONE);
+
+    auto* ic = new MobileIconLabel();
+    ic->setText("\xEE\x97\x84");
+    ic->setFontSize(24.0f);
+    ic->setTextColor(floating ? nvgRGB(255, 255, 255) : theme::text());
+    ic->setHorizontalAlign(brls::HorizontalAlign::CENTER);
+    ic->setVerticalAlign(brls::VerticalAlign::CENTER);
+    b->addView(ic, 0);
+
+    b->registerClickAction([onBack](brls::View*) {
+        if (onBack) onBack();
+        return true;
+    });
+    return b;
+}
+
+brls::HScrollingFrame* pillStrip(brls::Box* row, float height)
+{
+    row->setAxis(brls::Axis::ROW);
+    row->setAlignItems(brls::AlignItems::CENTER);
+    auto* s = new brls::HScrollingFrame();
+    s->setScrollingBehavior(brls::ScrollingBehavior::CENTERED);
+    s->setScrollingIndicatorVisible(false);
+    s->setFocusable(false);
+    s->setHeight(height);
+    s->setContentView(row);
+    return s;
+}
+
 brls::Box* posterCard(const std::string& title, const std::string& artId,
                       const std::string& artUrl, std::shared_ptr<bool> alive,
                       std::function<void()> onClick, float w,
@@ -518,6 +648,7 @@ brls::Box* moreTile(const std::string& text, float w, std::function<void()> onCl
 brls::Box* chip(const std::string& text, NVGcolor bg, NVGcolor fg)
 {
     auto* c = new brls::Box();
+    c->setShrink(0.0f);
     c->setCornerRadius(6.0f);
     c->setPadding(6.0f, 10.0f, 3.0f, 10.0f);
     c->setMarginRight(10.0f);
@@ -534,6 +665,7 @@ brls::Box* chip(const std::string& text, NVGcolor bg, NVGcolor fg)
 brls::Box* chip(const std::string& text, bool strong)
 {
     auto* c = new brls::Box();
+    c->setShrink(0.0f);
     c->setCornerRadius(6.0f);
     c->setPadding(6.0f, 10.0f, 3.0f, 10.0f);
     c->setMarginRight(10.0f);
@@ -551,7 +683,10 @@ brls::Button* actionButton(const std::string& text, bool primary,
                            std::function<void()> onClick, bool onImage)
 {
     auto* b = new brls::Button();
+    b->setShrink(0.0f);
     b->setText(text);
+    if (auto* l = dynamic_cast<brls::Label*>(b->getView("brls/button/label")))
+        l->setSingleLine(true);
     // The mock-ups' pills: smaller than borealis' stock button, the main one
     // in the accent, the others a translucent fill rather than an outline.
     b->setStyle(primary ? &brls::BUTTONSTYLE_PRIMARY : &brls::BUTTONSTYLE_BORDERLESS);

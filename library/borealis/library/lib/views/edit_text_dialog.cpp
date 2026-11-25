@@ -2,6 +2,8 @@
 #include <borealis/core/i18n.hpp>
 #include <borealis/core/touch/tap_gesture.hpp>
 #include <borealis/core/application.hpp>
+#include <borealis/views/applet_frame.hpp>
+#include <borealis/views/button.hpp>
 
 #ifdef __PSV__
 #define EDIT_TEXT_DIALOG_POP_ANIMATION TransitionAnimation::NONE
@@ -9,6 +11,10 @@
 #include <SDL2/SDL.h>
 #include "borealis/platforms/sdl/sdl_video.hpp"
 #else
+#ifdef ANDROID
+#include <SDL2/SDL.h>
+#include "borealis/platforms/sdl/sdl_video.hpp"
+#endif
 #define EDIT_TEXT_DIALOG_POP_ANIMATION TransitionAnimation::FADE
 #define EDIT_TEXT_DIALOG_BACKGROUND_TRANSLUCENT true
 #endif
@@ -67,6 +73,7 @@ namespace brls
                 marginBottom="10"/>
 
             <brls:Hints
+                id="brls/dialog/hints"
                 allowAButtonTouch="true"
                 forceShown="true"
                 addBaseAction="false"
@@ -137,9 +144,10 @@ namespace brls
                     });
                 return true; });
 
-#if defined(__PSV__) and !defined(BOREALIS_USE_GXM)
+#if defined(ANDROID) || (defined(__PSV__) && !defined(BOREALIS_USE_GXM))
         // After turning off the on-screen keyboard, tap on the input area to reopen
-        this->addGestureRecognizer(new brls::TapGestureRecognizer([](brls::TapGestureStatus status, brls::Sound*) {
+        this->label->setMinHeight(56.0f);
+        auto reopenIme = [](brls::TapGestureStatus status, brls::Sound*) {
             if (status.state == brls::GestureState::END) {
                 auto* videoContext = (SDLVideoContext*)Application::getPlatform()->getVideoContext();
                 if (!SDL_IsScreenKeyboardShown(videoContext->getSDLWindow()))
@@ -149,15 +157,98 @@ namespace brls
                 }
                 Application::setInputType(InputType::GAMEPAD);
             }
-        }));
+        };
+        this->label->addGestureRecognizer(new brls::TapGestureRecognizer(reopenIme));
+        this->addGestureRecognizer(new brls::TapGestureRecognizer(reopenIme));
         // Force to set to gamepad mode to avoid missing the `Enter` keyboard event
         Application::setInputType(InputType::GAMEPAD);
 #endif
+#ifdef ANDROID
+        this->registerAction(
+            Application::getLocale() == LOCALE_RU ? "\xD0\x92\xD1\x81\xD1\x82\xD0\xB0\xD0\xB2\xD0\xB8\xD1\x82\xD1\x8C" : "Paste",
+            BUTTON_Y,
+            [this](...)
+            {
+                this->clipboardEvent.fire(Application::getPlatform()->pasteFromClipboard());
+                return true;
+            });
+#endif
+        auto updateDialogWidth = [this]() {
+            float boxW = std::min(720.0f, std::max(280.0f, Application::contentWidth - 40.0f));
+            if (auto* applet = this->getView("brls/dialog/applet"))
+                applet->setWidth(boxW);
+            this->label->setWidth(boxW - 40.0f);
+            this->count->setWidth(boxW - 40.0f);
+        };
+        updateDialogWidth();
+        this->resizeSub = Application::getWindowSizeChangedEvent()->subscribe(updateDialogWidth);
+        this->resizeSubActive = true;
+
+        if (AppletFrame::HIDE_BOTTOM_BAR)
+        {
+            if (auto* hints = this->getView("brls/dialog/hints"))
+                hints->setVisibility(Visibility::GONE);
+
+            if (auto* applet = dynamic_cast<Box*>(this->getView("brls/dialog/applet")))
+            {
+                auto* bar = new Box();
+                bar->setAxis(Axis::ROW);
+                bar->setWidthPercentage(100.0f);
+                bar->setJustifyContent(JustifyContent::FLEX_END);
+                bar->setAlignItems(AlignItems::CENTER);
+                bar->setPadding(0.0f, 20.0f, 18.0f, 20.0f);
+
+                auto* cancelBtn = new Button();
+                cancelBtn->setStyle(&BUTTONSTYLE_BORDERLESS);
+                cancelBtn->setText("hints/cancel"_i18n);
+                cancelBtn->setPadding(8.0f, 14.0f, 8.0f, 14.0f);
+                cancelBtn->registerClickAction([this](View*) {
+                    Application::popActivity(EDIT_TEXT_DIALOG_POP_ANIMATION, [this]() {
+                        this->cancelEvent.fire();
+                    });
+                    return true;
+                });
+                bar->addView(cancelBtn);
+
+                auto* pasteBtn = new Button();
+                pasteBtn->setStyle(&BUTTONSTYLE_BORDERLESS);
+                pasteBtn->setText(Application::getLocale() == LOCALE_RU ? "\xD0\x92\xD1\x81\xD1\x82\xD0\xB0\xD0\xB2\xD0\xB8\xD1\x82\xD1\x8C" : "Paste");
+                pasteBtn->setPadding(8.0f, 14.0f, 8.0f, 14.0f);
+                pasteBtn->setMarginLeft(8.0f);
+                pasteBtn->registerClickAction([this](View*) {
+                    this->clipboardEvent.fire(Application::getPlatform()->pasteFromClipboard());
+                    return true;
+                });
+                bar->addView(pasteBtn);
+
+                auto* okBtn = new Button();
+                okBtn->setStyle(&BUTTONSTYLE_PRIMARY);
+                okBtn->setText("hints/ok"_i18n);
+                okBtn->setPadding(8.0f, 18.0f, 8.0f, 18.0f);
+                okBtn->setMarginLeft(8.0f);
+                okBtn->registerClickAction([this](View*) {
+                    Application::popActivity(EDIT_TEXT_DIALOG_POP_ANIMATION, [this]() {
+                        this->summitEvent.fire();
+                    });
+                    return true;
+                });
+                bar->addView(okBtn);
+
+                applet->addView(bar);
+            }
+        }
 
         this->init = true;
     }
 
-    EditTextDialog::~EditTextDialog() = default;
+    EditTextDialog::~EditTextDialog()
+    {
+        if (this->resizeSubActive)
+        {
+            Application::getWindowSizeChangedEvent()->unsubscribe(this->resizeSub);
+            this->resizeSubActive = false;
+        }
+    }
 
     void EditTextDialog::open()
     {

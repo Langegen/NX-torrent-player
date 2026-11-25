@@ -306,6 +306,7 @@ class MpvView : public brls::Box
         SubChip,  // the "subtitles off/on" chip over the subtitles button
     };
     void buildControls();
+    void updateControlsLayout();
     void updateControls();          // per frame while shown: times, clock, knob
     void refreshButtons();          // which are there, which has the cursor
     bool buttonAvailable(int b);
@@ -316,9 +317,12 @@ class MpvView : public brls::Box
     Zone zone    = Zone::Buttons;
     int focusBtn = BTN_PLAY;
     player_ui::Button* buttons[BTN_COUNT] = {};
-    player_ui::Timeline* timeline = nullptr;
+    player_ui::Button* backBtn            = nullptr;
+    player_ui::Timeline* timeline         = nullptr;
     brls::Box* topBar        = nullptr;
+    brls::Box* topLeft       = nullptr;
     brls::Box* bottomBar     = nullptr;
+    brls::Box* timeRow       = nullptr;
     brls::Label* barTitle    = nullptr;
     brls::Label* barSubtitle = nullptr;
     brls::Label* barClock    = nullptr;
@@ -330,6 +334,10 @@ class MpvView : public brls::Box
     brls::Label* timeTotal   = nullptr;
     std::chrono::steady_clock::time_point clockLast;
     bool clockValid = false;
+    brls::Event<bool>::Subscription focusSub;
+    brls::VoidEvent::Subscription resizeSub;
+    bool focusSubscribed  = false;
+    bool resizeSubscribed = false;
 
     // Small side panels for one choice each (Lampa opens one per button):
     // the audio track, the subtitles, the episode. The X panel still has

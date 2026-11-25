@@ -418,13 +418,16 @@ public class SDLActivity extends Activity implements View.OnSystemUiVisibilityCh
 
         getWindow().getDecorView().setOnSystemUiVisibilityChangeListener(this);
 
-        // Get filename from "Open with" of another application
+        // Get filename from "Open with" of another application (magnet URIs are handled by MainActivity)
         Intent intent = getIntent();
         if (intent != null && intent.getData() != null) {
-            String filename = intent.getData().getPath();
-            if (filename != null) {
-                Log.v(TAG, "Got filename: " + filename);
-                SDLActivity.onNativeDropFile(filename);
+            Uri data = intent.getData();
+            if (!"magnet".equalsIgnoreCase(data.getScheme())) {
+                String filename = data.getPath();
+                if (filename != null) {
+                    Log.v(TAG, "Got filename: " + filename);
+                    SDLActivity.onNativeDropFile(filename);
+                }
             }
         }
     }
@@ -2005,16 +2008,16 @@ class SDLInputConnection extends BaseInputConnection {
 
     @Override
     public boolean deleteSurroundingText(int beforeLength, int afterLength) {
-        if (Build.VERSION.SDK_INT <= 29 /* Android 10.0 (Q) */) {
-            // Workaround to capture backspace key. Ref: http://stackoverflow.com/questions>/14560344/android-backspace-in-webview-baseinputconnection
-            // and https://bugzilla.libsdl.org/show_bug.cgi?id=2265
+        final Editable content = getEditable();
+        if (Build.VERSION.SDK_INT <= 29 /* Android 10.0 (Q) */ || content == null || content.length() == 0) {
+            // Workaround to capture backspace key, and allow deleting pre-filled text in Borealis EditTextDialog on Android 11+.
             if (beforeLength > 0 && afterLength == 0) {
                 // backspace(s)
                 while (beforeLength-- > 0) {
                     nativeGenerateScancodeForUnichar('\b');
                 }
                 return true;
-           }
+            }
         }
 
         if (!super.deleteSurroundingText(beforeLength, afterLength)) {

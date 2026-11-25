@@ -29,6 +29,7 @@ enum class Icon
     Settings,
     LockOpen,
     LockClosed,
+    Back,
 };
 
 // Draws `icon` centred on (cx, cy), sized for a button `size` px across.

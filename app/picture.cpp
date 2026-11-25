@@ -11,6 +11,8 @@
 #ifdef USE_GLES2
 #include <GLES2/gl2.h>
 #include <GLES2/gl2ext.h>
+#elif defined(USE_GLES3)
+#include <GLES3/gl3.h>
 #endif
 #else
 #include <glad/glad.h>
@@ -104,6 +106,8 @@ bool handheld()
 {
 #ifdef __SWITCH__
     return appletGetOperationMode() == AppletOperationMode_Handheld;
+#elif defined(__ANDROID__) || defined(ANDROID)
+    return true;
 #else
     return false;
 #endif
@@ -246,20 +250,26 @@ struct Pattern
     const char* hint;
 };
 
+#if defined(__ANDROID__) || defined(ANDROID)
+#define PATTERN_RES(p) APPDATA_DIR "/" p
+#else
+#define PATTERN_RES(p) APP_RES(p)
+#endif
+
 const Pattern kPatterns[] = {
-    { APP_RES("patterns/black.png"), "Black level",
+    { PATTERN_RES("patterns/black.png"), "Black level",
       "Bars 1 to 8 are 1% to 8% grey on black. Raise Brightness until bar 2 is "
       "just visible; lower it if the black background turns grey." },
-    { APP_RES("patterns/white.png"), "White level",
+    { PATTERN_RES("patterns/white.png"), "White level",
       "Bars 90 to 99 are on 100% white. Lower Contrast until the bars up to 98 "
       "stand apart from the background." },
-    { APP_RES("patterns/greyscale.png"), "Grey scale",
+    { PATTERN_RES("patterns/greyscale.png"), "Grey scale",
       "Every step should be distinct and a neutral grey. Dark steps merging: "
       "raise Gamma. Light steps merging: lower Contrast." },
-    { APP_RES("patterns/gamma.png"), "Gamma",
+    { PATTERN_RES("patterns/gamma.png"), "Gamma",
       "Hide the panel and look from arm's length: the patch that blends into "
       "its stripes is the screen's gamma. Adjust Gamma until it is 2.2." },
-    { APP_RES("patterns/colour.png"), "Colour",
+    { PATTERN_RES("patterns/colour.png"), "Colour",
       "Bars at 75% and 100%, and skin tones. Set Saturation so faces look "
       "natural, neither orange nor pale." },
 };
@@ -465,7 +475,9 @@ bool CalibrationView::startMpv()
     mpv_set_option_string(mpv, "image-display-duration", "inf");
     mpv_set_option_string(mpv, "keep-open", "yes");
     mpv_set_option_string(mpv, "idle", "yes");
+#if !defined(__ANDROID__) && !defined(ANDROID)
     mpv_set_option_string(mpv, "opengl-glfinish", "yes");
+#endif
     if (mpv_initialize(mpv) < 0)
     {
         brls::Logger::error("[picture] mpv_initialize failed");

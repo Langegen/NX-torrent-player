@@ -9,6 +9,7 @@
 #include "config.hpp"
 #include "i18n.hpp"
 #include "library.hpp"
+#include "platform_ui.hpp"
 #include "player.hpp"  // fmtTime
 #include "sources.hpp"
 #include "stremio.hpp"
@@ -87,6 +88,7 @@ struct CardState
     brls::Label* director      = nullptr;
     brls::Label* cast          = nullptr;
     brls::Button* playBtn      = nullptr;
+    brls::Button* torrentsBtn  = nullptr;
     brls::Button* markBtn      = nullptr;  // the bookmark status
     brls::Button* folderBtn    = nullptr;  // the bookmark folder/category
     brls::Box* seasonsSection  = nullptr;
@@ -134,17 +136,17 @@ class CardView : public brls::Box
         st->backdrop->setClipsToBounds(true);
         addView(st->backdrop);
 
-        auto* shadeLeft = new ui::ShadeBox(true, ink(250), ink(60), 0.85f);
+        shadeLeft = new ui::ShadeBox(true, ink(250), ink(60), 0.85f);
         absoluteFill(shadeLeft);
         addView(shadeLeft);
-        auto* shadeBottom = new ui::ShadeBox(false, ink(0), ink(235), 1.0f);
+        shadeBottom = new ui::ShadeBox(false, ink(0), ink(235), 1.0f);
         absoluteFill(shadeBottom);
         addView(shadeBottom);
 
         auto* scroll = new brls::ScrollingFrame();
         scroll->setGrow(1.0f);
         scroll->setScrollingBehavior(brls::ScrollingBehavior::CENTERED);
-        auto* body = new brls::Box();
+        body = new brls::Box();
         body->setAxis(brls::Axis::COLUMN);
         body->setPadding(34.0f, 60.0f, 40.0f, 60.0f);
         buildTop(body);
@@ -155,29 +157,177 @@ class CardView : public brls::Box
         scroll->setContentView(body);
         addView(scroll);
 
+        if (platform_ui::isMobile())
+        {
+            backBtn = ui::mobileBackButton([]() { brls::Application::popActivity(); }, true);
+            backBtn->setPositionType(brls::PositionType::ABSOLUTE);
+            backBtn->setPositionTop(14.0f);
+            backBtn->setPositionLeft(16.0f);
+            addView(backBtn);
+        }
+
         ui::attachArt(st->backdrop, item.key() + "_bd", item.backdropUrl, alive, true);
+
+        updateLayout();
+        resizeSub = brls::Application::getWindowSizeChangedEvent()->subscribe(
+            [this]() { updateLayout(); });
+        resizeSubscribed = true;
 
         // L / R walk the seasons (the mock-up's hint bar) -- a film has none.
         if (item.isSeries())
         {
+            bool hideHint = platform_ui::isMobile();
             registerAction(tr("Previous season"), brls::BUTTON_LB, [this](brls::View*) {
                 switchSeason(-1);
                 return true;
-            });
+            }, hideHint);
             registerAction(tr("Next season"), brls::BUTTON_RB, [this](brls::View*) {
                 switchSeason(+1);
                 return true;
-            });
+            }, hideHint);
         }
 
         loadDetails();
     }
 
-    ~CardView() override { *alive = false; }
+    ~CardView() override
+    {
+        *alive = false;
+        if (resizeSubscribed)
+        {
+            brls::Application::getWindowSizeChangedEvent()->unsubscribe(resizeSub);
+            resizeSubscribed = false;
+        }
+    }
 
   private:
     std::shared_ptr<CardState> st;
     std::shared_ptr<bool> alive;
+    brls::Box* shadeLeft   = nullptr;
+    brls::Box* shadeBottom = nullptr;
+    brls::Box* body        = nullptr;
+    brls::Button* backBtn  = nullptr;
+    brls::Box* infoBox     = nullptr;
+    brls::Box* actionsRow  = nullptr;
+    brls::Box* portraitActions = nullptr;
+    brls::Box* pActRow1        = nullptr;
+    brls::Box* pActRow2        = nullptr;
+    brls::Box* portraitOverviewSlot = nullptr;
+    int layoutMode         = -1;
+    brls::VoidEvent::Subscription resizeSub;
+    bool resizeSubscribed  = false;
+
+    void updateLayout()
+    {
+        bool portrait = platform_ui::isPortrait();
+        bool mobile   = platform_ui::isMobile();
+        auto setBgHeight = [](brls::View* v) {
+            if (!v) return;
+            if (theme::isLight())
+                v->setHeightPercentage(100.0f);
+            else
+                v->setHeight(brls::Application::contentHeight);
+        };
+        setBgHeight(st->backdrop);
+        setBgHeight(shadeLeft);
+        setBgHeight(shadeBottom);
+
+        if (body)
+        {
+            if (mobile)
+            {
+                float inset = platform_ui::sideInset();
+                body->setPadding(portrait ? 70.0f : 68.0f, inset, 32.0f, inset);
+            }
+            else if (portrait)
+                body->setPadding(24.0f, 24.0f, 32.0f, 24.0f);
+            else
+                body->setPadding(34.0f, 60.0f, 40.0f, 60.0f);
+        }
+        if (st->poster)
+        {
+            st->poster->setDimensions(portrait ? 132.0f : 180.0f,
+                                      portrait ? 198.0f : 270.0f);
+            st->poster->setMarginRight(portrait ? 18.0f : 34.0f);
+        }
+        if (st->title)
+            st->title->setFontSize(portrait ? 26.0f : 36.0f);
+
+        int nextMode = portrait ? 1 : 0;
+        if (layoutMode != nextMode)
+        {
+            layoutMode = nextMode;
+            auto moveTo = [](brls::View* v, brls::Box* target) {
+                if (!v || !target || v->getParent() == target) return;
+                if (v->getParent()) v->getParent()->removeView(v, false);
+                target->addView(v);
+            };
+            if (portrait)
+            {
+                if (actionsRow) actionsRow->setVisibility(brls::Visibility::GONE);
+                if (portraitActions) portraitActions->setVisibility(brls::Visibility::VISIBLE);
+                if (portraitOverviewSlot) portraitOverviewSlot->setVisibility(brls::Visibility::VISIBLE);
+
+                moveTo(st->overviewBox, portraitOverviewSlot);
+                moveTo(st->director, portraitOverviewSlot);
+                moveTo(st->cast, portraitOverviewSlot);
+                if (st->overviewBox) st->overviewBox->setMarginLeft(0.0f);
+
+                moveTo(st->playBtn, pActRow1);
+                moveTo(st->torrentsBtn, pActRow2);
+                moveTo(st->markBtn, pActRow2);
+                moveTo(st->folderBtn, pActRow2);
+
+                auto styleBtn = [](brls::Button* b, float grow, float mr, float h, float padH) {
+                    if (!b) return;
+                    b->setGrow(grow);
+                    b->setMarginRight(mr);
+                    b->setHeight(h);
+                    b->setPadding(8.0f, padH, 8.0f, padH);
+                    b->setJustifyContent(brls::JustifyContent::CENTER);
+                };
+                styleBtn(st->playBtn, 1.0f, 0.0f, 48.0f, 16.0f);
+                styleBtn(st->torrentsBtn, 1.0f, 10.0f, 44.0f, 8.0f);
+                styleBtn(st->markBtn, 1.0f, 10.0f, 44.0f, 8.0f);
+                styleBtn(st->folderBtn, 1.0f, 0.0f, 44.0f, 8.0f);
+            }
+            else
+            {
+                if (portraitActions) portraitActions->setVisibility(brls::Visibility::GONE);
+                if (portraitOverviewSlot) portraitOverviewSlot->setVisibility(brls::Visibility::GONE);
+                if (actionsRow) actionsRow->setVisibility(brls::Visibility::VISIBLE);
+
+                moveTo(st->overviewBox, infoBox);
+                moveTo(st->director, infoBox);
+                moveTo(st->cast, infoBox);
+                if (st->overviewBox) st->overviewBox->setMarginLeft(-8.0f);
+
+                moveTo(st->playBtn, actionsRow);
+                moveTo(st->torrentsBtn, actionsRow);
+                moveTo(st->markBtn, actionsRow);
+                moveTo(st->folderBtn, actionsRow);
+                if (actionsRow && actionsRow->getParent() == infoBox)
+                {
+                    infoBox->removeView(actionsRow, false);
+                    infoBox->addView(actionsRow);
+                }
+
+                auto styleLandBtn = [](brls::Button* b) {
+                    if (!b) return;
+                    b->setGrow(0.0f);
+                    b->setHeight(brls::View::AUTO);
+                    b->setMarginRight(12.0f);
+                    b->setPadding(9.0f, 20.0f, 9.0f, 20.0f);
+                    b->setJustifyContent(brls::JustifyContent::FLEX_START);
+                };
+                styleLandBtn(st->playBtn);
+                styleLandBtn(st->torrentsBtn);
+                styleLandBtn(st->markBtn);
+                styleLandBtn(st->folderBtn);
+            }
+            fillChips();
+        }
+    }
 
     static void absoluteFill(brls::View* v)
     {
@@ -224,12 +374,13 @@ class CardView : public brls::Box
         info->setAxis(brls::Axis::COLUMN);
         info->setGrow(1.0f);
         info->setShrink(1.0f);
+        infoBox = info;
 
         st->title = whiteLabel(it.title, 36.0f, 255);
         info->addView(st->title);
 
         st->chips = new brls::Box();
-        st->chips->setAxis(brls::Axis::ROW);
+        st->chips->setAxis(brls::Axis::COLUMN);
         st->chips->setMarginTop(12.0f);
         info->addView(st->chips);
         fillChips();
@@ -277,6 +428,7 @@ class CardView : public brls::Box
         auto* actions = new brls::Box();
         actions->setAxis(brls::Axis::ROW);
         actions->setMarginTop(18.0f);
+        actionsRow = actions;
 
         auto weak = std::weak_ptr<CardState>(st);
         st->playBtn = ui::actionButton(playLabel(), true, [weak]() {
@@ -286,14 +438,15 @@ class CardView : public brls::Box
 
         // Every release of the film, or of the season on screen (packs and
         // single episodes alike).
-        actions->addView(ui::actionButton(tr("Torrents"), false, [weak]() {
+        st->torrentsBtn = ui::actionButton(tr("Torrents"), false, [weak]() {
             auto s = weak.lock();
             if (!s) return;
             int season = 0;
             if (s->d.item.isSeries() && s->seasonIdx < (int)s->d.seasons.size())
                 season = s->d.seasons[s->seasonIdx].number;
             openSources(s->d.item, season, 0);
-        }, true));
+        }, true);
+        actions->addView(st->torrentsBtn);
 
         // Bookmark: a status from the library (Watching / Planned / ...).
         st->markBtn = ui::actionButton(markLabel(), false, [weak]() {
@@ -310,6 +463,25 @@ class CardView : public brls::Box
 
         top->addView(info);
         body->addView(top);
+
+        portraitActions = new brls::Box();
+        portraitActions->setAxis(brls::Axis::COLUMN);
+        portraitActions->setMarginTop(16.0f);
+        portraitActions->setVisibility(brls::Visibility::GONE);
+        pActRow1 = new brls::Box();
+        pActRow1->setAxis(brls::Axis::ROW);
+        portraitActions->addView(pActRow1);
+        pActRow2 = new brls::Box();
+        pActRow2->setAxis(brls::Axis::ROW);
+        pActRow2->setMarginTop(10.0f);
+        portraitActions->addView(pActRow2);
+        body->addView(portraitActions);
+
+        portraitOverviewSlot = new brls::Box();
+        portraitOverviewSlot->setAxis(brls::Axis::COLUMN);
+        portraitOverviewSlot->setMarginTop(8.0f);
+        portraitOverviewSlot->setVisibility(brls::Visibility::GONE);
+        body->addView(portraitOverviewSlot);
     }
 
     static const size_t kOverviewTrimMax = 300;
@@ -533,13 +705,27 @@ class CardView : public brls::Box
         st->chips->clearViews();
         const content::Details& d = st->d;
         const content::Item& it   = d.item;
-        if (it.rating > 0.05) st->chips->addView(ui::chip(ratingText(it.rating), true));
+
+        bool portrait = platform_ui::isPortrait();
+        auto* row1 = new brls::Box();
+        row1->setAxis(brls::Axis::ROW);
+        row1->setAlignItems(brls::AlignItems::CENTER);
+
+        auto* row2 = portrait ? new brls::Box() : row1;
+        if (portrait)
+        {
+            row2->setAxis(brls::Axis::ROW);
+            row2->setAlignItems(brls::AlignItems::CENTER);
+        }
+
+        if (it.rating > 0.05) row1->addView(ui::chip(ratingText(it.rating), true));
         if (!st->imdbRating.empty())
-            st->chips->addView(ui::chip("IMDb " + st->imdbRating, nvgRGB(0xf5, 0xc5, 0x18),
-                                        nvgRGB(0x10, 0x10, 0x10)));
-        if (!it.year.empty()) st->chips->addView(ui::chip(it.year));
+            row1->addView(ui::chip("IMDb " + st->imdbRating, nvgRGB(0xf5, 0xc5, 0x18),
+                                   nvgRGB(0x10, 0x10, 0x10)));
+        if (!it.year.empty()) row1->addView(ui::chip(it.year));
+
         for (size_t i = 0; i < it.genres.size() && i < 2; i++)
-            st->chips->addView(ui::chip(it.genres[i]));
+            row2->addView(ui::chip(it.genres[i]));
         if (it.isSeries())
         {
             int seasons = 0, eps = 0;
@@ -548,12 +734,31 @@ class CardView : public brls::Box
             // "Seasons: 1 · Episodes: 8" rather than "1 season": no plural
             // forms to get wrong in any language.
             if (seasons > 0)
-                st->chips->addView(ui::chip(tr("Seasons: ") + std::to_string(seasons) +
-                                            " \xC2\xB7 " + tr("Episodes: ") +
-                                            std::to_string(eps)));
+                row2->addView(ui::chip(tr("Seasons: ") + std::to_string(seasons) +
+                                       " \xC2\xB7 " + tr("Episodes: ") +
+                                       std::to_string(eps)));
         }
         else if (it.runtimeMin > 0)
-            st->chips->addView(ui::chip(runtimeText(it.runtimeMin)));
+            row2->addView(ui::chip(runtimeText(it.runtimeMin)));
+
+        if (!row1->getChildren().empty())
+            st->chips->addView(row1);
+        else
+            delete row1;
+
+        if (portrait)
+        {
+            if (!row2->getChildren().empty())
+            {
+                auto* s2 = ui::pillStrip(row2, 34.0f);
+                s2->setMarginTop(8.0f);
+                st->chips->addView(s2);
+            }
+            else
+            {
+                delete row2;
+            }
+        }
     }
 
     void buildSeasons(brls::Box* body)

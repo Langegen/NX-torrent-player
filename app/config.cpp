@@ -4,6 +4,8 @@
 
 #ifdef __SWITCH__
 #include <switch.h>
+#elif defined(__SDL2__)
+#include <SDL.h>
 #endif
 
 #include <cctype>
@@ -15,6 +17,7 @@
 #include "appdata.hpp"
 #include "fsutil.hpp"
 #include "i18n.hpp"
+#include "platform_ui.hpp"
 
 namespace config
 {
@@ -193,6 +196,21 @@ std::string consoleLang()
     std::memcpy(buf, &code, 8);
     if (!buf[0] || !buf[1]) return "en";
     return std::string(buf, 2);
+#elif defined(__SDL2__)
+    if (SDL_Locale* locales = SDL_GetPreferredLocales())
+    {
+        std::string out;
+        if (locales[0].language && locales[0].language[0] && locales[0].language[1])
+        {
+            out += static_cast<char>(std::tolower(static_cast<unsigned char>(locales[0].language[0])));
+            out += static_cast<char>(std::tolower(static_cast<unsigned char>(locales[0].language[1])));
+        }
+        SDL_free(locales);
+        if (out.size() == 2) return out;
+    }
+    const char* l = std::getenv("LANG");
+    if (l && std::strlen(l) >= 2) return std::string(l, 2);
+    return "en";
 #else
     const char* l = std::getenv("LANG");
     if (l && std::strlen(l) >= 2) return std::string(l, 2);
@@ -253,8 +271,11 @@ const std::vector<std::string>& bufferLabels()
 
 const std::vector<std::string>& endActionLabels()
 {
-    static std::vector<std::string> v = { tr("Next episode"), tr("Back to the menu"),
-                                          tr("Sleep the console"), tr("Close the app") };
+    static std::vector<std::string> v = {
+        tr("Next episode"), tr("Back to the menu"),
+        platform_ui::isMobile() ? tr("Stay paused") : tr("Sleep the console"),
+        tr("Close the app")
+    };
     return v;
 }
 
@@ -321,7 +342,13 @@ const std::vector<std::string>& langLabels()
         std::vector<std::string> o;
         // Translated here, not in kLangs: that table is built before main(),
         // where the language is not known yet. This runs on first use.
-        for (const auto& l : kLangs) o.push_back(tr(l.label));
+        for (const auto& l : kLangs)
+        {
+            if (platform_ui::isMobile() && std::strcmp(l.code, "auto") == 0)
+                o.push_back(tr("System language"));
+            else
+                o.push_back(tr(l.label));
+        }
         return o;
     }();
     return v;

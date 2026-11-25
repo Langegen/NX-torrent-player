@@ -151,6 +151,17 @@ void drawIcon(NVGcontext* vg, Icon icon, float cx, float cy, float size, NVGcolo
             nvgStroke(vg);
             break;
         }
+
+        case Icon::Back:
+            // Left arrow: horizontal stem + arrowhead
+            nvgBeginPath(vg);
+            nvgMoveTo(vg, cx + 11 * u, cy);
+            nvgLineTo(vg, cx - 10 * u, cy);
+            nvgMoveTo(vg, cx - 2 * u, cy - 8 * u);
+            nvgLineTo(vg, cx - 10 * u, cy);
+            nvgLineTo(vg, cx - 2 * u, cy + 8 * u);
+            nvgStroke(vg);
+            break;
     }
 }
 

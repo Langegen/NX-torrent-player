@@ -19,6 +19,8 @@
 
 #ifdef __SWITCH__
 #define TSNX_BASE_DIR "sdmc:/switch/NX-torrent-player"
+#elif defined(__ANDROID__) || defined(ANDROID)
+#define TSNX_BASE_DIR "."
 #else
 #define TSNX_BASE_DIR "./appdata"
 #endif
@@ -49,6 +51,10 @@ static inline void tsnx_ensure_dir(const char *dir_path) {
     if (strncmp(dir, "sdmc:/", 6) == 0) {
         snprintf(cur, sizeof(cur), "sdmc:");
         pos = 6;
+    } else if (dir[0] == '/') {
+        cur[0] = '/';
+        cur[1] = '\0';
+        pos = 1;
     }
     while (pos <= len) {
         size_t next = pos;

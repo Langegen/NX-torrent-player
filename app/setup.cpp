@@ -7,6 +7,7 @@
 #include "config.hpp"
 #include "i18n.hpp"
 #include "jackett.hpp"
+#include "platform_ui.hpp"
 #include "theme.hpp"
 #include "widgets.hpp"
 
@@ -25,14 +26,20 @@ class JackettSetupView : public brls::Box
   public:
     JackettSetupView()
     {
+        bool mobile   = platform_ui::isMobile();
+        bool portrait = platform_ui::isPortrait();
+        float side    = mobile ? (portrait ? 20.0f : platform_ui::sideInset()) : 80.0f;
         setAxis(brls::Axis::COLUMN);
         setGrow(1.0f);
-        setPadding(44.0f, 80.0f, 20.0f, 80.0f);
+        setPadding(mobile ? (portrait ? 18.0f : 24.0f) : 44.0f, side, 20.0f, side);
 
-        auto* title = new brls::Label();
-        title->setText(tr("Set up Jackett"));
-        title->setFontSize(30.0f);
-        addView(title);
+        if (!mobile)
+        {
+            auto* title = new brls::Label();
+            title->setText(tr("Set up Jackett"));
+            title->setFontSize(30.0f);
+            addView(title);
+        }
 
         auto* intro = new brls::Label();
         intro->setText(tr("The app finds releases through Jackett: a server on your computer "
@@ -48,7 +55,7 @@ class JackettSetupView : public brls::Box
         intro->setFontSize(18.0f);
         intro->setLineHeight(1.4f);
         intro->setTextColor(theme::textMuted());
-        intro->setMargins(12.0f, 0.0f, 8.0f, 0.0f);
+        intro->setMargins(mobile ? 0.0f : 12.0f, 0.0f, 8.0f, 0.0f);
         addView(intro);
         addView(jacred);
 
@@ -191,9 +198,16 @@ class JackettSetupActivity : public brls::Activity
     brls::View* createContentView() override
     {
         auto* frame = new ui::FieldFrame(new JackettSetupView());
-        frame->setTitle("Jackett");
-        // "Set up Jackett" heads the view: no second title above it.
-        frame->setHeaderVisibility(brls::Visibility::GONE);
+        if (platform_ui::isMobile())
+        {
+            frame->setTitle(tr("Set up Jackett"));
+        }
+        else
+        {
+            frame->setTitle("Jackett");
+            // "Set up Jackett" heads the view: no second title above it.
+            frame->setHeaderVisibility(brls::Visibility::GONE);
+        }
         return frame;
     }
 };

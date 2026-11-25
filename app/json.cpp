@@ -13,6 +13,111 @@
 namespace json
 {
 
+namespace
+{
+
+int hexDigit(char c)
+{
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+// Decodes a JSON string starting at the opening quote `openQuote`, returning
+// UTF-8 (with \uXXXX and UTF-16 surrogate pairs decoded) and setting
+// `closeQuote` to the index of the closing quote (or body.size() if truncated).
+std::string decodeQuoted(const std::string& body, size_t openQuote, size_t& closeQuote)
+{
+    std::string out;
+    size_t i = openQuote + 1;
+    for (; i < body.size(); i++)
+    {
+        if (body[i] == '"') break;
+        if (body[i] != '\\' || i + 1 >= body.size())
+        {
+            out += body[i];
+            continue;
+        }
+
+        char esc = body[++i];
+        switch (esc)
+        {
+            case 'n': out += '\n'; break;
+            case 'r': out += '\r'; break;
+            case 't': out += '\t'; break;
+            case 'b': out += '\b'; break;
+            case 'f': out += '\f'; break;
+            case 'u':
+            {
+                // \uXXXX. Previously the backslash was dropped and the escape
+                // letter kept verbatim, so "&" (sent as &) surfaced as the
+                // literal text "u0026".
+                if (i + 4 >= body.size()) { out += esc; break; }
+                int cp = 0, ok = 1;
+                for (int d = 1; d <= 4; d++)
+                {
+                    int h = hexDigit(body[i + d]);
+                    if (h < 0) { ok = 0; break; }
+                    cp = cp * 16 + h;
+                }
+                if (!ok) { out += esc; break; }
+                i += 4;
+
+                // Surrogate pair: the high half alone is not a character.
+                if (cp >= 0xD800 && cp <= 0xDBFF && i + 6 < body.size() &&
+                    body[i + 1] == '\\' && body[i + 2] == 'u')
+                {
+                    int lo = 0, ok2 = 1;
+                    for (int d = 3; d <= 6; d++)
+                    {
+                        int h = hexDigit(body[i + d]);
+                        if (h < 0) { ok2 = 0; break; }
+                        lo = lo * 16 + h;
+                    }
+                    if (ok2 && lo >= 0xDC00 && lo <= 0xDFFF)
+                    {
+                        cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
+                        i += 6;
+                    }
+                }
+                // A half of a pair left alone (or \u0000) is not text:
+                // as UTF-8 it is invalid bytes, and a NUL cuts the
+                // string short in every C API it reaches.
+                if ((cp >= 0xD800 && cp <= 0xDFFF) || cp == 0) cp = 0xFFFD;
+
+                // Encode as UTF-8; the UI's text stack expects it.
+                if (cp < 0x80)
+                    out += (char)cp;
+                else if (cp < 0x800)
+                {
+                    out += (char)(0xC0 | (cp >> 6));
+                    out += (char)(0x80 | (cp & 0x3F));
+                }
+                else if (cp < 0x10000)
+                {
+                    out += (char)(0xE0 | (cp >> 12));
+                    out += (char)(0x80 | ((cp >> 6) & 0x3F));
+                    out += (char)(0x80 | (cp & 0x3F));
+                }
+                else
+                {
+                    out += (char)(0xF0 | (cp >> 18));
+                    out += (char)(0x80 | ((cp >> 12) & 0x3F));
+                    out += (char)(0x80 | ((cp >> 6) & 0x3F));
+                    out += (char)(0x80 | (cp & 0x3F));
+                }
+                break;
+            }
+            default: out += esc; break;  // \" \\ \/ and anything unknown
+        }
+    }
+    closeQuote = i;
+    return out;
+}
+
+} // namespace
+
 std::string str(const std::string& body, const char* key, size_t from)
 {
     std::string pat = std::string("\"") + key + "\"";
@@ -36,98 +141,8 @@ std::string str(const std::string& body, const char* key, size_t from)
             if (valStart >= body.size() || body[valStart] != '"')
                 return "";
 
-            size_t q1 = valStart;
-
-            auto hex = [](char c) -> int {
-                if (c >= '0' && c <= '9') return c - '0';
-                if (c >= 'a' && c <= 'f') return c - 'a' + 10;
-                if (c >= 'A' && c <= 'F') return c - 'A' + 10;
-                return -1;
-            };
-
-            std::string out;
-            for (size_t i = q1 + 1; i < body.size(); i++)
-            {
-                if (body[i] == '"') break;
-                if (body[i] != '\\' || i + 1 >= body.size())
-                {
-                    out += body[i];
-                    continue;
-                }
-
-                char esc = body[++i];
-                switch (esc)
-                {
-                    case 'n': out += '\n'; break;
-                    case 'r': out += '\r'; break;
-                    case 't': out += '\t'; break;
-                    case 'b': out += '\b'; break;
-                    case 'f': out += '\f'; break;
-                    case 'u':
-                    {
-                        // \uXXXX. Previously the backslash was dropped and the escape
-                        // letter kept verbatim, so "&" (sent as &) surfaced as the
-                        // literal text "u0026".
-                        if (i + 4 >= body.size()) { out += esc; break; }
-                        int cp = 0, ok = 1;
-                        for (int d = 1; d <= 4; d++)
-                        {
-                            int h = hex(body[i + d]);
-                            if (h < 0) { ok = 0; break; }
-                            cp = cp * 16 + h;
-                        }
-                        if (!ok) { out += esc; break; }
-                        i += 4;
-
-                        // Surrogate pair: the high half alone is not a character.
-                        if (cp >= 0xD800 && cp <= 0xDBFF && i + 6 < body.size() &&
-                            body[i + 1] == '\\' && body[i + 2] == 'u')
-                        {
-                            int lo = 0, ok2 = 1;
-                            for (int d = 3; d <= 6; d++)
-                            {
-                                int h = hex(body[i + d]);
-                                if (h < 0) { ok2 = 0; break; }
-                                lo = lo * 16 + h;
-                            }
-                            if (ok2 && lo >= 0xDC00 && lo <= 0xDFFF)
-                            {
-                                cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
-                                i += 6;
-                            }
-                        }
-                        // A half of a pair left alone (or \u0000) is not text:
-                        // as UTF-8 it is invalid bytes, and a NUL cuts the
-                        // string short in every C API it reaches.
-                        if ((cp >= 0xD800 && cp <= 0xDFFF) || cp == 0) cp = 0xFFFD;
-
-                        // Encode as UTF-8; the UI's text stack expects it.
-                        if (cp < 0x80)
-                            out += (char)cp;
-                        else if (cp < 0x800)
-                        {
-                            out += (char)(0xC0 | (cp >> 6));
-                            out += (char)(0x80 | (cp & 0x3F));
-                        }
-                        else if (cp < 0x10000)
-                        {
-                            out += (char)(0xE0 | (cp >> 12));
-                            out += (char)(0x80 | ((cp >> 6) & 0x3F));
-                            out += (char)(0x80 | (cp & 0x3F));
-                        }
-                        else
-                        {
-                            out += (char)(0xF0 | (cp >> 18));
-                            out += (char)(0x80 | ((cp >> 12) & 0x3F));
-                            out += (char)(0x80 | ((cp >> 6) & 0x3F));
-                            out += (char)(0x80 | (cp & 0x3F));
-                        }
-                        break;
-                    }
-                    default: out += esc; break;  // \" \\ \/ and anything unknown
-                }
-            }
-            return out;
+            size_t endQ = valStart;
+            return decodeQuoted(body, valStart, endQ);
         }
 
         from = k + 1;
@@ -411,22 +426,38 @@ std::vector<long> integers(const std::string& body, const char* key)
 {
     std::vector<long> out;
     std::string pat = std::string("\"") + key + "\"";
-    size_t k = body.find(pat);
-    if (k == std::string::npos) return out;
-    size_t open = body.find_first_not_of(" \t\r\n:", k + pat.size());
-    if (open == std::string::npos || body[open] != '[') return out;
-    const char* p = body.c_str() + open + 1;
-    while (*p && *p != ']')
+    size_t from = 0;
+    while (from < body.size())
     {
-        char* end = nullptr;
-        long v = std::strtol(p, &end, 10);
-        if (end == p)
+        size_t k = body.find(pat, from);
+        if (k == std::string::npos) return out;
+        size_t colon = k + pat.size();
+        while (colon < body.size() && (body[colon] == ' ' || body[colon] == '\t' ||
+                                       body[colon] == '\r' || body[colon] == '\n'))
+            colon++;
+        if (colon < body.size() && body[colon] == ':')
         {
-            p++;  // a comma or a space
-            continue;
+            size_t open = colon + 1;
+            while (open < body.size() && (body[open] == ' ' || body[open] == '\t' ||
+                                          body[open] == '\r' || body[open] == '\n'))
+                open++;
+            if (open >= body.size() || body[open] != '[') return out;
+            const char* p = body.c_str() + open + 1;
+            while (*p && *p != ']')
+            {
+                char* end = nullptr;
+                long v = std::strtol(p, &end, 10);
+                if (end == p)
+                {
+                    p++;  // a comma or a space
+                    continue;
+                }
+                out.push_back(v);
+                p = end;
+            }
+            return out;
         }
-        out.push_back(v);
-        p = end;
+        from = k + 1;
     }
     return out;
 }
@@ -436,29 +467,39 @@ std::vector<std::string> strings(const std::string& body, const char* key)
 {
     std::vector<std::string> out;
     std::string pat = std::string("\"") + key + "\"";
-    size_t k        = body.find(pat);
-    if (k == std::string::npos) return out;
-    size_t colon = body.find(':', k + pat.size());
-    if (colon == std::string::npos) return out;
-    size_t open = colon + 1;
-    while (open < body.size() && (body[open] == ' ' || body[open] == '\t' ||
-                                  body[open] == '\r' || body[open] == '\n'))
-        open++;
-    if (open >= body.size() || body[open] != '[') return out;
-    bool inStr = false;
-    std::string cur;
-    for (size_t i = open + 1; i < body.size(); i++)
+    size_t from = 0;
+    while (from < body.size())
     {
-        char c = body[i];
-        if (inStr)
+        size_t k = body.find(pat, from);
+        if (k == std::string::npos) return out;
+        size_t colon = k + pat.size();
+        while (colon < body.size() && (body[colon] == ' ' || body[colon] == '\t' ||
+                                       body[colon] == '\r' || body[colon] == '\n'))
+            colon++;
+        if (colon < body.size() && body[colon] == ':')
         {
-            if (c == '\\' && i + 1 < body.size()) { cur += body[++i]; continue; }
-            if (c == '"') { out.push_back(cur); cur.clear(); inStr = false; continue; }
-            cur += c;
+            size_t open = colon + 1;
+            while (open < body.size() && (body[open] == ' ' || body[open] == '\t' ||
+                                          body[open] == '\r' || body[open] == '\n'))
+                open++;
+            if (open >= body.size() || body[open] != '[') return out;
+            for (size_t i = open + 1; i < body.size(); i++)
+            {
+                char c = body[i];
+                if (c == '"')
+                {
+                    size_t endQ = i;
+                    out.push_back(decodeQuoted(body, i, endQ));
+                    i = endQ;
+                }
+                else if (c == ']')
+                    break;
+                else if (c == '{' || c == '[')
+                    return out;  // not a flat string array
+            }
+            return out;
         }
-        else if (c == '"') inStr = true;
-        else if (c == ']') break;
-        else if (c == '{' || c == '[') return out;  // not a flat string array
+        from = k + 1;
     }
     return out;
 }

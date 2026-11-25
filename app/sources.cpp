@@ -3,6 +3,7 @@
 #include <borealis.hpp>
 
 #include <algorithm>
+#include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -19,6 +20,7 @@
 #include "i18n.hpp"
 #include "jackett.hpp"
 #include "library.hpp"
+#include "platform_ui.hpp"
 #include "player.hpp"        // startPlaybackPrompt
 #include "release.hpp"
 #include "stremio.hpp"
@@ -44,7 +46,10 @@ struct Source
     } kind = Kind::Jackett;
 
     std::string title;    // the release name
-    std::string tracker;  // tracker or addon
+    std::string tracker;  // compact label for display ("rutracker +3")
+    std::vector<std::string> trackers;
+    std::string publishDate;
+    std::string infoHash;
     int64_t size = 0;
     int seeders  = -1;
     release::Info info;
@@ -53,6 +58,7 @@ struct Source
     // also finds "Mission.Impossible.Fallout"), and a film's year fits.
     // Addon results are looked up by IMDb id, so they always are.
     bool relevant = true;
+    bool nonVideo = false;
 
     jackett::Item jitem;  // Kind::Jackett
     std::string src;      // a magnet or a URL (Stremio)
@@ -119,22 +125,76 @@ Source fromStream(const stremio::Stream& s, const std::string& addon)
     r.size    = sizeAfter(s.title, kSize);
     r.tracker = restOfLineAfter(s.title, kTracker);
     if (r.tracker.empty()) r.tracker = addon;
+    r.trackers = jackett::splitTrackers(r.tracker);
+    if (r.trackers.empty() && !r.tracker.empty()) r.trackers.push_back(r.tracker);
+    r.tracker  = jackett::compactTrackers(r.trackers);
+    if (!s.infoHash.empty())
+        r.infoHash = jackett::extractInfoHash("magnet:?xt=urn:btih:" + s.infoHash);
     // The quality is often only in the name ("Torrentio\n1080p").
-    r.info = release::parse(s.name + " " + s.title);
+    r.info     = release::parse(s.name + " " + s.title);
+    r.nonVideo = release::isNonVideo(r.title);
     return r;
 }
 
 Source fromJackett(const jackett::Item& it)
 {
     Source r;
-    r.kind    = Source::Kind::Jackett;
-    r.jitem   = it;
-    r.title   = it.title;
-    r.tracker = it.tracker;
-    r.size    = it.size;
-    r.seeders = it.seeders;
-    r.info    = release::parse(it.title);
+    r.kind        = Source::Kind::Jackett;
+    r.jitem       = it;
+    r.title       = it.title;
+    r.trackers    = it.trackers;
+    if (r.trackers.empty() && !it.tracker.empty())
+        r.trackers = jackett::splitTrackers(it.tracker);
+    r.tracker     = r.trackers.empty() ? it.tracker : jackett::compactTrackers(r.trackers);
+    r.publishDate = it.publishDate;
+    r.infoHash    = it.infoHash;
+    r.size        = it.size;
+    r.seeders     = it.seeders;
+    r.info        = release::parse(it.title);
+    if (it.hasJacredInfo || !it.languages.empty())
+    {
+        release::ExternalMeta meta;
+        meta.quality        = it.infoQuality;
+        meta.videotype      = it.infoVideotype;
+        meta.voices         = it.infoVoices;
+        meta.seasons        = it.infoSeasons;
+        meta.languages      = it.languages;
+        meta.trackers       = r.trackers;
+        meta.seedersUnknown = it.seedersUnknown;
+        release::enrich(r.info, meta);
+    }
+    r.nonVideo = release::isNonVideo(it.title, it.categories, it.infoTypes);
     return r;
+}
+
+bool hasNonLatinLetters(const std::string& s)
+{
+    for (unsigned char c : s)
+        if (c >= 0x80) return true;
+    return false;
+}
+
+int countLetters(const std::string& s)
+{
+    int count = 0;
+    for (size_t i = 0; i < s.size(); i++)
+    {
+        unsigned char c = (unsigned char)s[i];
+        if (std::isalpha(c))
+            count++;
+        else if (c >= 0xC0)
+        {
+            count++;
+            while (i + 1 < s.size() && ((unsigned char)s[i + 1] & 0xC0) == 0x80) i++;
+        }
+    }
+    return count;
+}
+
+std::string cleanForQuery(const std::string& s)
+{
+    if (s.empty()) return "";
+    return tmdb::hasUnsupportedGlyphs(s) ? tmdb::sanitizeRenderable(s) : s;
 }
 
 // ---------------------------------------------------------------------------
@@ -247,6 +307,7 @@ enum class Order
     Recommended,
     Seeders,
     Size,
+    Date,
 };
 
 std::string qualityText(int h)
@@ -260,11 +321,15 @@ class SourcesView : public brls::Box
 {
   public:
     SourcesView(const content::Item& item, int season, int episode, int episodesInSeason)
-        : item(item), season(season), episode(episode), episodesInSeason(episodesInSeason)
+        : item(item), season(season), episode(episode), episodesInSeason(episodesInSeason),
+          filterSeason(season)
     {
         setAxis(brls::Axis::COLUMN);
         setGrow(1.0f);
-        setPadding(34.0f, 60.0f, 10.0f, 60.0f);
+        bool mobile = platform_ui::isMobile();
+        float inset = mobile ? platform_ui::sideInset() : 0.0f;
+        setPadding(mobile ? 10.0f : 34.0f, mobile ? 0.0f : 60.0f, 10.0f,
+                   mobile ? 0.0f : 60.0f);
 
         want.series        = item.isSeries();
         want.season        = season;
@@ -272,31 +337,41 @@ class SourcesView : public brls::Box
         // Russian audio is wanted with a Russian UI, or when Options ask for
         // Russian audio tracks ("auto" there is the console's language).
         const std::string& al = config::get().audioLang;
-        want.preferRussian = i18n::lang() == "ru" || al == "ru" ||
-                             (al == "auto" && config::consoleLang() == "ru");
+        want.preferRussian   = i18n::lang() == "ru" || al == "ru" ||
+                               (al == "auto" && config::consoleLang() == "ru");
+        want.originalRussian = item.originalLanguage == "ru";
+#ifdef __SWITCH__
+        want.switchProfile   = true;
+#else
+        want.switchProfile   = false;
+#endif
         if (item.isSeries()) loadChoice(item.key(), want.voice, want.group);
 
         // Head: "Torrents" and what for.
         auto* head = new brls::Box();
         head->setAxis(brls::Axis::ROW);
         head->setAlignItems(brls::AlignItems::FLEX_END);
-        auto* h = new brls::Label();
-        h->setText(tr("Torrents"));
-        h->setFontSize(30.0f);
-        head->addView(h);
+        if (mobile) head->setMargins(0.0f, inset, 4.0f, inset);
+        if (!mobile)
+        {
+            auto* h = new brls::Label();
+            h->setText(tr("Torrents"));
+            h->setFontSize(30.0f);
+            head->addView(h);
+        }
         subtitle = new brls::Label();
         subtitle->setFontSize(18.0f);
         subtitle->setTextColor(theme::textMuted());
-        subtitle->setMarginLeft(20.0f);
+        subtitle->setMarginLeft(mobile ? 0.0f : 20.0f);
         subtitle->setSingleLine(true);
         head->addView(subtitle);
         addView(head);
         updateSubtitle();
 
-        // Filters: quality, then the order.
+        // Filters row 1: quality, order, alive-only toggle, custom query.
         auto* filters = new brls::Box();
         filters->setAxis(brls::Axis::ROW);
-        filters->setMargins(14.0f, 0.0f, 10.0f, 0.0f);
+        if (mobile) filters->setPadding(4.0f, inset, 4.0f, inset);
         const std::pair<const char*, int> qualities[] = {
             { "All", 0 }, { "2160p", 2160 }, { "1080p", 1080 }, { "720p", 720 }
         };
@@ -313,13 +388,32 @@ class SourcesView : public brls::Box
         }
         orderBtn = ui::actionButton("", false, [this]() { cycleOrder(); });
         filters->addView(orderBtn);
-        addView(filters);
 
-        // The second row: what the releases found actually differ in. Each
-        // opens a list of the values present in the results.
+        aliveBtn = ui::actionButton(tr("Alive (>0)"), false, [this]() {
+            filterAliveOnly = !filterAliveOnly;
+            restyleFilters();
+            rebuild();
+        });
+        filters->addView(aliveBtn);
+
+        customSearchBtn = ui::actionButton(tr("Custom search"), false, [this]() {
+            promptCustomSearch();
+        });
+        filters->addView(customSearchBtn);
+
+        auto* s1 = ui::pillStrip(filters, 50.0f);
+        s1->setMargins(mobile ? 8.0f : 12.0f, 0.0f, 6.0f, 0.0f);
+        addView(s1);
+
+        // Filters row 2: season (series only), voice, source, picture, tracker.
         auto* more = new brls::Box();
         more->setAxis(brls::Axis::ROW);
-        more->setMargins(0.0f, 0.0f, 10.0f, 0.0f);
+        if (mobile) more->setPadding(4.0f, inset, 4.0f, inset);
+        if (item.isSeries())
+        {
+            seasonBtn = ui::actionButton("", false, [this]() { pickSeason(); });
+            more->addView(seasonBtn);
+        }
         voiceBtn   = ui::actionButton("", false, [this]() { pickFacet(Facet::Voice); });
         sourceBtn  = ui::actionButton("", false, [this]() { pickFacet(Facet::Source); });
         hdrBtn     = ui::actionButton("", false, [this]() { pickFacet(Facet::Hdr); });
@@ -328,13 +422,16 @@ class SourcesView : public brls::Box
         more->addView(sourceBtn);
         more->addView(hdrBtn);
         more->addView(trackerBtn);
-        addView(more);
+
+        auto* s2 = ui::pillStrip(more, 50.0f);
+        s2->setMargins(0.0f, 0.0f, mobile ? 6.0f : 8.0f, 0.0f);
+        addView(s2);
         restyleFilters();
 
         status = new brls::Label();
         status->setFontSize(20.0f);
         status->setTextColor(theme::textMuted());
-        status->setMarginTop(20.0f);
+        status->setMargins(mobile ? 12.0f : 20.0f, inset, 0.0f, inset);
         status->setText(tr("Searching..."));
         addView(status);
 
@@ -343,7 +440,7 @@ class SourcesView : public brls::Box
         scroll->setScrollingBehavior(brls::ScrollingBehavior::CENTERED);
         list = new brls::Box();
         list->setAxis(brls::Axis::COLUMN);
-        list->setPadding(6.0f, 4.0f, 20.0f, 4.0f);
+        list->setPadding(6.0f, mobile ? inset : 4.0f, 20.0f, mobile ? inset : 4.0f);
         scroll->setContentView(list);
         addView(scroll);
 
@@ -364,7 +461,8 @@ class SourcesView : public brls::Box
     std::shared_ptr<bool> alive = std::make_shared<bool>(true);
 
     std::vector<Source> found;
-    std::set<std::string> seen;  // dedup keys
+    std::map<std::string, size_t> seenIdx;  // dedupKey -> index in `found`
+    int searchGen = 0;
     int pending = 0;             // requests not answered yet, all sources
     // Jackett is the main source: its answers are shown as soon as they are
     // all in, without waiting for the Stremio addons (one slow addon held the
@@ -374,21 +472,53 @@ class SourcesView : public brls::Box
     bool shown         = false;  // the list has been built at least once
     bool dirty         = false;  // new results while another screen was on top
     bool rebuildQueued = false;
+    bool customQueryMode = false;
+    std::string customQuery;
     std::vector<std::pair<brls::View*, std::string>> rowKeys;  // row -> dedupKey
     std::vector<std::string> errors;
 
-    // A release is listed unless it holds something else: another season or
-    // episode, a cam (score), or another title -- the last only once some
-    // release IS of the title, so an unusual spelling on every tracker still
-    // shows everything rather than nothing.
+    // A release is listed unless it holds another season/single wrong episode,
+    // is non-video, is a CAM (when non-CAM releases exist), or belongs to
+    // another title once some release IS of the title.
     bool anyRelevant = false;
+    bool anyNonCam   = false;
+
+    void recomputeFlags()
+    {
+        anyRelevant = false;
+        for (const auto& r : found)
+            if (r.score > -500 && !r.nonVideo && r.relevant)
+            {
+                anyRelevant = true;
+                break;
+            }
+        anyNonCam = false;
+        for (const auto& r : found)
+            if (r.score > -500 && !r.nonVideo && !r.info.cam &&
+                (customQueryMode || r.relevant || !anyRelevant))
+            {
+                anyNonCam = true;
+                break;
+            }
+    }
+
+    void rescoreAll()
+    {
+        for (auto& r : found)
+            r.score = release::score(r.info, r.seeders, r.size, want);
+        recomputeFlags();
+    }
+
     bool listable(const Source& r) const
     {
-        return r.score > -500 && (r.relevant || !anyRelevant);
+        if (r.nonVideo || r.score <= -500) return false;
+        if (r.info.cam && anyNonCam) return false;
+        return customQueryMode || r.relevant || !anyRelevant;
     }
 
     static std::string dedupKey(const Source& s)
     {
+        if (!s.infoHash.empty()) return "ih:" + s.infoHash;
         return s.title + "|" + std::to_string(s.size / (1024 * 1024));
     }
 
@@ -434,6 +564,8 @@ class SourcesView : public brls::Box
     }
 
     int filterHeight = 0;
+    int filterSeason = 0;
+    bool filterAliveOnly = false;
 
     // The second filter row. "" = any.
     enum class Facet
@@ -445,8 +577,8 @@ class SourcesView : public brls::Box
     };
     std::string filterVoice, filterSource, filterTracker;
     int filterHdr = 0;  // 0 any, 1 without HDR, 2 HDR / Dolby Vision only
-    brls::Button *voiceBtn = nullptr, *sourceBtn = nullptr, *hdrBtn = nullptr,
-                 *trackerBtn = nullptr;
+    brls::Button *seasonBtn = nullptr, *voiceBtn = nullptr, *sourceBtn = nullptr,
+                 *hdrBtn = nullptr, *trackerBtn = nullptr;
 
     // The values of a facet among the releases shown (another season's are
     // not offered), most common first.
@@ -460,8 +592,13 @@ class SourcesView : public brls::Box
                 for (const auto& v : r.info.voices) count[v]++;
             else if (f == Facet::Source && !r.info.source.empty())
                 count[r.info.source]++;
-            else if (f == Facet::Tracker && !r.tracker.empty())
-                count[r.tracker]++;
+            else if (f == Facet::Tracker)
+            {
+                if (!r.trackers.empty())
+                    for (const auto& trk : r.trackers) count[trk]++;
+                else if (!r.tracker.empty())
+                    count[r.tracker]++;
+            }
         }
         std::vector<std::pair<std::string, int>> v(count.begin(), count.end());
         std::stable_sort(v.begin(), v.end(),
@@ -469,6 +606,39 @@ class SourcesView : public brls::Box
         std::vector<std::string> out;
         for (const auto& p : v) out.push_back(p.first);
         return out;
+    }
+
+    void pickSeason()
+    {
+        if (!listReady()) return;
+        std::set<int> seasons;
+        if (season > 0) seasons.insert(season);
+        for (const auto& r : found)
+        {
+            if (r.nonVideo) continue;
+            if (!customQueryMode && anyRelevant && !r.relevant) continue;
+            for (int s : r.info.seasons)
+                if (s > 0) seasons.insert(s);
+        }
+        std::vector<std::string> labels = { tr("All seasons") };
+        std::vector<int> values         = { 0 };
+        int sel                         = 0;
+        for (int s : seasons)
+        {
+            if (s == filterSeason) sel = (int)values.size();
+            labels.push_back(tr("Season ") + std::to_string(s));
+            values.push_back(s);
+        }
+        auto* dd = new brls::Dropdown(tr("Season"), labels, [this, values](int i) {
+            if (i < 0 || i >= (int)values.size()) return;
+            filterSeason = values[i];
+            want.season  = filterSeason;
+            want.episode = (filterSeason > 0 && filterSeason == season) ? episode : 0;
+            rescoreAll();
+            restyleFilters();
+            rebuild();
+        }, sel);
+        brls::Application::pushActivity(new brls::Activity(dd));
     }
 
     void pickFacet(Facet f)
@@ -517,34 +687,46 @@ class SourcesView : public brls::Box
 
     bool facetsPass(const Source& r) const
     {
+        if (filterAliveOnly && r.seeders == 0 && !r.info.seedersUnknown) return false;
         if (!filterVoice.empty() &&
             std::find(r.info.voices.begin(), r.info.voices.end(), filterVoice) ==
                 r.info.voices.end())
             return false;
         if (!filterSource.empty() && r.info.source != filterSource) return false;
-        if (!filterTracker.empty() && r.tracker != filterTracker) return false;
+        if (!filterTracker.empty())
+        {
+            bool match = !r.trackers.empty()
+                             ? std::find(r.trackers.begin(), r.trackers.end(), filterTracker) !=
+                                   r.trackers.end()
+                             : r.tracker == filterTracker;
+            if (!match) return false;
+        }
         if (filterHdr == 1 && r.info.hdr) return false;
         if (filterHdr == 2 && !r.info.hdr) return false;
         return true;
     }
-    Order order      = Order::Recommended;
+    Order order = Order::Recommended;
 
-    brls::Label* subtitle = nullptr;
-    brls::Label* status   = nullptr;
-    brls::Box* list       = nullptr;
-    brls::Button* orderBtn = nullptr;
+    brls::Label* subtitle       = nullptr;
+    brls::Label* status         = nullptr;
+    brls::Box* list             = nullptr;
+    brls::Button* orderBtn      = nullptr;
+    brls::Button* aliveBtn      = nullptr;
+    brls::Button* customSearchBtn = nullptr;
     std::vector<std::pair<brls::Button*, int>> filterBtns;
 
     void updateSubtitle()
     {
-        std::string s = item.title;
-        if (item.isSeries() && season > 0)
+        std::string s = customQueryMode && !customQuery.empty() ? customQuery : item.title;
+        if (!customQueryMode && item.isSeries() && filterSeason > 0)
         {
-            s += std::string("  \xC2\xB7  ") + tr("Season ") + std::to_string(season);
-            if (episode > 0)
+            s += std::string("  \xC2\xB7  ") + tr("Season ") + std::to_string(filterSeason);
+            if (filterSeason == season && episode > 0)
                 s += std::string("  \xC2\xB7  ") + tr("Episode ") + std::to_string(episode);
         }
-        else if (!item.year.empty())
+        else if (!customQueryMode && item.isSeries() && filterSeason == 0)
+            s += std::string("  \xC2\xB7  ") + tr("All seasons");
+        else if (!customQueryMode && !item.year.empty())
             s += " (" + item.year + ")";
         if (listReady())
         {
@@ -564,9 +746,18 @@ class SourcesView : public brls::Box
             ui::setPillActive(f.first, f.second == filterHeight);
         const char* o = order == Order::Recommended ? "Order: recommended"
                         : order == Order::Seeders   ? "Order: seeders"
-                                                    : "Order: size";
+                        : order == Order::Size      ? "Order: size"
+                                                    : "Order: date";
         orderBtn->setText(tr(o));
+        if (aliveBtn) ui::setPillActive(aliveBtn, filterAliveOnly);
+        if (customSearchBtn) ui::setPillActive(customSearchBtn, customQueryMode);
 
+        if (seasonBtn)
+        {
+            seasonBtn->setText(filterSeason > 0 ? tr("Season ") + std::to_string(filterSeason)
+                                                : std::string(tr("All seasons")));
+            ui::setPillActive(seasonBtn, filterSeason > 0);
+        }
         // The second row says what it filters on, or the value picked.
         voiceBtn->setText(filterVoice.empty() ? std::string(tr("Voice-over")) : filterVoice);
         sourceBtn->setText(filterSource.empty() ? std::string(tr("Source")) : filterSource);
@@ -584,6 +775,7 @@ class SourcesView : public brls::Box
     {
         order = order == Order::Recommended ? Order::Seeders
                 : order == Order::Seeders   ? Order::Size
+                : order == Order::Size      ? Order::Date
                                             : Order::Recommended;
         restyleFilters();
         rebuild();
@@ -593,36 +785,219 @@ class SourcesView : public brls::Box
 
     bool addSource(Source s)
     {
-        // The same release from two indexers, or from Jackett and an addon.
-        if (!seen.insert(dedupKey(s)).second) return false;
-        s.score = release::score(s.info, s.seeders, s.size, want);
-        if (s.kind == Source::Kind::Jackett)
+        if (s.nonVideo) return false;
+
+        if (customQueryMode)
         {
-            // A text search: is it this title (and, for a film, this year)?
-            s.relevant = release::titleMatches(s.title, { item.title, item.originalTitle });
-            int year   = std::atoi(item.year.c_str());
+            s.relevant = true;
+        }
+        else if (s.kind == Source::Kind::Jackett)
+        {
+            if (!item.imdbId.empty() && !s.jitem.infoImdb.empty())
+            {
+                s.relevant = (s.jitem.infoImdb == item.imdbId);
+            }
+            else
+            {
+                std::vector<std::string> titles;
+                auto addTitle = [&](const std::string& t) {
+                    if (!t.empty() &&
+                        std::find(titles.begin(), titles.end(), t) == titles.end())
+                        titles.push_back(t);
+                };
+                addTitle(item.title);
+                addTitle(item.originalTitle);
+                addTitle(item.englishTitle);
+
+                s.relevant = release::titleMatches(s.title, titles) ||
+                             (!s.jitem.infoName.empty() &&
+                              release::titleMatches(s.jitem.infoName, titles)) ||
+                             (!s.jitem.infoOriginalName.empty() &&
+                              release::titleMatches(s.jitem.infoOriginalName, titles));
+            }
+
+            if (s.relevant && !item.isSeries() && s.info.hasAnySeason())
+                s.relevant = false;
+
+            int year = std::atoi(item.year.c_str());
             if (s.relevant && !item.isSeries() && year > 0)
             {
-                std::vector<int> ys = release::yearsIn(s.title);
-                bool fits = ys.empty();
-                for (int y : ys) fits = fits || std::abs(y - year) <= 1;
-                s.relevant = fits;
+                if (s.jitem.infoYear > 0)
+                    s.relevant = std::abs(s.jitem.infoYear - year) <= 1;
+                else
+                {
+                    std::vector<int> ys = release::yearsIn(s.title);
+                    bool fits           = ys.empty();
+                    for (int y : ys) fits = fits || std::abs(y - year) <= 1;
+                    s.relevant = fits;
+                }
             }
-            else if (s.relevant && item.isSeries() && year > 0 && s.info.season < 0 &&
-                     s.info.episode < 0)
+            else if (s.relevant && item.isSeries() && year > 0)
             {
-                // No season or episode in the name, and every year it gives is
-                // from before the show began: a film of the same name ("The
-                // Fallout (2021)" for the 2024 show).
-                std::vector<int> ys = release::yearsIn(s.title);
-                bool before = !ys.empty();
-                for (int y : ys) before = before && y < year - 1;
-                if (before) s.relevant = false;
+                if (s.jitem.infoYear > 0 && s.jitem.infoYear < year - 1)
+                {
+                    s.relevant = false;
+                }
+                else if (!s.info.hasAnySeason() && s.info.episode < 0)
+                {
+                    // No season or episode in the name, and every year it gives
+                    // is from before the show began: a film of the same name.
+                    std::vector<int> ys = release::yearsIn(s.title);
+                    bool before         = !ys.empty();
+                    for (int y : ys) before = before && y < year - 1;
+                    if (before) s.relevant = false;
+                }
             }
         }
-        if (s.relevant && s.score > -500) anyRelevant = true;
+
+        s.score = release::score(s.info, s.seeders, s.size, want);
+
+        std::string key = dedupKey(s);
+        auto it         = seenIdx.find(key);
+        if (it != seenIdx.end())
+        {
+            Source& ex = found[it->second];
+            if (s.seeders > ex.seeders)
+            {
+                ex.seeders             = s.seeders;
+                ex.info.seedersUnknown = s.info.seedersUnknown;
+            }
+            else if (ex.info.seedersUnknown && !s.info.seedersUnknown && s.seeders > 0)
+            {
+                ex.seeders             = s.seeders;
+                ex.info.seedersUnknown = false;
+            }
+            if (ex.size <= 0 && s.size > 0) ex.size = s.size;
+            if (ex.publishDate.empty() && !s.publishDate.empty()) ex.publishDate = s.publishDate;
+            if (ex.kind == Source::Kind::Jackett && ex.jitem.link.empty() && !s.jitem.link.empty())
+                ex.jitem.link = s.jitem.link;
+            if (!s.trackers.empty())
+            {
+                for (const auto& trk : s.trackers)
+                {
+                    std::string tl = release::foldAscii(trk);
+                    for (char& c : tl) c = (char)std::tolower((unsigned char)c);
+                    bool dup = false;
+                    for (const auto& et : ex.trackers)
+                    {
+                        std::string el = release::foldAscii(et);
+                        for (char& c : el) c = (char)std::tolower((unsigned char)c);
+                        if (el == tl) { dup = true; break; }
+                    }
+                    if (!dup) ex.trackers.push_back(trk);
+                }
+                ex.tracker = jackett::compactTrackers(ex.trackers);
+            }
+            release::ExternalMeta meta;
+            meta.quality        = s.info.height;
+            meta.videotype      = s.info.dolbyVision ? "dv" : (s.info.hdr ? "hdr" : "");
+            meta.voices         = s.info.voices;
+            meta.seasons        = s.info.seasons;
+            meta.trackers       = ex.trackers;
+            meta.seedersUnknown = ex.info.seedersUnknown && s.info.seedersUnknown;
+            if (s.info.russian) meta.languages.push_back("rus");
+            if (s.info.ukrainian) meta.languages.push_back("ukr");
+            release::enrich(ex.info, meta);
+            ex.info.fullSeason = ex.info.fullSeason || s.info.fullSeason;
+            ex.relevant        = ex.relevant || s.relevant;
+            ex.score           = release::score(ex.info, ex.seeders, ex.size, want);
+            recomputeFlags();
+            return true;
+        }
+
+        seenIdx[key] = found.size();
         found.push_back(std::move(s));
+        recomputeFlags();
         return true;
+    }
+
+    void resetSearchState()
+    {
+        ++searchGen;
+        for (brls::View* v = brls::Application::getCurrentFocus(); v; v = v->getParent())
+        {
+            if (v == list)
+            {
+                brls::Application::giveFocus(filterBtns[0].first);
+                break;
+            }
+        }
+        list->clearViews();
+        rowKeys.clear();
+        found.clear();
+        seenIdx.clear();
+        errors.clear();
+        anyRelevant    = false;
+        anyNonCam      = false;
+        shown          = false;
+        dirty          = false;
+        autoFocused    = false;
+        pending        = 0;
+        pendingJackett = 0;
+        jackettAsked   = false;
+        status->setText(tr("Searching..."));
+        status->setVisibility(brls::Visibility::VISIBLE);
+    }
+
+    void promptCustomSearch()
+    {
+        std::string prefill = customQuery.empty() ? item.title : customQuery;
+        brls::Application::getImeManager()->openForText(
+            [this, a = alive](std::string text) {
+                if (!*a) return;
+                while (!text.empty() && text.front() == ' ') text.erase(0, 1);
+                while (!text.empty() && text.back() == ' ') text.pop_back();
+                if (text.empty())
+                {
+                    if (customQueryMode)
+                    {
+                        customQueryMode = false;
+                        customQuery.clear();
+                        filterSeason = season;
+                        want.season  = season;
+                        want.episode = episode;
+                        resetSearchState();
+                        restyleFilters();
+                        updateSubtitle();
+                        search();
+                    }
+                    return;
+                }
+                searchCustom(text);
+            },
+            tr("Custom search query"), tr("Leave empty to restore automatic search"), 128,
+            prefill);
+    }
+
+    void searchCustom(const std::string& text)
+    {
+        if (config::get().jackettUrl.empty())
+        {
+            status->setText(tr("Jackett is not configured. Set URL in Options."));
+            return;
+        }
+        customQueryMode = true;
+        customQuery     = text;
+        filterSeason    = 0;
+        want.season     = 0;
+        want.episode    = 0;
+        resetSearchState();
+        restyleFilters();
+        updateSubtitle();
+
+        int gen        = searchGen;
+        pending        = 1;
+        pendingJackett = 1;
+        jackettAsked   = true;
+        brls::Logger::info("[sources] custom jackett search: {}", text);
+        jackett::searchAsync(text, jackett::Category::ALL,
+                             [this, a = alive, gen](jackett::SearchResult r) {
+            if (!*a || gen != searchGen) return;
+            bool added = false;
+            if (r.ok)
+                for (const auto& it : r.items) added |= addSource(fromJackett(it));
+            done(r.ok ? "" : "Jackett: " + r.error, true, added);
+        }, nullptr);
     }
 
     // One request answered. `jackett`: it was one of Jackett's; `added`: it
@@ -646,9 +1021,9 @@ class SourcesView : public brls::Box
 
     void search()
     {
-        bool jackettOn = !config::get().jackettUrl.empty();
+        bool jackettOn      = !config::get().jackettUrl.empty();
         std::string authKey = stremio::loadAuthKey();
-        bool stremioOn = !authKey.empty() && !item.imdbId.empty();
+        bool stremioOn      = !authKey.empty() && !item.imdbId.empty();
 
         if (!jackettOn && !stremioOn)
         {
@@ -657,50 +1032,69 @@ class SourcesView : public brls::Box
             return;
         }
 
-        // Jackett: the title in the UI language and the original one -- a
-        // Russian tracker files "Дюна", an English one "Dune". A film gets
-        // its year, which keeps remakes and namesakes out.
-        std::vector<std::string> queries;
+        int gen = searchGen;
+        std::string ruTitle   = cleanForQuery(item.title);
+        std::string origTitle = cleanForQuery(item.originalTitle);
+        std::string enTitle   = cleanForQuery(item.englishTitle);
+        std::string bestOrig  = origTitle;
+        if (!enTitle.empty() &&
+            (origTitle.empty() ||
+             (hasNonLatinLetters(origTitle) && item.originalLanguage != "ru")))
+            bestOrig = enTitle;
+        bool isAnime = item.originalLanguage == "ja";
+
+        struct JobQuery
+        {
+            std::string query;
+            jackett::Category cat;
+            bool withHint;
+        };
+        std::vector<JobQuery> jobs;
         if (jackettOn)
         {
-            auto q = [&](const std::string& t) {
-                if (t.empty()) return;
-                std::string target = t;
-                if (tmdb::hasUnsupportedGlyphs(target))
-                {
-                    target = tmdb::sanitizeRenderable(target);
-                    if (target.empty()) return;
-                }
-                std::string s = target;
-                if (!item.isSeries() && !item.year.empty()) s += " " + item.year;
-                if (std::find(queries.begin(), queries.end(), s) == queries.end())
-                    queries.push_back(s);
-            };
-            q(item.title);
-            q(item.originalTitle);
+            // Request 1: structured query with Lampa/Jacred hints (on local
+            // Jackett, queries the folded English/original title).
+            std::string q1Base = !bestOrig.empty() ? release::foldAscii(bestOrig) : ruTitle;
+            if (!q1Base.empty())
+            {
+                std::string q1 = q1Base;
+                if (!item.isSeries() && !item.year.empty()) q1 += " " + item.year;
+                jobs.push_back({ q1,
+                                 item.isSeries() ? jackett::Category::SERIES
+                                                 : jackett::Category::MOVIES,
+                                 true });
+            }
+            // Request 2: broad query without hints (matches ru.jac.black web
+            // search; on local Jackett, queries the localized Russian title).
+            std::string q2 = (!ruTitle.empty() && countLetters(ruTitle) >= 2)
+                                 ? ruTitle
+                                 : (!bestOrig.empty() ? release::foldAscii(bestOrig) : ruTitle);
+            if (!q2.empty())
+                jobs.push_back({ q2, jackett::Category::ALL, false });
         }
-        pending        = (int)queries.size() + (stremioOn ? 1 : 0);
-        pendingJackett = (int)queries.size();
-        jackettAsked   = !queries.empty();
 
-        jackett::Category cat =
-            item.isSeries() ? jackett::Category::SERIES : jackett::Category::MOVIES;
+        pending        = (int)jobs.size() + (stremioOn ? 1 : 0);
+        pendingJackett = (int)jobs.size();
+        jackettAsked   = !jobs.empty();
+
         jackett::TitleHint hint;
-        hint.title         = tmdb::hasUnsupportedGlyphs(item.title) ? tmdb::sanitizeRenderable(item.title) : item.title;
-        hint.titleOriginal = tmdb::hasUnsupportedGlyphs(item.originalTitle) ? tmdb::sanitizeRenderable(item.originalTitle) : item.originalTitle;
+        hint.title         = ruTitle;
+        hint.titleOriginal = bestOrig;
         hint.year          = item.year;
         hint.series        = item.isSeries();
-        hint.anime         = item.originalLanguage == "ja";
-        for (const auto& q : queries)
+        hint.anime         = isAnime;
+        for (const auto& j : jobs)
         {
-            brls::Logger::info("[sources] jackett: {}", q);
-            jackett::searchAsync(q, cat, [this, a = alive](jackett::SearchResult r) {
-                if (!*a) return;
+            brls::Logger::info("[sources] jackett ({}): {}", j.withHint ? "hint" : "broad",
+                               j.query);
+            jackett::searchAsync(j.query, j.cat,
+                                 [this, a = alive, gen](jackett::SearchResult r) {
+                if (!*a || gen != searchGen) return;
                 bool added = false;
                 if (r.ok)
                     for (const auto& it : r.items) added |= addSource(fromJackett(it));
                 done(r.ok ? "" : "Jackett: " + r.error, true, added);
-            }, &hint);
+            }, j.withHint ? &hint : nullptr);
         }
 
         if (stremioOn)
@@ -709,8 +1103,9 @@ class SourcesView : public brls::Box
             std::string id   = item.imdbId;
             if (item.isSeries() && season > 0 && episode > 0)
                 id += ":" + std::to_string(season) + ":" + std::to_string(episode);
-            stremio::fetchAddonsAsync(authKey, [this, a = alive, type, id](stremio::AddonsResult r) {
-                if (!*a) return;
+            stremio::fetchAddonsAsync(authKey,
+                                      [this, a = alive, gen, type, id](stremio::AddonsResult r) {
+                if (!*a || gen != searchGen) return;
                 std::vector<stremio::Addon> addons;
                 if (r.ok)
                     for (const auto& ad : r.addons)
@@ -723,8 +1118,8 @@ class SourcesView : public brls::Box
                 {
                     std::string name = ad.name;
                     stremio::fetchStreamsAsync(ad.base, type, id,
-                                               [this, a, name](stremio::StreamsResult s) {
-                        if (!*a) return;
+                                               [this, a, gen, name](stremio::StreamsResult s) {
+                        if (!*a || gen != searchGen) return;
                         bool added = false;
                         if (s.ok)
                             for (const auto& st : s.streams)
@@ -755,9 +1150,18 @@ class SourcesView : public brls::Box
         std::stable_sort(v.begin(), v.end(), [this](const Source* a, const Source* b) {
             switch (order)
             {
-                case Order::Seeders: return a->seeders > b->seeders;
-                case Order::Size:    return a->size > b->size;
-                default:             return a->score > b->score;
+                case Order::Seeders:
+                    if (a->seeders != b->seeders) return a->seeders > b->seeders;
+                    return a->score > b->score;
+                case Order::Size:
+                    if (a->size != b->size) return a->size > b->size;
+                    return a->score > b->score;
+                case Order::Date:
+                    if (a->publishDate != b->publishDate) return a->publishDate > b->publishDate;
+                    return a->seeders > b->seeders;
+                default:
+                    if (a->score != b->score) return a->score > b->score;
+                    return a->seeders > b->seeders;
             }
         });
         return v;
@@ -886,12 +1290,31 @@ class SourcesView : public brls::Box
             tags->addView(b);
         };
         if (best) tag(tr("best choice"), theme::textGood());
-        for (const auto& x : release::tags(s.info)) tag(x, theme::textDim());
+        if (s.info.cam) tag("CAMRip", theme::textWarn());
+        for (const auto& x : release::tags(s.info))
+        {
+            if (s.info.cam && x == "CAMRip") continue;
+            tag(x, theme::textDim());
+        }
         if (item.isSeries() && s.info.fullSeason)
             tag(s.info.seasonTo > s.info.season ? tr("several seasons") : tr("whole season"),
                 theme::textDim());
+#ifdef __SWITCH__
         if (s.info.height == 2160 || s.info.tenBit)
             tag(tr("heavy for Wi-Fi"), theme::textWarn());
+#else
+        if (platform_ui::isMobile())
+        {
+            int64_t effSize = s.size;
+            if (item.isSeries())
+            {
+                int epDiv = release::packEpisodeEstimate(s.info);
+                if (epDiv > 1) effSize /= epDiv;
+            }
+            if (effSize > (item.isSeries() ? (20LL << 30) : (40LL << 30)))
+                tag(tr("heavy for Wi-Fi"), theme::textWarn());
+        }
+#endif
         if (!s.tracker.empty()) tag(s.tracker, theme::textMuted());
         mid->addView(tags);
         row->addView(mid);
@@ -899,7 +1322,7 @@ class SourcesView : public brls::Box
         auto* right = new brls::Box();
         right->setAxis(brls::Axis::COLUMN);
         right->setAlignItems(brls::AlignItems::FLEX_END);
-        right->setWidth(130.0f);
+        right->setWidth(140.0f);
         auto* sz = new brls::Label();
         sz->setText(sizeText(s.size));
         sz->setFontSize(17.0f);
@@ -908,12 +1331,24 @@ class SourcesView : public brls::Box
         if (s.seeders >= 0)
         {
             auto* sd = new brls::Label();
-            sd->setText(tr("seeds ") + std::to_string(s.seeders));
+            bool unk = (s.seeders == 0 && s.info.seedersUnknown);
+            sd->setText(unk ? std::string(tr("seeds ?"))
+                            : tr("seeds ") + std::to_string(s.seeders));
             sd->setFontSize(15.0f);
-            sd->setTextColor(s.seeders > 0 ? theme::textMuted() : theme::textWarn());
+            sd->setTextColor((s.seeders > 0 || unk) ? theme::textMuted() : theme::textWarn());
             sd->setHorizontalAlign(brls::HorizontalAlign::RIGHT);
-            sd->setMarginTop(6.0f);
+            sd->setMarginTop(4.0f);
             right->addView(sd);
+        }
+        if (s.publishDate.size() >= 10)
+        {
+            auto* dt = new brls::Label();
+            dt->setText(s.publishDate.substr(0, 10));
+            dt->setFontSize(13.0f);
+            dt->setTextColor(theme::textDim());
+            dt->setHorizontalAlign(brls::HorizontalAlign::RIGHT);
+            dt->setMarginTop(3.0f);
+            right->addView(dt);
         }
         row->addView(right);
 
@@ -942,21 +1377,26 @@ class SourcesView : public brls::Box
 
     void play(const Source& s)
     {
+        int activeSeason = filterSeason > 0 ? filterSeason : season;
+        int activeEp     = (activeSeason > 0 && activeSeason == season) ? episode : 0;
+
         if (item.isSeries())
         {
             saveChoice(item.key(), s.info.voices.empty() ? "" : s.info.voices[0], s.info.group);
             // A season pack: the next episode can open straight from it.
-            if (season > 0 && s.info.fullSeason && s.kind != Source::Kind::StremioUrl)
+            if (activeSeason > 0 && s.info.fullSeason && s.kind != Source::Kind::StremioUrl)
             {
-                bool jk = s.kind == Source::Kind::Jackett;
+                bool jk     = s.kind == Source::Kind::Jackett;
+                int packS   = s.info.season > 0 ? s.info.season : activeSeason;
+                int packSTo = s.info.seasonTo >= packS ? s.info.seasonTo : packS;
                 library::rememberPack(item, s.title, jk ? s.jitem.link : "",
-                                      jk ? s.jitem.magnetUri : s.src, s.info.season,
-                                      s.info.seasonTo);
+                                      jk ? s.jitem.magnetUri : s.src, packS, packSTo);
             }
         }
 
         // From this screen: the next episode replaces it (pop it and the player).
-        PlayHint hint = hintFor(item, season, episode, episodesInSeason, 2);
+        PlayHint hint = hintFor(item, activeSeason, activeEp,
+                                activeSeason == season ? episodesInSeason : 0, 2);
 
         switch (s.kind)
         {
@@ -967,7 +1407,7 @@ class SourcesView : public brls::Box
             case Source::Kind::StremioTorrent:
                 hint.sourceType = "Stremio";
                 // The addon said which file: no need to open the torrent here.
-                if (s.fileIdx >= 0 || !item.isSeries() || episode <= 0)
+                if (s.fileIdx >= 0 || !item.isSeries() || activeEp <= 0)
                     startPlaybackPrompt(s.src, hint.art, hint.title, s.fileIdx, hint.watch,
                                         hint.sourceType);
                 else
@@ -992,9 +1432,16 @@ void openSourcesScreen(const content::Item& item, int season, int episode,
                        int episodesInSeason)
 {
     auto* frame = new ui::FieldFrame(new SourcesView(item, season, episode, episodesInSeason));
-    frame->setTitle("");
-    // "Torrents" and the title head the view itself: no empty bar above them.
-    frame->setHeaderVisibility(brls::Visibility::GONE);
+    if (platform_ui::isMobile())
+    {
+        frame->setTitle(tr("Torrents"));
+    }
+    else
+    {
+        frame->setTitle("");
+        // "Torrents" and the title head the view itself: no empty bar above them.
+        frame->setHeaderVisibility(brls::Visibility::GONE);
+    }
     brls::Application::pushActivity(new brls::Activity(frame));
 }
 

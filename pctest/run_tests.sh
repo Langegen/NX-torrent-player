@@ -92,7 +92,8 @@ ${CXX:-g++} -O1 -g -Wall -std=c++17 \
     -o "$out/test_library"
 
 ${CXX:-g++} -O1 -g -Wall -std=c++17 \
-    -Iapp \
+    -DJACKETT_NO_UI -Iapp \
+    app/jackett.cpp \
     app/jackett_diag.cpp \
     app/json.cpp \
     pctest/test_jackett.cpp \

@@ -2,12 +2,17 @@ package org.libsdl.app;
 
 import android.app.Activity;
 import android.os.Handler;
+import android.os.Looper;
 import android.os.Message;
 import android.util.Log;
 import android.view.Window;
 import android.view.WindowManager;
 
 public class BorealisHandler extends Handler {
+    public BorealisHandler() {
+        super(Looper.getMainLooper());
+    }
+
     @Override
     public void handleMessage(Message msg) {
         super.handleMessage(msg);

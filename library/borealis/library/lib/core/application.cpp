@@ -1192,11 +1192,11 @@ void Application::setWindowSize(int width, int height)
 
 void Application::onWindowResized(int width, int height)
 {
-#if defined(__SWITCH__)
+#if defined(__SWITCH__) || defined(__ANDROID__)
     // LOCAL PATCH (NX-torrent-player): On Nintendo Switch docking is an instant
-    // hardware mode switch. Applying the new window size immediately prevents
-    // a 100ms desync where the EGL surface is 1080p while Application::windowWidth/Height
-    // remain 720p (which breaks mpv FBO rendering and causes black letterboxing).
+    // hardware mode switch, and on Android rotation/resizing updates the surface
+    // immediately. Applying the new window size at once prevents a 100ms desync
+    // where the EGL surface differs from Application::windowWidth/Height.
     Application::setWindowSize(width, height);
     Application::getWindowSizeChangedEvent()->fire();
 

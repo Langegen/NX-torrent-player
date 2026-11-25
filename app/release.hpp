@@ -30,10 +30,26 @@ struct Info
     int seasonTo  = -1;  // last season of a range ("S01-S03"); = season otherwise
     int episode   = -1;
     int episodeTo = -1;  // last episode of a range ("E01-E08", "серии 1-8")
+    // All season numbers covered (sorted, unique). Populated from season..seasonTo
+    // and/or external tracker metadata (e.g. Jacred info.seasons).
+    std::vector<int> seasons;
     // A whole season (or several) rather than single episodes: a season
     // named with no episode, or an episode range that covers the season
     // ("серии 1-8 из 8").
     bool fullSeason = false;
+    bool seedersUnknown = false;
+
+    bool hasAnySeason() const { return !seasons.empty() || season >= 0; }
+    bool hasSeason(int s) const
+    {
+        if (!seasons.empty())
+        {
+            for (int x : seasons)
+                if (x == s) return true;
+            return false;
+        }
+        return season >= 0 && s >= season && s <= seasonTo;
+    }
 
     // Voice-overs it names: "Дубляж", "MVO", "DVO", "AVO", "LostFilm"...
     std::vector<std::string> voices;
@@ -51,6 +67,22 @@ struct Info
 
 Info parse(const std::string& title);
 
+// Structured metadata supplied by an index (e.g. Jacred info/languages).
+struct ExternalMeta
+{
+    int quality = 0;
+    std::string videotype;
+    std::vector<std::string> voices;
+    std::vector<int> seasons;
+    std::vector<std::string> languages;
+    std::vector<std::string> trackers;
+    bool seedersUnknown = false;
+};
+
+// Enriches parsed release info with tracker/index metadata without erasing
+// valid details already read from the title.
+void enrich(Info& info, const ExternalMeta& meta);
+
 // Short labels for the UI, most telling first: source, codec, HDR / DV,
 // 10-bit, "season" scope, voices.
 std::vector<std::string> tags(const Info& info);
@@ -64,14 +96,28 @@ struct Want
     // A voice / group picked last time for this show: favoured.
     std::string voice;
     std::string group;
-    bool preferRussian = false;  // the UI is in Russian
+    bool preferRussian   = false;  // the UI / audio setting wants Russian
+    bool originalRussian = false;  // native Russian title ("Оригинал" is Russian)
+    bool switchProfile   = true;   // Switch hardware vs PC/Android ranking profile
 };
 
-// How good a choice this is for a Switch, higher is better. A release that
-// cannot hold what is wanted (another season, another episode, a cam) comes
-// back negative, and the screen hides it behind "All". `seeders` < 0 = not
-// known; `size` 0 = not known.
+// How good a choice this is for the target profile, higher is better.
+// A release for another season or a single wrong episode returns <= -1000;
+// CAMRip returns -200 so the caller can show it only when nothing better exists.
 int score(const Info& info, int seeders, int64_t size, const Want& want);
+
+// Estimated episode count in a multi-episode / season release (at least 1),
+// used to judge per-episode streaming size rather than whole-pack size.
+int packEpisodeEstimate(const Info& info);
+
+// Folds Latin diacritics (Shōgun -> Shogun) and ё -> е for comparison/queries.
+std::string foldAscii(const std::string& s);
+
+// True if a result is clearly not a film/series video (PC/console game,
+// soundtrack, audiobook, ebook, non-video Jackett category).
+bool isNonVideo(const std::string& title,
+                const std::vector<int>& categories = {},
+                const std::vector<std::string>& types = {});
 
 // Whether a release is of the title at all: the search for "Fallout" also
 // finds "Mission.Impossible.Fallout.2018". True when one of `titles` (the

@@ -14,6 +14,8 @@
 #ifdef USE_GLES2
 #include <GLES2/gl2.h>
 #include <GLES2/gl2ext.h>
+#elif defined(USE_GLES3)
+#include <GLES3/gl3.h>
 #endif
 #else
 #include <glad/glad.h>
@@ -40,16 +42,21 @@
 #include <ctime>
 
 #include "appdata.hpp"
+#if defined(__ANDROID__) || defined(ANDROID)
+#include "android_bridge.hpp"
+#endif
 #include "browse.hpp"  // openEpisodeById, for the next-episode card
 #include "config.hpp"
 #include "history.hpp"
 #include "library.hpp"
+#include "platform_ui.hpp"
 #include "sources.hpp"  // openNextEpisode
 #include "http.hpp"
 #include "torrserver.hpp"
 #include "stremio.hpp"  // cached artwork -> blurred background
 #include "theme.hpp"    // muted text for the in-menu hints
 #include "player_widgets.hpp"
+#include "widgets.hpp"
 #include "release.hpp"  // episodeOfFile: which episode a file of a pack is
 #include "torrent_play.hpp"  // videoFilesOf, for the episode list
 #include "sync/sync_manager.hpp"
@@ -472,6 +479,21 @@ MpvView::MpvView(const std::string& source, const PlayerArt& art,
     }
     registerPlayerActions();
 
+#if defined(__ANDROID__) || defined(ANDROID)
+    focusSub = brls::Application::getWindowFocusChangedEvent()->subscribe(
+        [this](bool focused) {
+            if (!focused && mpv && ready && !userPaused)
+            {
+                userPaused = true;
+                mpv_set_property_string(mpv, "pause", "yes");
+                setControlsVisible(true);
+                maybePushWatchState(true);
+                maybeUpdateHistory(true);
+            }
+        });
+    focusSubscribed = true;
+#endif
+
     startEngine(source, fileIndex);
 }
 
@@ -649,12 +671,22 @@ bool MpvView::startMpv()
     // its HW frames pool dynamically (initial_pool_size == 0), so
     // hwdec-extra-frames has no effect on Switch and is omitted.
     bool hwDec = config::get().hwDecode;
+#if defined(__ANDROID__) || defined(ANDROID)
+    mpv_set_option_string(mpv, "hwdec", hwDec ? "auto-copy" : "no");
+#else
     mpv_set_option_string(mpv, "hwdec", hwDec ? "auto" : "no");
+#endif
     // Force 8-bit RGBA for intermediate FBOs. mpv defaults to rgba16hf
     // (64 bits per pixel), which costs 16.6 MB per 1080p frame and starves the
     // Tegra X1 memory bus when docked. The display output is 8-bit RGBA anyway.
     mpv_set_option_string(mpv, "fbo-format", "rgba8");
     mpv_set_option_string(mpv, "config", "no");
+#if defined(__ANDROID__) || defined(ANDROID)
+    // Android uses AudioTrack/OpenSL ES and needs subfont.ttf + system fonts for ASS/SRT subs.
+    mpv_set_option_string(mpv, "ao", "audiotrack,opensles");
+    mpv_set_option_string(mpv, "config-dir", androidStoragePath());
+    mpv_set_option_string(mpv, "sub-fonts-dir", "/system/fonts");
+#endif
     mpv_set_option_string(mpv, "terminal", "no");
     // Switch audio output is strictly 48kHz stereo; resample all audio to 48kHz
     // upfront to eliminate clock drift between media stream and the hardware audio driver.
@@ -739,7 +771,12 @@ bool MpvView::startMpv()
     // UTF-8 file is still read as UTF-8. CP1252 is the right guess for the
     // languages this app offers; a Cyrillic or Greek subtitle would still need
     // its own, which is a setting nobody has asked for yet.
+#if defined(__ANDROID__) || defined(ANDROID)
+    mpv_set_option_string(mpv, "sub-codepage",
+                          i18n::lang() == "ru" ? "cp1251" : "cp1252");
+#else
     mpv_set_option_string(mpv, "sub-codepage", "cp1252");
+#endif
     mpv_set_option_string(mpv, "cache", "yes");
     // Initial buffering is still controlled by our loading overlay (we start
     // paused until startTargetSecs()), so cache-pause-initial stays off.
@@ -767,10 +804,12 @@ bool MpvView::startMpv()
     // it is the only copy -- the engine's back window covers torrents beyond it.
     mpv_set_option_string(mpv, "demuxer-max-back-bytes",
                           config::isAppletMode() ? "32MiB" : "128MiB");
+#if !defined(__ANDROID__) && !defined(ANDROID)
     // On Switch the hardware decoder's GPU work is async; without a glFinish
     // after mpv's render, glfwSwapBuffers can present before the video is drawn
     // (black frame). This is what the other Switch mpv players set too.
     mpv_set_option_string(mpv, "opengl-glfinish", "yes");
+#endif
     // Disable direct rendering: in libmpv without MPV_RENDER_PARAM_ADVANCED_CONTROL,
     // vd-lavc-dr causes buffer reuse conflicts, macroblock corruption and artifacts
     // during software decoding or decoder fallback.
@@ -2719,7 +2758,13 @@ void MpvView::openTrackMenu()
         config::get().hwDecode = on;
         config::save();
         if (mpv)
+        {
+#if defined(__ANDROID__) || defined(ANDROID)
+            mpv_set_property_string(mpv, "hwdec", on ? "auto-copy" : "no");
+#else
             mpv_set_property_string(mpv, "hwdec", on ? "auto" : "no");
+#endif
+        }
         brls::Logger::info("[player] hardware decoding -> {}", on ? "auto" : "no");
     };
     content->addView(new StepperCell(
@@ -2979,6 +3024,17 @@ void MpvView::openPicturePanel(brls::View* under, std::shared_ptr<bool> underAli
 MpvView::~MpvView()
 {
     brls::Logger::info("[teardown] ~MpvView enter");
+
+    if (focusSubscribed)
+    {
+        brls::Application::getWindowFocusChangedEvent()->unsubscribe(focusSub);
+        focusSubscribed = false;
+    }
+    if (resizeSubscribed)
+    {
+        brls::Application::getWindowSizeChangedEvent()->unsubscribe(resizeSub);
+        resizeSubscribed = false;
+    }
 
     // Playback is ending: let the OS dim/sleep on idle again -- unless the
     // next episode's player, built before this one is destroyed, is up.
@@ -3387,26 +3443,46 @@ void MpvView::buildLoadingOverlay(const std::string& title)
     column->setJustifyContent(brls::JustifyContent::CENTER);
     column->setAlignItems(brls::AlignItems::CENTER);
     column->setGrow(1.0f);
-    column->setPadding(0, 60, 0, 60);
+    float loadPad = (platform_ui::isMobile() && platform_ui::isPortrait()) ? 28.0f : 60.0f;
+    column->setPadding(0, loadPad, 0, loadPad);
     loadingOverlay->addView(column);
 
-    // The poster when the caller knows what we're playing, otherwise the app
-    // logo (bundled at romfs:/NX-torrent-player-bg-rounded.png).
-    auto* logo = new brls::Image();
+    // The poster when the caller knows what we're playing, otherwise a vector
+    // app mark on mobile or the bundled logo on Switch/desktop.
     if (!art.posterPath.empty())
     {
+        auto* logo = new brls::Image();
         logo->setImageFromFile(art.posterPath);
         logo->setDimensions(148.0f, 222.0f);  // posters are 2:3
         logo->setCornerRadius(8.0f);           // rounded poster corners
+        logo->setScalingType(brls::ImageScalingType::FIT);
+        logo->setMargins(0, 0, 28, 0);
+        column->addView(logo);
+    }
+    else if (platform_ui::isMobile())
+    {
+        struct AppMarkBox : public brls::Box
+        {
+            void draw(NVGcontext* vg, float x, float y, float w, float h,
+                      brls::Style, brls::FrameContext*) override
+            {
+                theme::drawAppMark(vg, x, y, std::min(w, h));
+            }
+        };
+        auto* mark = new AppMarkBox();
+        mark->setDimensions(112.0f, 112.0f);
+        mark->setMargins(0, 0, 28, 0);
+        column->addView(mark);
     }
     else
     {
+        auto* logo = new brls::Image();
         logo->setImageFromRes("NX-torrent-player-bg-rounded.png");
         logo->setDimensions(148.0f, 148.0f);
+        logo->setScalingType(brls::ImageScalingType::FIT);
+        logo->setMargins(0, 0, 28, 0);
+        column->addView(logo);
     }
-    logo->setScalingType(brls::ImageScalingType::FIT);
-    logo->setMargins(0, 0, 28, 0);
-    column->addView(logo);
 
     auto* titleLabel = new brls::Label();
     titleLabel->setText(title);
@@ -3466,14 +3542,23 @@ void MpvView::buildLoadingOverlay(const std::string& title)
     spinner->animate(true);
     column->addView(spinner);
 
-    // Hint that B cancels and returns to the list.
-    auto* backHint = new brls::Label();
-    backHint->setText(tr("Press B to go back"));
-    backHint->setFontSize(18);
-    backHint->setTextColor(dimText);
-    backHint->setHorizontalAlign(brls::HorizontalAlign::CENTER);
-    backHint->setMargins(40, 0, 0, 0);
-    column->addView(backHint);
+    // Hint that B cancels and returns to the list (clickable button on mobile).
+    if (platform_ui::isMobile())
+    {
+        auto* backBtnLoad = ui::actionButton(tr("Back"), false, [this]() { onBack(); });
+        backBtnLoad->setMargins(34.0f, 0.0f, 0.0f, 0.0f);
+        column->addView(backBtnLoad);
+    }
+    else
+    {
+        auto* backHint = new brls::Label();
+        backHint->setText(tr("Press B to go back"));
+        backHint->setFontSize(18);
+        backHint->setTextColor(dimText);
+        backHint->setHorizontalAlign(brls::HorizontalAlign::CENTER);
+        backHint->setMargins(40, 0, 0, 0);
+        column->addView(backHint);
+    }
 
     this->addView(loadingOverlay);
 
@@ -3561,12 +3646,15 @@ void MpvView::buildLoadingOverlay(const std::string& title)
     lockHint->setAlignItems(brls::AlignItems::CENTER);
     lockHint->setVisibility(brls::Visibility::GONE);
     {
-        auto* y = new brls::Label();
-        y->setText("\xEE\x83\xA3");  // borealis font: the Y button glyph (U+E0E3)
-        y->setFontSize(26.0f);
-        y->setTextColor(nvgRGB(255, 255, 255));
-        y->setMargins(0.0f, 12.0f, 0.0f, 0.0f);
-        lockHint->addView(y);
+        if (!platform_ui::isMobile())
+        {
+            auto* y = new brls::Label();
+            y->setText("\xEE\x83\xA3");  // borealis font: the Y button glyph (U+E0E3)
+            y->setFontSize(26.0f);
+            y->setTextColor(nvgRGB(255, 255, 255));
+            y->setMargins(0.0f, 12.0f, 0.0f, 0.0f);
+            lockHint->addView(y);
+        }
 
         // Padlock glyph (Material Icons): open = a hint that Y locks; closed =
         // locked. Nudged down a touch like the gear, which sits high in its box.
@@ -3581,7 +3669,7 @@ void MpvView::buildLoadingOverlay(const std::string& title)
         lockText->setText("");
         lockText->setFontSize(20.0f);
         lockText->setTextColor(nvgRGB(255, 255, 255));
-        lockText->setMargins(0.0f, 0.0f, 0.0f, 14.0f);
+        lockText->setMargins(0.0f, 0.0f, 0.0f, platform_ui::isMobile() ? 10.0f : 14.0f);
         lockHint->addView(lockText);
     }
     topRight->addView(lockHint);
@@ -3645,8 +3733,8 @@ void MpvView::buildLoadingOverlay(const std::string& title)
         headRow->setAlignItems(brls::AlignItems::CENTER);
 
         auto* glyph = new brls::Label();
-        glyph->setText("\xEE\x83\xA0");  // U+E0E0, the A button
-        glyph->setFontSize(26.0f);
+        glyph->setText(platform_ui::isMobile() ? "\xE2\x96\xB6" : "\xEE\x83\xA0");
+        glyph->setFontSize(platform_ui::isMobile() ? 20.0f : 26.0f);
         glyph->setTextColor(nvgRGB(255, 255, 255));
         glyph->setMarginRight(10.0f);
         headRow->addView(glyph);
@@ -4689,19 +4777,28 @@ void MpvView::buildControls()
     top->setPadding(36.0f, 60.0f, 0.0f, 60.0f);
     top->setVisibility(brls::Visibility::GONE);
     {
-        auto* left = new brls::Box();
-        left->setAxis(brls::Axis::COLUMN);
-        left->setGrow(1.0f);
-        left->setShrink(1.0f);
-        left->setMarginRight(30.0f);
+#if defined(__ANDROID__) || defined(ANDROID)
+        backBtn = new player_ui::Button(player_ui::Icon::Back, tr("Back"), 48.0f);
+        backBtn->setMargins(0.0f, 14.0f, 0.0f, -6.0f);
+        backBtn->addGestureRecognizer(new brls::TapGestureRecognizer(backBtn, [this]() {
+            if (controlsLocked) { flashLock(); return; }
+            brls::Application::popActivity();
+        }));
+        top->addView(backBtn);
+#endif
+
+        topLeft = new brls::Box();
+        topLeft->setAxis(brls::Axis::COLUMN);
+        topLeft->setGrow(1.0f);
+        topLeft->setShrink(1.0f);
+        topLeft->setMarginRight(30.0f);
 
         barTitle = new brls::Label();
         barTitle->setText(pauseTitle);
         barTitle->setFontSize(28.0f);
         barTitle->setTextColor(white);
         barTitle->setSingleLine(true);
-        barTitle->setMaxWidth(900.0f);
-        left->addView(barTitle);
+        topLeft->addView(barTitle);
 
         // The episode, or the file of the pack that is playing.
         barSubtitle = new brls::Label();
@@ -4713,12 +4810,11 @@ void MpvView::buildControls()
         barSubtitle->setFontSize(18.0f);
         barSubtitle->setTextColor(dim);
         barSubtitle->setSingleLine(true);
-        barSubtitle->setMaxWidth(900.0f);
         barSubtitle->setMarginTop(6.0f);
         barSubtitle->setVisibility(sub.empty() ? brls::Visibility::GONE
                                                : brls::Visibility::VISIBLE);
-        left->addView(barSubtitle);
-        top->addView(left);
+        topLeft->addView(barSubtitle);
+        top->addView(topLeft);
 
         auto* right = new brls::Box();
         right->setAxis(brls::Axis::COLUMN);
@@ -4772,7 +4868,7 @@ void MpvView::buildControls()
     bot->setPadding(0.0f, 60.0f, 28.0f, 60.0f);
     bot->setVisibility(brls::Visibility::GONE);
 
-    auto* timeRow = new brls::Box();
+    timeRow = new brls::Box();
     timeRow->setAxis(brls::Axis::ROW);
     timeRow->setAlignItems(brls::AlignItems::CENTER);
     timeRow->setHeight(44.0f);
@@ -4910,7 +5006,77 @@ void MpvView::buildControls()
         },
         brls::PanAxis::HORIZONTAL));
 
+    updateControlsLayout();
+    resizeSub = brls::Application::getWindowSizeChangedEvent()->subscribe(
+        [this]() { updateControlsLayout(); });
+    resizeSubscribed = true;
+
     refreshButtons();
+}
+
+void MpvView::updateControlsLayout()
+{
+    bool portrait = brls::Application::contentHeight > brls::Application::contentWidth;
+    if (topBar)
+    {
+        topBar->setPadding(portrait ? 24.0f : 36.0f,
+                           portrait ? 20.0f : 60.0f, 0.0f,
+                           portrait ? 20.0f : 60.0f);
+        topBar->setHeight(portrait ? 130.0f : 160.0f);
+    }
+    if (topLeft)
+        topLeft->setMarginRight(portrait ? 12.0f : 30.0f);
+    if (backBtn)
+    {
+        float bs = portrait ? 42.0f : 48.0f;
+        backBtn->setDimensions(bs, bs);
+        backBtn->setMargins(0.0f, portrait ? 10.0f : 14.0f, 0.0f, -6.0f);
+    }
+    if (barTitle) barTitle->setFontSize(portrait ? 22.0f : 28.0f);
+    if (barSubtitle) barSubtitle->setFontSize(portrait ? 15.0f : 18.0f);
+    if (barClock) barClock->setFontSize(portrait ? 22.0f : 28.0f);
+    if (barBatteryPct)
+    {
+        barBatteryPct->setFontSize(portrait ? 16.0f : 20.0f);
+        barBatteryPct->setMarginRight(portrait ? 10.0f : 22.0f);
+    }
+    if (barEnds)
+        barEnds->setFontSize(portrait ? 14.0f : 17.0f);
+    if (bottomBar)
+    {
+        bottomBar->setPadding(0.0f, portrait ? 20.0f : 60.0f,
+                              portrait ? 20.0f : 28.0f,
+                              portrait ? 20.0f : 60.0f);
+        bottomBar->setHeight(portrait ? 186.0f : 236.0f);
+    }
+    if (timeRow)
+        timeRow->setMarginBottom(portrait ? 14.0f : 28.0f);
+    if (timeCur)
+    {
+        timeCur->setWidth(portrait ? 72.0f : 100.0f);
+        timeCur->setFontSize(portrait ? 17.0f : 21.0f);
+    }
+    if (timeTotal)
+    {
+        timeTotal->setWidth(portrait ? 72.0f : 100.0f);
+        timeTotal->setFontSize(portrait ? 17.0f : 21.0f);
+    }
+    if (timeline)
+        timeline->setMargins(0.0f, portrait ? 8.0f : 16.0f,
+                             0.0f, portrait ? 8.0f : 16.0f);
+    for (int i = 0; i < BTN_COUNT; i++)
+    {
+        if (!buttons[i]) continue;
+        float sz = portrait ? (i == BTN_PLAY ? 52.0f : 42.0f)
+                            : (i == BTN_PLAY ? 72.0f : 60.0f);
+        float mg = portrait ? 2.5f : 6.0f;
+        buttons[i]->setDimensions(sz, sz);
+        buttons[i]->setMargins(0.0f, mg, 0.0f, mg);
+    }
+    if (nextCard)
+        nextCard->setPositionRight(portrait ? 20.0f : 60.0f);
+    if (bufferOverlay)
+        bufferOverlay->setPositionRight(portrait ? 20.0f : 60.0f);
 }
 
 // Per frame while the panel is up: the timeline, the times, the clock.

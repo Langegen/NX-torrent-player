@@ -482,6 +482,7 @@ void SDLInputManager::updateUnifiedControllerState(ControllerState* state)
     {
         state->buttons[BUTTON_B] |= getKeyboardKeys(SDL_SCANCODE_KP_ENTER);
         state->buttons[BUTTON_B] |= getKeyboardKeys(SDL_SCANCODE_RETURN);
+        state->buttons[BUTTON_B] |= getKeyboardKeys(SDL_SCANCODE_SELECT);
         state->buttons[BUTTON_A] |= getKeyboardKeys(SDL_SCANCODE_ESCAPE);
         state->buttons[BUTTON_A] |= getKeyboardKeys(SDL_SCANCODE_AC_BACK);
     }
@@ -489,6 +490,7 @@ void SDLInputManager::updateUnifiedControllerState(ControllerState* state)
     {
         state->buttons[BUTTON_A] |= getKeyboardKeys(SDL_SCANCODE_KP_ENTER);
         state->buttons[BUTTON_A] |= getKeyboardKeys(SDL_SCANCODE_RETURN);
+        state->buttons[BUTTON_A] |= getKeyboardKeys(SDL_SCANCODE_SELECT);
         state->buttons[BUTTON_B] |= getKeyboardKeys(SDL_SCANCODE_ESCAPE);
         state->buttons[BUTTON_B] |= getKeyboardKeys(SDL_SCANCODE_AC_BACK);
     }

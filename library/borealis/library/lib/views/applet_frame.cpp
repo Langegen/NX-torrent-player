@@ -122,6 +122,9 @@ AppletFrame::AppletFrame()
             this->contentViewStack.back()->dismiss();
             return true; },
         false, false, SOUND_BACK);
+
+    if (HIDE_BOTTOM_BAR)
+        this->setFooterVisibility(Visibility::GONE);
 }
 
 AppletFrame::AppletFrame(View* contentView)

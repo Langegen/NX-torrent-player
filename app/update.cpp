@@ -125,6 +125,7 @@ bool hasPending()
 
 void checkAsync(std::function<void(Release)> done)
 {
+#ifdef __SWITCH__
     if (selfNro.empty())
     {
         Release r;
@@ -132,6 +133,7 @@ void checkAsync(std::function<void(Release)> done)
         brls::sync([done, r]() { done(r); });
         return;
     }
+#endif
 
     brls::async([done]() {
         Release r;

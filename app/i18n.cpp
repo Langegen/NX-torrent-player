@@ -4,6 +4,7 @@
 
 #include "config.hpp"
 #include "i18n_tables.hpp"
+#include "platform_ui.hpp"
 
 namespace
 {
@@ -380,6 +381,7 @@ const Entry kFr[] = {
     { "Movies", "Films" },
     { "Series", "Séries" },
     { "Anime", "Anime" },
+    { "Sort: Recommended", "Tri : Recommandé" },
     { "Sort: Seeders", "Tri : Seeders" },
     { "Sort: Size", "Tri : Taille" },
     { "Sort: Date", "Tri : Date" },
@@ -587,6 +589,14 @@ const Entry kFr[] = {
     { "several seasons", "plusieurs saisons" },
     { "heavy for Wi-Fi", "lourd pour le Wi-Fi" },
     { "seeds ", "seeds " },
+    { "seeds ?", "seeds ?" },
+    { "Order: date", "Ordre : date" },
+    { "Alive (>0)", "Actifs (>0)" },
+    { "Custom search", "Recherche" },
+    { "Custom search query", "Requête personnalisée" },
+    { "Leave empty to restore automatic search", "Laissez vide pour la recherche auto" },
+    { "Season", "Saison" },
+    { "All seasons", "Toutes saisons" },
     { "searching addons...", "recherche dans les addons..." },
     { "Any picture", "Toute image" },
     { "Any source", "Toute source" },
@@ -754,8 +764,9 @@ const std::vector<std::string>& langLabels()
     static const std::vector<std::string> v = [] {
         const std::string c = config::effectiveUiLang("auto");
         const char* name = c == "ru" ? "Русский" : c == "fr" ? "Français" : "English";
-        return std::vector<std::string>{ std::string(tr("Console language")) + " (" +
-                                             name + ")",
+        const char* prefix = platform_ui::isMobile() ? tr("System language")
+                                                     : tr("Console language");
+        return std::vector<std::string>{ std::string(prefix) + " (" + name + ")",
                                          "English", "Français", "Русский" };
     }();
     return v;

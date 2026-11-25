@@ -29,6 +29,7 @@ struct Item
 {
     std::string title;
     std::string tracker;
+    std::vector<std::string> trackers; // split from comma-separated Tracker
     int64_t     size = 0;
     int         seeders = 0;
     int         peers = 0;
@@ -36,6 +37,23 @@ struct Item
     std::string magnetUri;
     std::string link;
     std::string categoryDesc;
+    std::vector<int> categories;       // Torznab / Jackett "Category" IDs
+    std::string infoHash;              // normalized lower-case btih hex if available
+
+    // Structured Jacred metadata ("languages", "info": {...}), optional.
+    bool hasJacredInfo   = false;
+    int  infoQuality     = 0;          // 2160, 1080, 720, ...
+    std::string infoVideotype;         // "sdr", "hdr", "dolby_vision", ...
+    std::vector<std::string> infoVoices;
+    std::vector<int> infoSeasons;
+    std::vector<std::string> infoTypes; // "movie", "serial", "anime", ...
+    std::vector<std::string> languages; // "rus", "eng", "ukr", ...
+    std::string infoName;
+    std::string infoOriginalName;
+    int  infoYear        = 0;          // from "relased" / "released"
+    std::string infoImdb;              // "tt12637874"
+    bool seedersUnknown  = false;
+    bool seedersLive     = false;
 };
 
 struct SearchResult
@@ -45,12 +63,11 @@ struct SearchResult
     std::vector<Item> items;
 };
 
-// Formats byte size into human-readable string (e.g. "1.4 GB").
-std::string formatSize(int64_t bytes);
-
-// Normalizes a download link from Jackett: handles localhost/relative paths
-// by substituting the configured Jackett server host.
-std::string normalizeDownloadLink(const std::string& link);
+// Pure helpers (also built in offline PC tests with JACKETT_NO_UI).
+std::vector<std::string> splitTrackers(const std::string& tracker);
+std::string compactTrackers(const std::vector<std::string>& trackers);
+std::string extractInfoHash(const std::string& uri);
+std::vector<Item> parseResultsJson(const std::string& resp);
 
 // What is known about the title being searched for, beyond the query text.
 // Jacred-style servers (jac.red, jac.black) use it to return only that
@@ -63,6 +80,17 @@ struct TitleHint
     bool series = false;
     bool anime  = false;        // also searches the anime category
 };
+
+std::string buildSearchUrl(const std::string& base, const std::string& apiKey,
+                           const std::string& query, Category category,
+                           const TitleHint* hint = nullptr);
+
+// Formats byte size into human-readable string (e.g. "1.4 GB").
+std::string formatSize(int64_t bytes);
+
+// Normalizes a download link from Jackett: handles localhost/relative paths
+// by substituting the configured Jackett server host.
+std::string normalizeDownloadLink(const std::string& link);
 
 // Performs an asynchronous search request to Jackett.
 // Callback is invoked on the UI thread (via brls::sync).

@@ -10,6 +10,7 @@
 #include "history.hpp"
 #include "i18n.hpp"
 #include "library.hpp"
+#include "platform_ui.hpp"
 #include "player.hpp"   // startPlaybackPrompt, for files from the history
 #include "sources.hpp"  // continueContent
 #include "stremio.hpp"  // Cinemeta, for the IMDb rating
@@ -25,11 +26,20 @@ namespace
 {
 
 // Where every row starts, so headings and first cards line up.
-constexpr float kInset = 60.0f;
+inline float inset() { return platform_ui::sideInset(); }
 // Card widths. A poster is 2:3, a Continue card 16:9.
-constexpr float kPosterW = 150.0f;
-constexpr float kWideW   = 260.0f;
-constexpr float kHeroH   = 236.0f;
+inline float posterWidth()
+{
+    return (platform_ui::isMobile() && platform_ui::isPortrait()) ? 156.0f : 150.0f;
+}
+inline float wideWidth()
+{
+    return (platform_ui::isMobile() && platform_ui::isPortrait()) ? 240.0f : 260.0f;
+}
+inline float heroHeight()
+{
+    return (platform_ui::isMobile() && platform_ui::isPortrait()) ? 216.0f : 236.0f;
+}
 // The strips are taller than their cards: the focus glow is drawn outside the
 // card and the frame clips to itself.
 constexpr float kGlow = 22.0f;
@@ -81,7 +91,7 @@ std::string smallBackdrop(std::string url)
 
 brls::Box* catalogCard(const content::Item& it, std::shared_ptr<bool> alive)
 {
-    return catalogPoster(it, alive, kPosterW);
+    return catalogPoster(it, alive, posterWidth());
 }
 
 // The rows of each view: what the header says and where the titles come from.
@@ -374,7 +384,7 @@ class HomeRoot : public brls::Box
         auto* head = new brls::Box();
         head->setAxis(brls::Axis::ROW);
         head->setAlignItems(brls::AlignItems::FLEX_END);
-        auto* h = ui::heading(title, kInset);
+        auto* h = ui::heading(title, inset());
         head->addView(h);
 
         auto* moreBtn = new MoreButton(std::string(tr("See all")) + "  >",
@@ -390,9 +400,9 @@ class HomeRoot : public brls::Box
         moreBtn->setTargetRow(row);
 
         auto* wait = textLabel(tr("Loading..."), 17.0f, theme::textMuted());
-        wait->setMarginLeft(kInset);
+        wait->setMarginLeft(inset());
         row->addView(wait);
-        list->addView(ui::strip(row, kPosterW * 1.5f + kGlow));
+        list->addView(ui::strip(row, posterWidth() * 1.5f + kGlow));
         if (!firstRow)
         {
             firstRow     = row;
@@ -410,7 +420,7 @@ class HomeRoot : public brls::Box
         {
             auto* l = textLabel(r.ok ? tr("Nothing here") : r.error, 17.0f,
                                 r.ok ? theme::textMuted() : theme::textWarn());
-            l->setMarginLeft(kInset);
+            l->setMarginLeft(inset());
             row->addView(l);
             return;
         }
@@ -419,7 +429,7 @@ class HomeRoot : public brls::Box
         for (const auto& it : r.items)
         {
             auto* card = catalogCard(it, alive);
-            if (row->getChildren().empty()) card->setMarginLeft(kInset);
+            if (row->getChildren().empty()) card->setMarginLeft(inset());
             card->registerAction(
                 tr("See all"), brls::BUTTON_X,
                 [title, q](brls::View*) {
@@ -430,7 +440,7 @@ class HomeRoot : public brls::Box
             row->addView(card);
         }
         // The rest of the collection, one press past the last poster.
-        row->addView(ui::moreTile(tr("See all"), kPosterW,
+        row->addView(ui::moreTile(tr("See all"), posterWidth(),
                                   [title, q]() { openCollection(title, q); }));
 
         if (row == firstRow && (hadFocusOnMore || !brls::Application::getCurrentFocus()))
@@ -445,9 +455,12 @@ class HomeRoot : public brls::Box
     void buildHero(const content::Item& it)
     {
         if (!hero) return;
+        float ins     = inset();
+        bool mobile   = platform_ui::isMobile();
+        bool portrait = platform_ui::isPortrait();
         hero->setVisibility(brls::Visibility::VISIBLE);
-        hero->setHeight(kHeroH);
-        hero->setMargins(0.0f, kInset, 6.0f, kInset);
+        hero->setHeight(heroHeight());
+        hero->setMargins(0.0f, ins, 6.0f, ins);
         hero->setCornerRadius(14.0f);
         hero->setAxis(brls::Axis::COLUMN);
         hero->setJustifyContent(brls::JustifyContent::FLEX_END);
@@ -475,10 +488,13 @@ class HomeRoot : public brls::Box
 
         auto* text = new brls::Box();
         text->setAxis(brls::Axis::COLUMN);
-        text->setPadding(0.0f, 28.0f, 24.0f, 28.0f);
+        text->setPadding(0.0f, mobile && portrait ? 20.0f : 28.0f,
+                         mobile && portrait ? 20.0f : 24.0f,
+                         mobile && portrait ? 20.0f : 28.0f);
         text->setMaxWidth(620.0f);
 
-        auto* title = textLabel(it.title, 34.0f, nvgRGBA(255, 255, 255, 255));
+        auto* title = textLabel(it.title, mobile && portrait ? 26.0f : 34.0f,
+                                nvgRGBA(255, 255, 255, 255));
         title->setSingleLine(true);
         text->addView(title);
         auto* meta = textLabel(heroMeta(it), 16.0f, nvgRGBA(255, 255, 255, 200));
@@ -514,10 +530,10 @@ class HomeRoot : public brls::Box
 
     void addContinueSection()
     {
-        auto* h = ui::heading(tr("Continue watching"), kInset);
+        auto* h = ui::heading(tr("Continue watching"), inset());
         list->addView(h);
         continueRow = new brls::Box();
-        brls::View* strip = ui::strip(continueRow, kWideW * 9.0f / 16.0f + kGlow);
+        brls::View* strip = ui::strip(continueRow, wideWidth() * 9.0f / 16.0f + kGlow);
         list->addView(strip);
         continueSection[0] = h;
         continueSection[1] = strip;
@@ -599,13 +615,13 @@ class HomeRoot : public brls::Box
                                       next.kind == library::Next::Kind::Resume ? next.progress
                                                                                : -1.0,
                                       continueAlive, [copy]() { continueContent(copy); },
-                                      kWideW);
+                                      wideWidth());
             std::string key = e.key();
             card->registerAction(tr("Remove"), brls::BUTTON_X, [key](brls::View*) {
                 library::dismissContinue(key);
                 return true;
             });
-            if (continueRow->getChildren().empty()) card->setMarginLeft(kInset);
+            if (continueRow->getChildren().empty()) card->setMarginLeft(inset());
             continueRow->addView(card);
             n++;
         }
@@ -632,13 +648,13 @@ class HomeRoot : public brls::Box
                                                               copy.fileIndex, w,
                                                               copy.sourceType);
                                       },
-                                      kWideW);
+                                      wideWidth());
             std::string id = it.id;
             card->registerAction(tr("Remove"), brls::BUTTON_X, [id](brls::View*) {
                 history::remove(id);
                 return true;
             });
-            if (continueRow->getChildren().empty()) card->setMarginLeft(kInset);
+            if (continueRow->getChildren().empty()) card->setMarginLeft(inset());
             continueRow->addView(card);
             n++;
         }
@@ -650,9 +666,10 @@ class HomeRoot : public brls::Box
 
     void addSetupNote()
     {
+        float ins = inset();
         auto* box = new brls::Box();
         box->setAxis(brls::Axis::COLUMN);
-        box->setMargins(24.0f, kInset, 0.0f, kInset);
+        box->setMargins(24.0f, ins, 0.0f, ins);
         box->setPadding(24.0f, 28.0f, 24.0f, 28.0f);
         box->setCornerRadius(14.0f);
         box->setBackgroundColor(theme::scrim(20));

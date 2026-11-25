@@ -8,10 +8,25 @@
 #include "borealis/views/dropdown.hpp"
 
 #include "borealis/core/application.hpp"
+#include "borealis/core/touch/tap_gesture.hpp"
+#include "borealis/views/button.hpp"
 #include "borealis/views/cells/cell_radio.hpp"
 
 namespace brls
 {
+
+namespace
+{
+class DropdownCloseIcon : public Label
+{
+  public:
+    DropdownCloseIcon()
+    {
+        int f = Application::getFont(FONT_MATERIAL_ICONS);
+        if (f >= 0) this->font = f;
+    }
+};
+} // namespace
 
 const std::string dropdownFrameXML = R"xml(
 <brls:Box
@@ -135,11 +150,57 @@ Dropdown::Dropdown(std::string title, std::vector<std::string> values, ValueSele
     // covered only the left of the screen, and the 232px side padding left a
     // narrow column that cut long names (audio tracks, subtitles) short.
     this->setWidth(Application::contentWidth);
-    float sides = Application::contentWidth * 0.08f;
-    if (sides < 32.0f)
-        sides = 32.0f;
+    float sides = Application::contentWidth <= 760.0f
+        ? 20.0f
+        : std::max(32.0f, Application::contentWidth * 0.08f);
     recycler->setPaddingLeft(sides);
     recycler->setPaddingRight(sides);
+
+    if (AppletFrame::HIDE_BOTTOM_BAR)
+    {
+        if (Application::contentWidth <= 760.0f)
+        {
+            header->setMargins(0.0f, 12.0f, 0.0f, 12.0f);
+            header->setPadding(0.0f, 12.0f, 0.0f, 16.0f);
+        }
+        header->setJustifyContent(JustifyContent::SPACE_BETWEEN);
+        header->setAlignItems(AlignItems::CENTER);
+        this->title->setGrow(1.0f);
+        this->title->setShrink(1.0f);
+        this->title->setSingleLine(true);
+        this->title->setMarginTop(0.0f);
+
+        auto* closeBtn = new Button();
+        closeBtn->setStyle(&BUTTONSTYLE_BORDERLESS);
+        closeBtn->setDimensions(44.0f, 44.0f);
+        closeBtn->setCornerRadius(22.0f);
+        closeBtn->setPadding(0.0f);
+        closeBtn->setShrink(0.0f);
+        closeBtn->setJustifyContent(JustifyContent::CENTER);
+        closeBtn->setAlignItems(AlignItems::CENTER);
+        closeBtn->setBackgroundColor(Application::getTheme()["brls/sidebar/background"]);
+        if (auto* stockLbl = closeBtn->getView("brls/button/label"))
+            stockLbl->setVisibility(Visibility::GONE);
+        auto* closeIc = new DropdownCloseIcon();
+        closeIc->setText("\xEE\x97\x8D");
+        closeIc->setFontSize(22.0f);
+        closeIc->setDimensions(24.0f, 24.0f);
+        closeIc->setMargins(2.0f, 0.0f, 0.0f, 0.0f);
+        closeIc->setHorizontalAlign(HorizontalAlign::CENTER);
+        closeIc->setVerticalAlign(VerticalAlign::CENTER);
+        closeIc->setTextColor(Application::getTheme()["brls/text"]);
+        closeBtn->addView(closeIc, 0);
+        closeBtn->registerClickAction([this](View*) {
+            this->dismiss();
+            return true;
+        });
+        header->addView(closeBtn);
+
+        this->addGestureRecognizer(new TapGestureRecognizer([this](TapGestureStatus status, Sound*) {
+            if (status.state == GestureState::END && status.position.y < this->content->getY())
+                this->dismiss();
+        }));
+    }
 }
 
 int Dropdown::numberOfRows(RecyclerFrame* recycler, int section)

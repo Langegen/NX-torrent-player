@@ -306,6 +306,153 @@ static void test_russian_first()
     std::printf("      PASSED\n");
 }
 
+static void test_jacred_formats_and_profiles()
+{
+    std::printf("[9/9] Jacred formats, enrichment, diacritics, anti-noise, profiles...\n");
+
+    // 1. All Russian season/episode formats that previously broke.
+    auto f1 = release::parse("Фоллаут (2 сезон: 1-8 серии из 8) / Fallout / 2025 / ПМ (Jaskier), СТ / WEB-DL (1080p)");
+    CHECK(f1.season == 2 && f1.seasonTo == 2 && f1.episode == 1 && f1.episodeTo == 8 && f1.fullSeason);
+    CHECK(f1.hasSeason(2) && !f1.hasSeason(1));
+
+    auto f2 = release::parse("Во все тяжкие (1-5 сезоны: 1-62 серии из 62) / Breaking Bad / 2008-2013 / АП (Пучков)");
+    CHECK(f2.season == 1 && f2.seasonTo == 5 && f2.episode == 1 && f2.episodeTo == 62 && f2.fullSeason);
+    CHECK(f2.hasSeason(1) && f2.hasSeason(3) && f2.hasSeason(5) && !f2.hasSeason(6));
+
+    auto f3 = release::parse("Во все тяжкие 1-5 сезон (1-62 из 62) / Breaking Bad (2008-2013) BDRip | AV1 | 4К");
+    CHECK(f3.season == 1 && f3.seasonTo == 5 && f3.fullSeason && f3.height == 2160 && f3.codec == "AV1");
+
+    auto f4 = release::parse("Во все тяжкие / Breaking Bad / 1 сезон / Серии 1-7 (7) [2008, WEB-DL 1080p]");
+    CHECK(f4.season == 1 && f4.seasonTo == 1 && f4.episode == 1 && f4.episodeTo == 7 && f4.fullSeason);
+
+    auto f5 = release::parse("Во все тяжкие (1 сезон: 7 серий из 7) / Breaking Bad / 2008 / ПМ (LostFilm)");
+    CHECK(f5.season == 1 && f5.seasonTo == 1 && f5.episode == 1 && f5.episodeTo == 7 && f5.fullSeason);
+
+    auto f6 = release::parse("Fallout / Fallout / 1 сезон 8 серия [2024]");
+    CHECK(f6.season == 1 && f6.seasonTo == 1 && f6.episode == 8 && f6.episodeTo == 8 && !f6.fullSeason);
+
+    auto f7 = release::parse("Слово пацана. Кровь на асфальте [01x01-08 из 08] (2023) WEB-DL 1080p");
+    CHECK(f7.season == 1 && f7.seasonTo == 1 && f7.episode == 1 && f7.episodeTo == 8 && f7.fullSeason);
+
+    auto f8 = release::parse("Поднятие уровня в одиночку: Восстаньте из тени (ТВ-2) / Ore dake Level Up na Ken");
+    CHECK(f8.season == 2 && f8.seasonTo == 2 && f8.fullSeason);
+
+    // 2. Diacritic folding in titleMatches.
+    CHECK(release::titleMatches("Сёгун (1 сезон) / Shôgun (2024) WEB-DL 1080p", { "Сёгун", "Shōgun" }));
+    CHECK(release::titleMatches("Shogun.2024.S01.1080p.WEB-DL", { "Сёгун", "Shōgun" }));
+    CHECK(release::titleMatches("Сегун / Shogun / 1 сезон", { "Сёгун", "Shōgun" }));
+
+    // 3. Jacred metadata enrichment (voices, languages, HDR, seasons without clobbering S01-S05).
+    auto bare = release::parse("Фоллаут / Fallout / 2024 / WEB-DL");
+    CHECK(!bare.russian && bare.height == 0 && !bare.hasAnySeason());
+    release::ExternalMeta m;
+    m.quality = 2160;
+    m.videotype = "hdr";
+    m.voices = { "Red Head Sound", "Субтитры", "Две дорожки" };
+    m.seasons = { 1 };
+    m.languages = { "rus", "eng" };
+    release::enrich(bare, m);
+    CHECK(bare.height == 2160 && bare.hdr && bare.russian);
+    CHECK(bare.season == 1 && bare.fullSeason && bare.hasSeason(1));
+    CHECK(hasVoice(bare, "RHS"));
+    CHECK(!hasVoice(bare, "Субтитры") && !hasVoice(bare, "Две дорожки"));
+
+    // Narrow Jacred seasons=[1] must not shrink S01-S05 parsed from title.
+    release::ExternalMeta narrow;
+    narrow.seasons = { 1 };
+    release::enrich(f2, narrow);
+    CHECK(f2.hasSeason(1) && f2.hasSeason(5));
+
+    // 4. Anti-noise filter: rejects games/audio/books, keeps video REPACKs & anime FLACs.
+    CHECK(release::isNonVideo("Fallout 3 (2009) [Ru/Multi] Repack FitGirl [Game of the Year Edition]"));
+    CHECK(release::isNonVideo("The Last of Us Part II (2020) [PS4] [EUR] License"));
+    CHECK(release::isNonVideo("Fallout.OST.FLAC"));
+    CHECK(release::isNonVideo("Some Movie", { 4000 }, {}));
+    CHECK(!release::isNonVideo("Fallout.S01E01.REPACK.1080p.WEB-DL.H264-FLUX", { 5000 }, { "serial" }));
+    CHECK(!release::isNonVideo("[Breeze] Solo Leveling S01 v2 [1080p BD FLAC][Dual Audio].mkv"));
+
+    // 5. Series episode logic: season pack > ongoing range > single episode; wrong single episode -1000.
+    release::Want wantEp;
+    wantEp.series = true;
+    wantEp.season = 1;
+    wantEp.episode = 1;
+    wantEp.preferRussian = true;
+    CHECK(release::score(f1, 200, 0, wantEp) < 0); // season 2 rejected when wanting S1
+    CHECK(release::score(f6, 200, 0, wantEp) < 0); // single ep 8 rejected when wanting E1
+    auto partial = release::parse("Фоллаут (1 сезон: 1-4 серии) / Fallout / 2024 / ПМ (Jaskier) / WEB-DL (1080p)");
+    CHECK(release::score(partial, 100, 0, wantEp) > 0);
+    auto full1 = release::parse("Фоллаут (1 сезон: 1-8 серии из 8) / Fallout / 2024 / ПМ (Jaskier) / WEB-DL (1080p)");
+    auto ep1Only = release::parse("Фоллаут (1 сезон: 1 серия) / Fallout / 2024 / ПМ (Jaskier) / WEB-DL (1080p)");
+    CHECK(release::score(full1, 100, 0, wantEp) > release::score(ep1Only, 100, 0, wantEp));
+
+    // 6. Platform profiles (Switch vs PC/Android) and CAMRip/dead handling.
+    release::Want sw, pc;
+    sw.switchProfile = true;
+    pc.switchProfile = false;
+    auto r1080 = release::parse("Film.2024.1080p.WEB-DL.H264");
+    auto r4k   = release::parse("Film.2024.2160p.WEB-DL.HDR.HEVC.10bit");
+    auto r720  = release::parse("Film.2024.720p.WEB-DL.H264");
+    CHECK(release::score(r1080, 100, 5LL << 30, sw) > release::score(r4k, 100, 20LL << 30, sw));
+    CHECK(release::score(r4k, 100, 20LL << 30, pc) > release::score(r720, 100, 3LL << 30, pc));
+
+    auto cam = release::parse("Film.2026.CAMRip");
+    CHECK(cam.cam && release::score(cam, 500, 1LL << 30, pc) == -200);
+
+    // Unknown seeders beats confirmed 0 seeders.
+    auto unk = bare;
+    unk.seedersUnknown = true;
+    CHECK(release::score(unk, 0, 0, sw) > release::score(bare, 0, 0, sw));
+
+    // "Мультиязычная" / "Субтитры" in info.voices without Russian language tag
+    // must NOT falsely flag English anime torrents as Russian dubs.
+    auto enMulti = release::parse("[ToonsHub] Solo Leveling S01 1080p CR WEB-DL (Multi-Audio, Multi-Subs)");
+    release::ExternalMeta enMeta;
+    enMeta.quality   = 1080;
+    enMeta.voices    = { "\xD0\x9C\xD1\x83\xD0\xBB\xD1\x8C\xD1\x82\xD0\xB8\xD1\x8F\xD0\xB7\xD1\x8B\xD1\x87\xD0\xBD\xD0\xB0\xD1\x8F",
+                         "\xD0\xA1\xD1\x83\xD0\xB1\xD1\x82\xD0\xB8\xD1\x82\xD1\x80\xD1\x8B",
+                         "Multi-Audio",
+                         "Dual Audio" };
+    release::enrich(enMulti, enMeta);
+    CHECK(!enMulti.russian && enMulti.voices.empty());
+
+    // Generic "Дубляж" on foreign trackers without Russian language tag must not
+    // mark English dubs ("Eng/Jp Dub" on knaben/nyaa) as Russian, while Russian
+    // trackers (rutor) keep it.
+    auto knabenDub = release::parse("Solo Leveling - S01 - 2160p HDR Ai Upscale 5.1+2.0 Eng/Jp Dub MKV -Mesc");
+    release::ExternalMeta knMeta;
+    knMeta.quality  = 2160;
+    knMeta.voices   = { "\xD0\x94\xD1\x83\xD0\xB1\xD0\xBB\xD1\x8F\xD0\xB6" };
+    knMeta.trackers = { "knaben" };
+    release::enrich(knabenDub, knMeta);
+    CHECK(!knabenDub.russian && knabenDub.voices.empty());
+
+    // Even when Jacred also passes languages={"eng","rus"} (e.g. softsubs) on a foreign
+    // tracker, generic "Дубляж" without Russian title context must not grant voiceRank=4.
+    auto knabenSub = release::parse("Solo Leveling - S01 - 2160p HDR Ai Upscale 5.1+2.0 Eng/Jp Dub MKV -Mesc");
+    knMeta.languages = { "eng", "rus" };
+    release::enrich(knabenSub, knMeta);
+    CHECK(knabenSub.voices.empty() && knabenSub.voiceRank == 0);
+
+    auto rutorDub = release::parse("1+1 / Intouchables (2011) BDRip-AVC by msltel");
+    release::ExternalMeta rtMeta;
+    rtMeta.voices   = { "\xD0\x94\xD1\x83\xD0\xB1\xD0\xBB\xD1\x8F\xD0\xB6" };
+    rtMeta.trackers = { "rutor" };
+    release::enrich(rutorDub, rtMeta);
+    CHECK(rutorDub.russian && rutorDub.voices.size() == 1 && rutorDub.voiceRank == 4);
+
+    // Season pack size is evaluated per-episode, so a 48 GB 8-episode 1080p
+    // Russian season pack (~6 GB/ep) with 180 seeds beats a 15 GB 8-ep 30-seed pack on Switch.
+    wantEp.switchProfile = true;
+    wantEp.preferRussian = true;
+    auto bigPack = release::parse("Фоллаут (1 сезон: 1-8 серии из 8) / Fallout / 2024 / ПМ (Jaskier) / WEB-DL (1080p)");
+    auto smallPack = release::parse("Фоллаут (1 сезон: 1-8 серии из 8) / Fallout / 2024 / ПМ (Jaskier) / WEB-DL (1080p)");
+    CHECK(release::packEpisodeEstimate(bigPack) == 8);
+    CHECK(release::score(bigPack, 180, 48LL << 30, wantEp) >
+          release::score(smallPack, 30, 15LL << 30, wantEp));
+
+    std::printf("      PASSED\n");
+}
+
 int main()
 {
     std::printf("=========================================\n");
@@ -319,6 +466,7 @@ int main()
     test_edges();
     test_title_match();
     test_russian_first();
+    test_jacred_formats_and_profiles();
     std::printf("\nALL TESTS PASSED\n");
     return 0;
 }
