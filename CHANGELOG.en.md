@@ -8,7 +8,7 @@ lists only, no headings or emphasis.
 
 ## 1.3 — 25 November 2026
 
-Overhauled torrent search and Switch codec compatibility ranking (AV1 and Hi10P protection), playback freeze and artifact fixes, double-tap seeking, cloud sync via WebDAV and Google Drive, plus Android and LG webOS TV support.
+Overhauled torrent search and Switch codec compatibility ranking (AV1 and Hi10P protection), playback freeze and artifact fixes, and double-tap seeking.
 
 Torrents, Search & Switch Compatibility
 - Fixed Russian season and episode title parsing (e.g. "5 сезон: 1-22 серии" no longer misparses the season) and added Jacred metadata enrichment (seasons, voice-overs, languages, trackers, btih).
@@ -21,10 +21,6 @@ Player & Picture
 - Fixed grey frames, chroma corruption, and playback freezes: enabled strict SHA-1 verification in RAM streaming, applet-mode RAM protection, cache-pause rebuffering on slow swarms, non-blocking libmpv rendering, 3-thread software decode cap on Switch, and a live hardware decoding toggle in the player Video settings.
 - Atomic color shader replacement (saturation and RGB calibration no longer stack) and blocked background seeking while settings overlays are open.
 - Added double-tap-to-seek (-/+10 s on left and right screen zones with rapid tap chaining).
-
-Cloud Sync & New Platforms
-- Added two-way cloud sync for watch history and bookmarks via WebDAV (Yandex Disk, Mail.ru Cloud, Nextcloud) and Google Drive (QR code OAuth Device Flow).
-- Added Android universal APK support (mobile touch UI and Android TV) and LG webOS TV client (with Magic Remote and TorrServer support).
 
 ## 1.2 — 20 November 2026
 
