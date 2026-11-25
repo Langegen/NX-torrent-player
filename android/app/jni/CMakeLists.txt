@@ -95,6 +95,8 @@ set(UPDATE_API_URL "https://api.github.com/repos/${UPDATE_REPO}/releases/latest"
 set(UPDATE_TAG_URL "https://api.github.com/repos/${UPDATE_REPO}/releases/tags/" CACHE STRING "")
 set(TMDB_API_KEY "8cf43ad9c085135b9479ad5cf6bbcbda" CACHE STRING "Default TMDB API key / read token")
 set(TMDB_PROXY_URL "" CACHE STRING "Default TMDB proxy URL")
+set(GDRIVE_CLIENT_ID "" CACHE STRING "Default Google Drive OAuth Client ID")
+set(GDRIVE_CLIENT_SECRET "" CACHE STRING "Default Google Drive OAuth Client Secret")
 
 add_library(curl STATIC IMPORTED)
 set_target_properties(curl PROPERTIES IMPORTED_LOCATION
@@ -114,11 +116,13 @@ program_target(${PROJECT_NAME} "${MAIN_SRC}")
 set_target_properties(${PROJECT_NAME} PROPERTIES CXX_STANDARD 17)
 
 target_compile_definitions(${PROJECT_NAME} PRIVATE
-    APP_VERSION="1.2"
+    APP_VERSION="1.3"
     UPDATE_API_URL="${UPDATE_API_URL}"
     UPDATE_TAG_URL="${UPDATE_TAG_URL}"
     TMDB_API_KEY="${TMDB_API_KEY}"
     TMDB_PROXY_URL="${TMDB_PROXY_URL}"
+    GDRIVE_CLIENT_ID="${GDRIVE_CLIENT_ID}"
+    GDRIVE_CLIENT_SECRET="${GDRIVE_CLIENT_SECRET}"
 )
 
 target_include_directories(${PROJECT_NAME} PRIVATE

@@ -630,6 +630,51 @@ brls::View* syncPane()
     auto* pane      = newPane(&list);
     config::Config& cfg = config::get();
 
+    auto trimWs = [](std::string s) {
+        while (!s.empty() && (s.back() == ' ' || s.back() == '\t' || s.back() == '\r' || s.back() == '\n'))
+            s.pop_back();
+        while (!s.empty() && (s.front() == ' ' || s.front() == '\t' || s.front() == '\r' || s.front() == '\n'))
+            s.erase(0, 1);
+        return s;
+    };
+
+    auto isDescendant = [](brls::View* v, brls::View* root) {
+        for (brls::View* cur = v; cur != nullptr; cur = cur->getParent())
+        {
+            if (cur == root) return true;
+        }
+        return false;
+    };
+
+    struct SyncPaneCtx
+    {
+        brls::Box* dynamicBox        = nullptr;
+        brls::SelectorCell* provCell = nullptr;
+        std::shared_ptr<bool> alive  = std::make_shared<bool>(true);
+        bool scheduled               = false;
+        bool hasNote                 = false;
+        std::string pendingNote;
+        std::function<void()> rebuild;
+    };
+
+    class SyncBox : public brls::Box
+    {
+      public:
+        explicit SyncBox(std::shared_ptr<SyncPaneCtx> c)
+            : brls::Box(brls::Axis::COLUMN), ctx(std::move(c))
+        {
+        }
+        ~SyncBox() override
+        {
+            if (ctx)
+            {
+                *ctx->alive  = false;
+                ctx->rebuild = nullptr;
+            }
+        }
+        std::shared_ptr<SyncPaneCtx> ctx;
+    };
+
     auto* hdr = new brls::Header();
     hdr->setTitle(tr("Cloud synchronization"));
     list->addView(hdr);
@@ -638,210 +683,385 @@ brls::View* syncPane()
     std::vector<std::string> providerLabels = { tr("Disabled"), "Google Drive", "WebDAV" };
     int curProvIdx = (cfg.syncProvider == "gdrive") ? 1 :
                      (cfg.syncProvider == "webdav") ? 2 : 0;
-    providerCell->init(tr("Service"), providerLabels, curProvIdx, [](int sel) {
-        config::get().syncProvider = (sel == 1) ? "gdrive" : (sel == 2) ? "webdav" : "none";
-        config::save();
-    });
-    list->addView(providerCell);
 
     auto* autoSync = new brls::BooleanCell();
     autoSync->init(tr("Automatic sync"), cfg.syncAuto, [](bool on) {
         config::get().syncAuto = on;
         config::save();
     });
+
+    auto ctx        = std::make_shared<SyncPaneCtx>();
+    auto* dynamicBox = new SyncBox(ctx);
+    ctx->dynamicBox = dynamicBox;
+    ctx->provCell   = providerCell;
+    auto live       = ctx->alive;
+
+    auto scheduleRebuild = [ctx, isDescendant](const std::string& noteMsg) {
+        if (!*ctx->alive) return;
+        if (!noteMsg.empty())
+        {
+            ctx->pendingNote = noteMsg;
+            ctx->hasNote     = true;
+        }
+        if (ctx->scheduled) return;
+        ctx->scheduled = true;
+
+        std::shared_ptr<std::function<void()>> pump = std::make_shared<std::function<void()>>();
+        std::weak_ptr<std::function<void()>> weakPump = pump;
+        *pump = [ctx, isDescendant, pump, weakPump]() {
+            if (!*ctx->alive)
+            {
+                *pump = nullptr;
+                return;
+            }
+            if (!ui::isOnTop(ctx->dynamicBox))
+            {
+                brls::delay(30, [weakPump]() {
+                    if (auto p = weakPump.lock()) (*p)();
+                });
+                return;
+            }
+            ctx->scheduled = false;
+
+            brls::View* cur = brls::Application::getCurrentFocus();
+            if (cur && isDescendant(cur, ctx->dynamicBox))
+                brls::Application::giveFocus(ctx->provCell);
+
+            ctx->dynamicBox->clearViews();
+            if (ctx->rebuild) ctx->rebuild();
+
+            if (ctx->hasNote)
+            {
+                std::string msg = std::move(ctx->pendingNote);
+                ctx->pendingNote.clear();
+                ctx->hasNote = false;
+                note(msg);
+            }
+            *pump = nullptr;
+        };
+
+        brls::sync([pump]() { (*pump)(); });
+    };
+
+    providerCell->init(
+        tr("Service"), providerLabels, curProvIdx,
+        [scheduleRebuild](int sel) {
+            config::get().syncProvider = (sel == 1) ? "gdrive" : (sel == 2) ? "webdav" : "none";
+            config::save();
+            scheduleRebuild("");
+        },
+        [scheduleRebuild](int) {
+            scheduleRebuild("");
+        });
+
+    list->addView(providerCell);
     list->addView(autoSync);
     list->addView(caption(tr("Sync bookmarks and history on startup and when finishing a video.")));
+    list->addView(dynamicBox);
 
-    if (cfg.syncProvider == "gdrive")
-    {
-        auto* ghdr = new brls::Header();
-        ghdr->setTitle("Google Drive");
-        list->addView(ghdr);
+    ctx->rebuild = [dynamicBox, live, trimWs, scheduleRebuild]() {
+        config::Config& c = config::get();
 
-        if (!cfg.syncGdriveRefreshToken.empty())
+        if (c.syncProvider == "gdrive")
         {
-            auto* accCell = new brls::DetailCell();
-            accCell->setText(tr("Account"));
-            accCell->setDetailText(cfg.syncGdriveUserEmail.empty() ? tr("Connected") : cfg.syncGdriveUserEmail);
-            list->addView(accCell);
+            auto* ghdr = new brls::Header();
+            ghdr->setTitle("Google Drive");
+            dynamicBox->addView(ghdr);
 
-            auto* logoutBtn = new brls::Button();
-            logoutBtn->setText(tr("Sign out"));
-            logoutBtn->setMargins(10.0f, 20.0f, 10.0f, 20.0f);
-            logoutBtn->registerClickAction([](brls::View*) {
-                cloud_sync::Manager::instance().gdriveProvider()->disconnect();
-                note(tr("Signed out of Google Drive"));
+            auto maskClientId = [](const std::string& id) -> std::string {
+                if (id.empty())
+                    return cloud_sync::GdriveProvider::hasBuiltinCredentials()
+                               ? tr("Built-in (default)")
+                               : tr("Not set");
+                if (id.size() <= 16) return id;
+                return id.substr(0, 8) + "..." + id.substr(id.size() - 8);
+            };
+            auto maskClientSecret = [](const std::string& sec) -> std::string {
+                if (sec.empty())
+                    return cloud_sync::GdriveProvider::hasBuiltinCredentials()
+                               ? tr("Built-in (default)")
+                               : tr("Not set");
+                return "********";
+            };
+
+            auto* clientIdCell = new brls::DetailCell();
+            clientIdCell->setText(tr("OAuth Client ID"));
+            clientIdCell->setDetailText(maskClientId(c.syncGdriveClientId));
+            clientIdCell->registerClickAction([clientIdCell, live, trimWs, maskClientId](brls::View*) {
+                brls::Application::getImeManager()->openForText(
+                    [clientIdCell, live, trimWs, maskClientId](std::string out) {
+                        out = trimWs(out);
+                        config::get().syncGdriveClientId = out;
+                        config::save();
+                        if (auto* gd = cloud_sync::Manager::instance().gdriveProvider())
+                            gd->clearCachedToken();
+                        if (*live)
+                            clientIdCell->setDetailText(maskClientId(out));
+                    },
+                    tr("OAuth Client ID"), "1234567890-xxxx.apps.googleusercontent.com", 256,
+                    config::get().syncGdriveClientId);
                 return true;
             });
-            list->addView(logoutBtn);
-        }
-        else
-        {
-            auto* loginBtn = new brls::Button();
-            loginBtn->setText(tr("Sign in to Google Drive"));
-            loginBtn->setMargins(14.0f, 20.0f, 14.0f, 20.0f);
-            loginBtn->registerClickAction([](brls::View*) {
-                cloud_sync::showGoogleAuthDialog([](bool ok) {
-                    if (ok)
+            dynamicBox->addView(clientIdCell);
+
+            auto* clientSecretCell = new brls::DetailCell();
+            clientSecretCell->setText(tr("OAuth Client Secret"));
+            clientSecretCell->setDetailText(maskClientSecret(c.syncGdriveClientSecret));
+            clientSecretCell->registerClickAction([clientSecretCell, live, trimWs, maskClientSecret](brls::View*) {
+                brls::Application::getImeManager()->openForText(
+                    [clientSecretCell, live, trimWs, maskClientSecret](std::string out) {
+                        out = trimWs(out);
+                        config::get().syncGdriveClientSecret = out;
+                        config::save();
+                        if (auto* gd = cloud_sync::Manager::instance().gdriveProvider())
+                            gd->clearCachedToken();
+                        if (*live)
+                            clientSecretCell->setDetailText(maskClientSecret(out));
+                    },
+                    tr("OAuth Client Secret"), "GOCSPX-...", 128,
+                    config::get().syncGdriveClientSecret);
+                return true;
+            });
+            dynamicBox->addView(clientSecretCell);
+
+            dynamicBox->addView(caption(tr(
+                "Create a free OAuth 2.0 Client ID (TVs and Limited Input devices) in Google Cloud Console with Google Drive API enabled.")));
+
+            if (!c.syncGdriveRefreshToken.empty())
+            {
+                auto* accCell = new brls::DetailCell();
+                accCell->setText(tr("Account"));
+                accCell->setDetailText(c.syncGdriveUserEmail.empty() ? tr("Connected") : c.syncGdriveUserEmail);
+                dynamicBox->addView(accCell);
+
+                auto* testBtn = new AsyncButton();
+                testBtn->setText(tr("Test connection"));
+                testBtn->setMargins(10.0f, 20.0f, 8.0f, 20.0f);
+                testBtn->registerClickAction([testBtn](brls::View*) {
+                    if (!cloud_sync::GdriveProvider::hasClientCredentials())
                     {
-                        note(tr("Google Drive connected successfully!"));
-                        cloud_sync::syncNow();
+                        note(tr("Enter OAuth Client ID and Client Secret first (Google Cloud Console: TVs and Limited Input devices)."));
+                        return true;
                     }
+                    testBtn->setState(brls::ButtonState::DISABLED);
+                    testBtn->setText(tr("Testing..."));
+                    cloud_sync::testGdriveAsync([testBtn, btnLive = testBtn->alive](bool ok, const std::string& err) {
+                        if (*btnLive)
+                        {
+                            testBtn->setState(brls::ButtonState::ENABLED);
+                            testBtn->setText(tr("Test connection"));
+                        }
+                        note(ok ? tr("Google Drive connection successful!") : tr("Connection failed: ") + err);
+                    });
+                    return true;
                 });
+                dynamicBox->addView(testBtn);
+
+                auto* logoutBtn = new brls::Button();
+                logoutBtn->setText(tr("Sign out"));
+                logoutBtn->setMargins(6.0f, 20.0f, 10.0f, 20.0f);
+                logoutBtn->registerClickAction([scheduleRebuild](brls::View*) {
+                    cloud_sync::Manager::instance().gdriveProvider()->disconnect();
+                    scheduleRebuild(tr("Signed out of Google Drive"));
+                    return true;
+                });
+                dynamicBox->addView(logoutBtn);
+            }
+            else
+            {
+                auto* loginBtn = new brls::Button();
+                loginBtn->setText(tr("Sign in to Google Drive"));
+                loginBtn->setMargins(10.0f, 20.0f, 10.0f, 20.0f);
+                loginBtn->registerClickAction([live, scheduleRebuild](brls::View*) {
+                    if (!cloud_sync::GdriveProvider::hasClientCredentials())
+                    {
+                        note(tr("Enter OAuth Client ID and Client Secret first (Google Cloud Console: TVs and Limited Input devices)."));
+                        return true;
+                    }
+                    cloud_sync::showGoogleAuthDialog([live, scheduleRebuild](bool ok) {
+                        if (!ok) return;
+                        if (*live)
+                            scheduleRebuild(tr("Google Drive connected successfully!"));
+                        else
+                            note(tr("Google Drive connected successfully!"));
+                        cloud_sync::syncNow([live, scheduleRebuild](bool, const std::string&) {
+                            if (*live) scheduleRebuild("");
+                        });
+                    });
+                    return true;
+                });
+                dynamicBox->addView(loginBtn);
+                dynamicBox->addView(caption(tr("Sign in with your phone or PC by scanning the QR code or entering the device code.")));
+            }
+        }
+        else if (c.syncProvider == "webdav")
+        {
+            auto* whdr = new brls::Header();
+            whdr->setTitle("WebDAV");
+            dynamicBox->addView(whdr);
+
+            auto* preset  = new brls::SelectorCell();
+            auto* urlCell = new brls::DetailCell();
+
+            std::vector<std::string> presets = { tr("Custom"), "Яндекс Диск", "Облако Mail.ru" };
+            int curPreset = (c.syncWebdavUrl == "https://webdav.yandex.ru") ? 1 :
+                            (c.syncWebdavUrl == "https://webdav.cloud.mail.ru") ? 2 : 0;
+            preset->init(tr("Preset"), presets, curPreset, [urlCell, live](int sel) {
+                if (sel == 1) config::get().syncWebdavUrl = "https://webdav.yandex.ru";
+                else if (sel == 2) config::get().syncWebdavUrl = "https://webdav.cloud.mail.ru";
+                config::save();
+                if (*live)
+                {
+                    const std::string& u = config::get().syncWebdavUrl;
+                    urlCell->setDetailText(u.empty() ? tr("Not set") : u);
+                }
+            });
+            dynamicBox->addView(preset);
+
+            urlCell->setText(tr("Server URL"));
+            urlCell->setDetailText(c.syncWebdavUrl.empty() ? tr("Not set") : c.syncWebdavUrl);
+            urlCell->registerClickAction([urlCell, preset, live](brls::View*) {
+                brls::Application::getImeManager()->openForText(
+                    [urlCell, preset, live](std::string out) {
+                        out = cloud_sync::WebdavProvider::normalizeUrl(out);
+                        config::get().syncWebdavUrl = out;
+                        config::save();
+                        if (*live)
+                        {
+                            urlCell->setDetailText(out.empty() ? tr("Not set") : out);
+                            int p = (out == "https://webdav.yandex.ru") ? 1 :
+                                    (out == "https://webdav.cloud.mail.ru") ? 2 : 0;
+                            preset->setSelection(p, true);
+                        }
+                    },
+                    tr("WebDAV Server URL"), "https://webdav.yandex.ru", 256,
+                    config::get().syncWebdavUrl);
                 return true;
             });
-            list->addView(loginBtn);
-            list->addView(caption(tr("Sign in with your phone or PC by scanning the QR code or entering the device code.")));
-        }
-    }
-    else if (cfg.syncProvider == "webdav")
-    {
-        auto* whdr = new brls::Header();
-        whdr->setTitle("WebDAV");
-        list->addView(whdr);
+            dynamicBox->addView(urlCell);
 
-        auto* preset = new brls::SelectorCell();
-        std::vector<std::string> presets = { tr("Custom"), "Яндекс Диск", "Облако Mail.ru" };
-        int curPreset = (cfg.syncWebdavUrl == "https://webdav.yandex.ru") ? 1 :
-                        (cfg.syncWebdavUrl == "https://webdav.cloud.mail.ru") ? 2 : 0;
-        preset->init(tr("Preset"), presets, curPreset, [](int sel) {
-            if (sel == 1) config::get().syncWebdavUrl = "https://webdav.yandex.ru";
-            else if (sel == 2) config::get().syncWebdavUrl = "https://webdav.cloud.mail.ru";
-            config::save();
-        });
-        list->addView(preset);
+            auto* userCell = new brls::DetailCell();
+            userCell->setText(tr("Username / Email"));
+            userCell->setDetailText(c.syncWebdavUser.empty() ? tr("Not set") : c.syncWebdavUser);
+            userCell->registerClickAction([userCell, live, trimWs](brls::View*) {
+                brls::Application::getImeManager()->openForText(
+                    [userCell, live, trimWs](std::string out) {
+                        out = trimWs(out);
+                        config::get().syncWebdavUser = out;
+                        config::save();
+                        if (*live)
+                            userCell->setDetailText(out.empty() ? tr("Not set") : out);
+                    },
+                    tr("Username / Email"), tr("Your cloud login"), 128,
+                    config::get().syncWebdavUser);
+                return true;
+            });
+            dynamicBox->addView(userCell);
 
-        auto* urlCell = new brls::DetailCell();
-        urlCell->setText(tr("Server URL"));
-        urlCell->setDetailText(cfg.syncWebdavUrl.empty() ? tr("Not set") : cfg.syncWebdavUrl);
-        urlCell->registerClickAction([urlCell](brls::View*) {
-            brls::Application::getImeManager()->openForText(
-                [urlCell](std::string out) {
-                    out = cloud_sync::WebdavProvider::normalizeUrl(out);
-                    config::get().syncWebdavUrl = out;
-                    config::save();
-                    urlCell->setDetailText(out.empty() ? tr("Not set") : out);
-                },
-                tr("WebDAV Server URL"), "https://webdav.yandex.ru", 256,
-                config::get().syncWebdavUrl);
-            return true;
-        });
-        list->addView(urlCell);
+            auto* passCell = new brls::DetailCell();
+            passCell->setText(tr("App password"));
+            passCell->setDetailText(c.syncWebdavPass.empty() ? tr("Not set") : "********");
+            passCell->registerClickAction([passCell, live, trimWs](brls::View*) {
+                brls::Application::getImeManager()->openForText(
+                    [passCell, live, trimWs](std::string out) {
+                        out = trimWs(out);
+                        config::get().syncWebdavPass = out;
+                        config::save();
+                        if (*live)
+                            passCell->setDetailText(out.empty() ? tr("Not set") : "********");
+                    },
+                    tr("App password / token"), tr("Generated in cloud security settings"), 128,
+                    config::get().syncWebdavPass);
+                return true;
+            });
+            dynamicBox->addView(passCell);
+            dynamicBox->addView(caption(tr("For Yandex Disk or Mail.ru, create and use an App Password.")));
 
-        auto* userCell = new brls::DetailCell();
-        userCell->setText(tr("Username / Email"));
-        userCell->setDetailText(cfg.syncWebdavUser.empty() ? tr("Not set") : cfg.syncWebdavUser);
-        userCell->registerClickAction([userCell](brls::View*) {
-            brls::Application::getImeManager()->openForText(
-                [userCell](std::string out) {
-                    while (!out.empty() && out.back() == ' ') out.pop_back();
-                    while (!out.empty() && out.front() == ' ') out.erase(0, 1);
-                    config::get().syncWebdavUser = out;
-                    config::save();
-                    userCell->setDetailText(out.empty() ? tr("Not set") : out);
-                },
-                tr("Username / Email"), tr("Your cloud login"), 128,
-                config::get().syncWebdavUser);
-            return true;
-        });
-        list->addView(userCell);
-
-        auto* passCell = new brls::DetailCell();
-        passCell->setText(tr("App password"));
-        passCell->setDetailText(cfg.syncWebdavPass.empty() ? tr("Not set") : "********");
-        passCell->registerClickAction([passCell](brls::View*) {
-            brls::Application::getImeManager()->openForText(
-                [passCell](std::string out) {
-                    while (!out.empty() && out.back() == ' ') out.pop_back();
-                    while (!out.empty() && out.front() == ' ') out.erase(0, 1);
-                    config::get().syncWebdavPass = out;
-                    config::save();
-                    passCell->setDetailText(out.empty() ? tr("Not set") : "********");
-                },
-                tr("App password / token"), tr("Generated in cloud security settings"), 128,
-                config::get().syncWebdavPass);
-            return true;
-        });
-        list->addView(passCell);
-        list->addView(caption(tr("For Yandex Disk or Mail.ru, create and use an App Password.")));
-
-        auto* testBtn = new AsyncButton();
-        testBtn->setText(tr("Test connection"));
-        testBtn->setMargins(12.0f, 20.0f, 12.0f, 20.0f);
-        testBtn->registerClickAction([testBtn](brls::View*) {
-            testBtn->setState(brls::ButtonState::DISABLED);
-            testBtn->setText(tr("Testing..."));
-            std::thread([testBtn, live = testBtn->alive]() {
-                std::string err;
-                bool ok = cloud_sync::Manager::instance().webdavProvider()->testConnection(err);
-                brls::sync([testBtn, live, ok, err]() {
-                    if (*live)
+            auto* testBtn = new AsyncButton();
+            testBtn->setText(tr("Test connection"));
+            testBtn->setMargins(12.0f, 20.0f, 12.0f, 20.0f);
+            testBtn->registerClickAction([testBtn](brls::View*) {
+                if (!cloud_sync::WebdavProvider::snapshotConfig().valid())
+                {
+                    note(tr("WebDAV credentials not set"));
+                    return true;
+                }
+                testBtn->setState(brls::ButtonState::DISABLED);
+                testBtn->setText(tr("Testing..."));
+                cloud_sync::testWebdavAsync([testBtn, btnLive = testBtn->alive](bool ok, const std::string& err) {
+                    if (*btnLive)
                     {
                         testBtn->setState(brls::ButtonState::ENABLED);
                         testBtn->setText(tr("Test connection"));
                     }
                     note(ok ? tr("WebDAV connection successful!") : tr("Connection failed: ") + err);
                 });
-            }).detach();
-            return true;
-        });
-        list->addView(testBtn);
-    }
-
-    if (cfg.syncProvider != "none")
-    {
-        auto* shdr = new brls::Header();
-        shdr->setTitle(tr("Actions & Status"));
-        list->addView(shdr);
-
-        auto* timeCell = new brls::DetailCell();
-        timeCell->setText(tr("Last synced"));
-        if (cfg.syncLastTime > 0)
-        {
-            char buf[64];
-            std::time_t t = (std::time_t)cfg.syncLastTime;
-            std::strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M", std::localtime(&t));
-            timeCell->setDetailText(buf);
-        }
-        else
-        {
-            timeCell->setDetailText(tr("Never"));
-        }
-        list->addView(timeCell);
-
-        if (!cfg.syncLastError.empty())
-        {
-            auto* errCell = new brls::DetailCell();
-            errCell->setText(tr("Last error"));
-            errCell->setDetailText(cfg.syncLastError);
-            list->addView(errCell);
-        }
-
-        auto* syncBtn = new AsyncButton();
-        syncBtn->setText(tr("Sync now"));
-        syncBtn->setMargins(14.0f, 20.0f, 20.0f, 20.0f);
-        syncBtn->registerClickAction([syncBtn, timeCell](brls::View*) {
-            syncBtn->setState(brls::ButtonState::DISABLED);
-            syncBtn->setText(tr("Syncing..."));
-            cloud_sync::syncNow([syncBtn, timeCell, live = syncBtn->alive](bool ok, const std::string& msg) {
-                if (*live)
-                {
-                    syncBtn->setState(brls::ButtonState::ENABLED);
-                    syncBtn->setText(tr("Sync now"));
-                    if (ok)
-                    {
-                        char buf[64];
-                        std::time_t t = (std::time_t)config::get().syncLastTime;
-                        std::strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M", std::localtime(&t));
-                        timeCell->setDetailText(buf);
-                    }
-                }
-                note(ok ? tr("Synchronization complete!") : tr("Sync failed: ") + msg);
+                return true;
             });
-            return true;
-        });
-        list->addView(syncBtn);
-    }
+            dynamicBox->addView(testBtn);
+        }
+
+        if (c.syncProvider != "none")
+        {
+            auto* shdr = new brls::Header();
+            shdr->setTitle(tr("Actions & Status"));
+            dynamicBox->addView(shdr);
+
+            auto* timeCell = new brls::DetailCell();
+            timeCell->setText(tr("Last synced"));
+            if (c.syncLastTime > 0)
+            {
+                char buf[64];
+                std::time_t t = (std::time_t)c.syncLastTime;
+                if (std::tm* tm = std::localtime(&t))
+                {
+                    std::strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M", tm);
+                    timeCell->setDetailText(buf);
+                }
+                else
+                {
+                    timeCell->setDetailText(tr("Never"));
+                }
+            }
+            else
+            {
+                timeCell->setDetailText(tr("Never"));
+            }
+            dynamicBox->addView(timeCell);
+
+            if (!c.syncLastError.empty())
+            {
+                auto* errCell = new brls::DetailCell();
+                errCell->setText(tr("Last error"));
+                errCell->setDetailText(c.syncLastError);
+                dynamicBox->addView(errCell);
+            }
+
+            auto* syncBtn = new AsyncButton();
+            syncBtn->setText(tr("Sync now"));
+            syncBtn->setMargins(14.0f, 20.0f, 20.0f, 20.0f);
+            syncBtn->registerClickAction([syncBtn, live, scheduleRebuild](brls::View*) {
+                syncBtn->setState(brls::ButtonState::DISABLED);
+                syncBtn->setText(tr("Syncing..."));
+                cloud_sync::syncNow([syncBtn, btnLive = syncBtn->alive, live, scheduleRebuild](bool ok, const std::string& msg) {
+                    std::string resultMsg = ok ? tr("Synchronization complete!") : tr("Sync failed: ") + msg;
+                    if (*btnLive)
+                    {
+                        syncBtn->setState(brls::ButtonState::ENABLED);
+                        syncBtn->setText(tr("Sync now"));
+                    }
+                    if (*live)
+                        scheduleRebuild(resultMsg);
+                    else
+                        note(resultMsg);
+                });
+                return true;
+            });
+            dynamicBox->addView(syncBtn);
+        }
+    };
+
+    ctx->rebuild();
 
     return pane;
 }

@@ -481,6 +481,8 @@ std::string urlEncode(const std::string& s)
 bool request(const std::string& url, const RequestOptions& opt, std::string& resp,
              std::string& err, long* status)
 {
+    if (status) *status = 0;
+    resp.clear();
     CURL* curl = threadHandle();
     if (!curl)
     {
@@ -493,6 +495,8 @@ bool request(const std::string& url, const RequestOptions& opt, std::string& res
 
     if (!opt.contentType.empty())
         hdrs = curl_slist_append(hdrs, ("Content-Type: " + opt.contentType).c_str());
+    if (opt.method == "POST" || opt.method == "PUT" || opt.method == "PATCH")
+        hdrs = curl_slist_append(hdrs, "Expect:");
     for (const auto& h : opt.headers)
         hdrs = curl_slist_append(hdrs, h.c_str());
 
@@ -527,7 +531,13 @@ bool request(const std::string& url, const RequestOptions& opt, std::string& res
         curl_easy_setopt(curl, CURLOPT_HTTPGET, 1L);
     }
 
-    if (!opt.userPwd.empty())
+    if (!opt.username.empty() || !opt.password.empty())
+    {
+        curl_easy_setopt(curl, CURLOPT_HTTPAUTH, CURLAUTH_BASIC);
+        curl_easy_setopt(curl, CURLOPT_USERNAME, opt.username.c_str());
+        curl_easy_setopt(curl, CURLOPT_PASSWORD, opt.password.c_str());
+    }
+    else if (!opt.userPwd.empty())
     {
         curl_easy_setopt(curl, CURLOPT_HTTPAUTH, CURLAUTH_BASIC);
         curl_easy_setopt(curl, CURLOPT_USERPWD, opt.userPwd.c_str());
@@ -550,6 +560,12 @@ bool request(const std::string& url, const RequestOptions& opt, std::string& res
         curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &s);
         *status = s;
     }
+
+    // Clear stack/transient pointers on the reused thread-local CURL handle.
+    curl_easy_setopt(curl, CURLOPT_ERRORBUFFER, nullptr);
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, nullptr);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, nullptr);
+    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, nullptr);
 
     if (rc != CURLE_OK)
     {

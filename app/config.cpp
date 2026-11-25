@@ -12,6 +12,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <mutex>
 #include <string>
 
 #include "appdata.hpp"
@@ -27,6 +28,7 @@ namespace
 constexpr const char* kPath = APPDATA_DIR "/config.json";
 
 Config cfg;
+std::mutex g_saveLock;
 
 // The file is ours: a flat object of bools and one string, written by save()
 // below. That is small enough that finding "key": <value> beats pulling a JSON
@@ -56,6 +58,20 @@ int readInt(const std::string& body, const char* key, int dflt)
     // number -- which every caller has to reject anyway, since 0 is never a
     // valid value for the settings stored this way.
     return (int)std::strtol(body.c_str() + colon + 1, nullptr, 10);
+}
+
+int64_t readInt64(const std::string& body, const char* key, int64_t dflt)
+{
+    std::string pat = std::string("\"") + key + "\"";
+    size_t k        = body.find(pat);
+    if (k == std::string::npos) return dflt;
+    size_t colon = body.find(':', k + pat.size());
+    if (colon == std::string::npos) return dflt;
+    const char* p = body.c_str() + colon + 1;
+    char* end     = nullptr;
+    long long v   = std::strtoll(p, &end, 10);
+    if (end == p) return dflt;
+    return (int64_t)v;
 }
 
 std::string readStr(const std::string& body, const char* key,
@@ -411,7 +427,7 @@ void load()
     }
     cfg.syncProvider = readStr(body, "syncProvider", cfg.syncProvider);
     cfg.syncAuto     = readBool(body, "syncAuto", cfg.syncAuto);
-    cfg.syncLastTime = (int64_t)readInt(body, "syncLastTime", (int)cfg.syncLastTime);
+    cfg.syncLastTime = readInt64(body, "syncLastTime", cfg.syncLastTime);
     cfg.syncLastError = readStr(body, "syncLastError", cfg.syncLastError);
     cfg.syncWebdavUrl = readStr(body, "syncWebdavUrl", cfg.syncWebdavUrl);
     cfg.syncWebdavUser = readStr(body, "syncWebdavUser", cfg.syncWebdavUser);
@@ -483,6 +499,7 @@ void load()
 
 bool save()
 {
+    std::lock_guard<std::mutex> guard(g_saveLock);
     const char* sTabStr = (cfg.startupTab == Tab::STREMIO) ? "stremio" :
                           (cfg.startupTab == Tab::JACKETT) ? "jackett" :
                           (cfg.startupTab == Tab::HISTORY) ? "history" :
@@ -516,7 +533,7 @@ bool save()
     if (cfg.tmdbProxyUserSet) kv("tmdbProxyEnabled", b(cfg.tmdbProxyEnabled));
     kv("syncProvider", jsonStr(cfg.syncProvider));
     kv("syncAuto", b(cfg.syncAuto));
-    kv("syncLastTime", n(cfg.syncLastTime));
+    kv("syncLastTime", std::to_string(cfg.syncLastTime));
     kv("syncLastError", jsonStr(cfg.syncLastError));
     kv("syncWebdavUrl", jsonStr(cfg.syncWebdavUrl));
     kv("syncWebdavUser", jsonStr(cfg.syncWebdavUser));

@@ -29,28 +29,44 @@ android {
                 if (System.getenv("TMDB_API_KEY")) {
                     arguments "-DTMDB_API_KEY=${System.getenv('TMDB_API_KEY')}"
                 }
+                if (System.getenv("GDRIVE_CLIENT_ID")) {
+                    arguments "-DGDRIVE_CLIENT_ID=${System.getenv('GDRIVE_CLIENT_ID')}"
+                }
+                if (System.getenv("GDRIVE_CLIENT_SECRET")) {
+                    arguments "-DGDRIVE_CLIENT_SECRET=${System.getenv('GDRIVE_CLIENT_SECRET')}"
+                }
                 abiFilters 'armeabi-v7a', 'arm64-v8a'
                 version = '3.22.1'
             }
         }
     }
+    def releaseKeystorePath = System.getenv("ANDROID_KEYSTORE_PATH") ?: "borealis.jks"
+    def releaseKeystoreFile = file(releaseKeystorePath)
+
     signingConfigs {
         release {
             // keytool -genkey -alias borealis -keyalg RSA -keysize 2048 -keypass password -keystore borealis.jks -storepass password -validity 10000
-            storeFile file("borealis.jks")
-            storePassword 'password'
-            keyAlias 'borealis'
-            keyPassword 'password'
-            // Optional, specify signing versions used
-            v1SigningEnabled true
-            v2SigningEnabled true
+            storeFile releaseKeystoreFile
+            storePassword System.getenv("ANDROID_KEYSTORE_PASSWORD") ?: 'password'
+            keyAlias System.getenv("ANDROID_KEY_ALIAS") ?: 'borealis'
+            keyPassword System.getenv("ANDROID_KEY_PASSWORD") ?: 'password'
+            enableV1Signing = true
+            enableV2Signing = true
+            enableV3Signing = true
         }
     }
     buildTypes {
         release {
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
-            signingConfig file("borealis.jks").exists() ? signingConfigs.release : signingConfigs.debug
+            if (releaseKeystoreFile.exists()) {
+                signingConfig signingConfigs.release
+            } else if (System.getenv("GITHUB_REF_TYPE") == "tag") {
+                throw new GradleException("Release keystore missing at ${releaseKeystoreFile}; refusing to sign release tag with debug key.")
+            } else {
+                logger.warn("Release keystore not found at ${releaseKeystoreFile}; falling back to debug signing config.")
+                signingConfig signingConfigs.debug
+            }
         }
     }
     packaging {

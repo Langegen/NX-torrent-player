@@ -106,6 +106,7 @@ ${CXX:-g++} -O1 -g -Wall -std=c++17 \
     app/json.cpp \
     app/sync/qrcodegen.cpp \
     app/sync/sync_webdav.cpp \
+    app/sync/sync_gdrive.cpp \
     pctest/test_sync.cpp \
     -o "$out/test_sync"
 

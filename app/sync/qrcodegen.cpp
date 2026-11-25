@@ -9,12 +9,9 @@
 
 #include <algorithm>
 #include <climits>
-#include <cstddef>
 #include <cstdlib>
 #include <cstring>
-#include <sstream>
-#include <stdexcept>
-#include <utility>
+#include <vector>
 
 namespace qrcodegen
 {
@@ -24,65 +21,100 @@ namespace
 
 constexpr int MIN_VERSION = 1;
 constexpr int MAX_VERSION = 40;
+constexpr int PENALTY_N1  = 3;
+constexpr int PENALTY_N2  = 3;
+constexpr int PENALTY_N3  = 40;
+constexpr int PENALTY_N4  = 10;
 
-// Returns the error correction codeword count per block for the given version and ECC level.
-int getNumDataCodewords(int ver, Ecc ecl)
+// ISO/IEC 18004 Table 9: Error correction codewords per block.
+const int8_t ECC_CODEWORDS_PER_BLOCK[4][41] = {
+    //0,  1,  2,  3,  4,  5,  6,  7,  8,  9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40
+    {-1,  7, 10, 15, 20, 26, 18, 20, 24, 30, 18, 20, 24, 26, 30, 22, 24, 28, 30, 28, 28, 28, 28, 30, 30, 26, 28, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30}, // Low
+    {-1, 10, 16, 26, 18, 24, 16, 18, 22, 22, 26, 30, 22, 22, 24, 24, 28, 28, 26, 26, 26, 26, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28}, // Medium
+    {-1, 13, 22, 18, 26, 18, 24, 18, 22, 20, 24, 28, 26, 24, 20, 30, 24, 28, 28, 26, 30, 28, 30, 30, 30, 30, 28, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30}, // Quartile
+    {-1, 17, 28, 22, 16, 22, 28, 26, 26, 24, 28, 24, 28, 22, 24, 24, 30, 28, 28, 26, 28, 30, 24, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30}, // High
+};
+
+// ISO/IEC 18004 Table 9: Number of error correction blocks.
+const int8_t NUM_ERROR_CORRECTION_BLOCKS[4][41] = {
+    //0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40
+    {-1, 1, 1, 1, 1, 1, 2, 2, 2, 2,  4,  4,  4,  4,  4,  6,  6,  6,  6,  7,  8,  8,  9,  9, 10, 12, 12, 12, 13, 14, 15, 16, 17, 18, 19, 19, 20, 21, 22, 24, 25}, // Low
+    {-1, 1, 1, 1, 2, 2, 4, 4, 4, 5,  5,  5,  8,  9,  9, 10, 10, 11, 13, 14, 16, 17, 17, 18, 20, 21, 23, 25, 26, 28, 29, 31, 33, 35, 37, 38, 40, 43, 45, 47, 49}, // Medium
+    {-1, 1, 1, 2, 2, 4, 4, 6, 6, 8,  8,  8, 10, 12, 16, 12, 17, 16, 18, 21, 20, 23, 23, 25, 27, 29, 34, 34, 35, 38, 40, 43, 45, 48, 51, 53, 56, 59, 62, 65, 68}, // Quartile
+    {-1, 1, 1, 2, 4, 4, 4, 5, 6, 8,  8, 11, 11, 16, 16, 18, 16, 19, 21, 25, 25, 25, 34, 30, 32, 35, 37, 40, 42, 45, 48, 51, 54, 57, 60, 63, 66, 70, 74, 77, 81}, // High
+};
+
+int getNumRawDataModules(int ver)
 {
-    static const int8_t NUM_ERROR_CORRECTION_CODEWORDS[4][41] = {
-        // Version: 0, 1,  2,  3,  4,  5,   6,   7,   8,   9,  10,  11,  12,  13,  14,  15,  16,  17,  18,  19,  20,  21,  22,  23,  24,   25,   26,   27,   28,   29,   30,   31,   32,   33,   34,   35,   36,   37,   38,   39,   40
-        { -1,  7, 10, 15, 20, 26,  18,  20,  24,  30,  18,  20,  24,  26,  30,  22,  24,  28,  30,  28,  28,  28,  28,  30,  30,   26,   28,   30,   30,   30,   30,   30,   30,   30,   30,   30,   30,   30,   30,   30,   30 }, // Low
-        { -1, 10, 16, 26, 18, 24,  16,  18,  22,  22,  26,  30,  22,  22,  24,  24,  28,  28,  26,  26,  26,  26,  28,  28,  28,   28,   28,   28,   28,   28,   28,   28,   28,   28,   28,   28,   28,   28,   28,   28,   28 }, // Medium
-        { -1, 13, 22, 18, 26, 18,  24,  18,  22,  20,  24,  28,  26,  24,  20,  30,  24,  28,  28,  26,  30,  28,  30,  30,  30,   30,   28,   30,   30,   30,   30,   30,   30,   30,   30,   30,   30,   30,   30,   30,   30 }, // Quartile
-        { -1, 17, 28, 22, 16, 22,  28,  26,  26,  24,  28,  24,  28,  22,  24,  24,  30,  28,  28,  26,  28,  30,  24,  30,  30,   30,   30,   30,   30,   30,   30,   30,   30,   30,   30,   30,   30,   30,   30,   30,   30 }, // High
-    };
-    static const int8_t NUM_ERROR_CORRECTION_BLOCKS[4][41] = {
-        { -1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 4, 4, 4, 4, 4, 6, 6, 6, 6, 7, 8, 8,  9,  9, 10, 12, 12, 12, 13, 14, 15, 16, 17, 18, 20, 21, 23, 25, 26, 28, 29 },
-        { -1, 1, 1, 1, 2, 2, 4, 4, 4, 5, 5, 5, 8, 9, 9, 10, 10, 11, 13, 14, 16, 17, 17, 18, 20, 21, 23, 25, 26, 28, 29, 31, 33, 35, 37, 38, 40, 43, 45, 47, 49 },
-        { -1, 1, 1, 2, 2, 4, 4, 6, 6, 8, 8, 8, 10, 12, 16, 12, 17, 16, 18, 21, 20, 23, 23, 25, 27, 29, 34, 34, 35, 38, 40, 43, 45, 48, 51, 53, 56, 59, 62, 65, 68 },
-        { -1, 1, 1, 2, 4, 4, 4, 5, 6, 8, 8, 11, 11, 16, 16, 18, 16, 19, 21, 25, 25, 25, 34, 30, 32, 35, 37, 40, 42, 45, 48, 51, 54, 57, 60, 63, 66, 70, 74, 77, 81 },
-    };
-
-    static const int16_t TOTAL_CODEWORDS[41] = {
-        -1, 26, 44, 70, 100, 134, 172, 196, 242, 292, 346, 404, 466, 532, 581, 655, 733, 815, 901, 991, 1085, 1156, 1258, 1364, 1474, 1588, 1706, 1828, 1921, 2051, 2185, 2323, 2465, 2611, 2761, 2876, 3034, 3196, 3362, 3532, 3706
-    };
-
-    int eclIndex = static_cast<int>(ecl);
-    int total = TOTAL_CODEWORDS[ver];
-    int ecTotal = NUM_ERROR_CORRECTION_CODEWORDS[eclIndex][ver] * NUM_ERROR_CORRECTION_BLOCKS[eclIndex][ver];
-    return total - ecTotal;
+    int result = (16 * ver + 128) * ver + 64;
+    if (ver >= 2)
+    {
+        int numAlign = ver / 7 + 2;
+        result -= (25 * numAlign - 10) * numAlign - 55;
+        if (ver >= 7)
+            result -= 36;
+    }
+    return result;
 }
 
-// Reed-Solomon generator polynomial
+int getNumDataCodewords(int ver, Ecc ecl)
+{
+    int eclIdx = static_cast<int>(ecl);
+    return getNumRawDataModules(ver) / 8
+           - ECC_CODEWORDS_PER_BLOCK[eclIdx][ver] * NUM_ERROR_CORRECTION_BLOCKS[eclIdx][ver];
+}
+
+int getFormatBits(Ecc ecl)
+{
+    switch (ecl)
+    {
+        case Ecc::LOW:      return 1;
+        case Ecc::MEDIUM:   return 0;
+        case Ecc::QUARTILE: return 3;
+        case Ecc::HIGH:     return 2;
+        default:            return 1;
+    }
+}
+
+std::vector<int> getAlignmentPatternPositions(int ver)
+{
+    if (ver == 1)
+        return {};
+    int numAlign = ver / 7 + 2;
+    int step = (ver == 32) ? 26 : (ver * 4 + numAlign * 2 + 1) / (numAlign * 2 - 2) * 2;
+    std::vector<int> result;
+    for (int i = 0, pos = ver * 4 + 10; i < numAlign - 1; i++, pos -= step)
+        result.insert(result.begin(), pos);
+    result.insert(result.begin(), 6);
+    return result;
+}
+
+uint8_t reedSolomonMultiply(uint8_t x, uint8_t y)
+{
+    uint8_t z = 0;
+    for (int i = 7; i >= 0; i--)
+    {
+        z = static_cast<uint8_t>((z << 1) ^ ((z >> 7) * 0x11D));
+        z ^= static_cast<uint8_t>(((y >> i) & 1) * x);
+    }
+    return z;
+}
+
 std::vector<uint8_t> reedSolomonComputeDivisor(int degree)
 {
-    std::vector<uint8_t> result(degree);
-    result[degree - 1] = 1;
+    std::vector<uint8_t> result(static_cast<size_t>(degree), 0);
+    result[static_cast<size_t>(degree - 1)] = 1;
 
     uint8_t root = 1;
     for (int i = 0; i < degree; i++)
     {
         for (size_t j = 0; j < result.size(); j++)
         {
-            uint8_t p = result[j];
-            // multiply in GF(2^8)
-            uint8_t term = 0;
-            if (p != 0 && root != 0)
-            {
-                // Simple GF table-less multiplication
-                uint8_t a = p, b = root;
-                while (b > 0)
-                {
-                    if (b & 1) term ^= a;
-                    a = (a << 1) ^ ((a & 0x80) ? 0x11D : 0);
-                    b >>= 1;
-                }
-            }
-            result[j] = term;
+            result[j] = reedSolomonMultiply(result[j], root);
             if (j + 1 < result.size())
                 result[j] ^= result[j + 1];
         }
-        // root *= 2 in GF(2^8)
-        root = (root << 1) ^ ((root & 0x80) ? 0x11D : 0);
+        root = reedSolomonMultiply(root, 0x02);
     }
     return result;
 }
@@ -96,20 +128,7 @@ std::vector<uint8_t> reedSolomonComputeRemainder(const std::vector<uint8_t>& dat
         result.erase(result.begin());
         result.push_back(0);
         for (size_t i = 0; i < divisor.size(); i++)
-        {
-            uint8_t term = 0;
-            if (factor != 0 && divisor[i] != 0)
-            {
-                uint8_t a = factor, d = divisor[i];
-                while (d > 0)
-                {
-                    if (d & 1) term ^= a;
-                    a = (a << 1) ^ ((a & 0x80) ? 0x11D : 0);
-                    d >>= 1;
-                }
-            }
-            result[i] ^= term;
-        }
+            result[i] ^= reedSolomonMultiply(divisor[i], factor);
     }
     return result;
 }
@@ -126,9 +145,314 @@ struct BitBuffer
             int bit = (val >> i) & 1;
             if (bitLength % 8 == 0)
                 bytes.push_back(0);
-            bytes.back() |= (bit << (7 - (bitLength % 8)));
+            bytes.back() |= static_cast<uint8_t>(bit << (7 - (bitLength % 8)));
             bitLength++;
         }
+    }
+};
+
+class QrBuilder
+{
+public:
+    int version;
+    int size;
+    Ecc ecl;
+    std::vector<uint8_t> modules;
+    std::vector<uint8_t> isFunction;
+
+    QrBuilder(int ver, Ecc eclLevel)
+        : version(ver),
+          size(ver * 4 + 17),
+          ecl(eclLevel),
+          modules(static_cast<size_t>(size * size), 0),
+          isFunction(static_cast<size_t>(size * size), 0)
+    {
+        drawFunctionPatterns();
+    }
+
+    bool module(int x, int y) const
+    {
+        return modules[static_cast<size_t>(y * size + x)] != 0;
+    }
+
+    void setFunctionModule(int x, int y, bool isDark)
+    {
+        size_t idx       = static_cast<size_t>(y * size + x);
+        modules[idx]     = isDark ? 1 : 0;
+        isFunction[idx]  = 1;
+    }
+
+    void drawFinderPattern(int x, int y)
+    {
+        for (int dy = -4; dy <= 4; dy++)
+        {
+            for (int dx = -4; dx <= 4; dx++)
+            {
+                int dist = std::max(std::abs(dx), std::abs(dy));
+                int xx = x + dx;
+                int yy = y + dy;
+                if (xx >= 0 && xx < size && yy >= 0 && yy < size)
+                    setFunctionModule(xx, yy, dist != 2 && dist != 4);
+            }
+        }
+    }
+
+    void drawAlignmentPattern(int x, int y)
+    {
+        for (int dy = -2; dy <= 2; dy++)
+        {
+            for (int dx = -2; dx <= 2; dx++)
+                setFunctionModule(x + dx, y + dy, std::max(std::abs(dx), std::abs(dy)) != 1);
+        }
+    }
+
+    void drawFormatBits(int mask)
+    {
+        int data = (getFormatBits(ecl) << 3) | mask;
+        int rem  = data;
+        for (int i = 0; i < 10; i++)
+            rem = (rem << 1) ^ ((rem >> 9) * 0x537);
+        int bits = ((data << 10) | rem) ^ 0x5412;
+
+        // Top-left copy
+        for (int i = 0; i <= 5; i++)
+            setFunctionModule(8, i, ((bits >> i) & 1) != 0);
+        setFunctionModule(8, 7, ((bits >> 6) & 1) != 0);
+        setFunctionModule(8, 8, ((bits >> 7) & 1) != 0);
+        setFunctionModule(7, 8, ((bits >> 8) & 1) != 0);
+        for (int i = 9; i < 15; i++)
+            setFunctionModule(14 - i, 8, ((bits >> i) & 1) != 0);
+
+        // Top-right and bottom-left copy
+        for (int i = 0; i < 8; i++)
+            setFunctionModule(size - 1 - i, 8, ((bits >> i) & 1) != 0);
+        for (int i = 8; i < 15; i++)
+            setFunctionModule(8, size - 15 + i, ((bits >> i) & 1) != 0);
+        setFunctionModule(8, size - 8, true); // Fixed dark module
+    }
+
+    void drawVersion()
+    {
+        if (version < 7)
+            return;
+        int rem = version;
+        for (int i = 0; i < 12; i++)
+            rem = (rem << 1) ^ ((rem >> 11) * 0x1F25);
+        long bits = (static_cast<long>(version) << 12) | rem;
+
+        for (int i = 0; i < 18; i++)
+        {
+            bool bit = ((bits >> i) & 1) != 0;
+            int a = size - 11 + i % 3;
+            int b = i / 3;
+            setFunctionModule(a, b, bit);
+            setFunctionModule(b, a, bit);
+        }
+    }
+
+    void drawFunctionPatterns()
+    {
+        // Timing patterns
+        for (int i = 0; i < size; i++)
+        {
+            setFunctionModule(6, i, i % 2 == 0);
+            setFunctionModule(i, 6, i % 2 == 0);
+        }
+
+        // Finder patterns
+        drawFinderPattern(3, 3);
+        drawFinderPattern(size - 4, 3);
+        drawFinderPattern(3, size - 4);
+
+        // Alignment patterns
+        std::vector<int> alignPatPos = getAlignmentPatternPositions(version);
+        size_t numAlign = alignPatPos.size();
+        for (size_t i = 0; i < numAlign; i++)
+        {
+            for (size_t j = 0; j < numAlign; j++)
+            {
+                if (!((i == 0 && j == 0) || (i == 0 && j == numAlign - 1) || (i == numAlign - 1 && j == 0)))
+                    drawAlignmentPattern(alignPatPos[i], alignPatPos[j]);
+            }
+        }
+
+        // Reserve format bits (mask 0 placeholder) and version bits
+        drawFormatBits(0);
+        drawVersion();
+    }
+
+    void drawCodewords(const std::vector<uint8_t>& data)
+    {
+        size_t i = 0;
+        size_t totalBits = data.size() * 8;
+        for (int right = size - 1; right >= 1; right -= 2)
+        {
+            if (right == 6)
+                right = 5;
+            for (int vert = 0; vert < size; vert++)
+            {
+                for (int j = 0; j < 2; j++)
+                {
+                    int x = right - j;
+                    bool upward = ((right + 1) & 2) == 0;
+                    int y = upward ? (size - 1 - vert) : vert;
+                    size_t idx = static_cast<size_t>(y * size + x);
+                    if (!isFunction[idx] && i < totalBits)
+                    {
+                        modules[idx] = ((data[i >> 3] >> (7 - (i & 7))) & 1) != 0 ? 1 : 0;
+                        i++;
+                    }
+                }
+            }
+        }
+    }
+
+    void applyMask(int mask)
+    {
+        for (int y = 0; y < size; y++)
+        {
+            for (int x = 0; x < size; x++)
+            {
+                size_t idx = static_cast<size_t>(y * size + x);
+                if (isFunction[idx])
+                    continue;
+                bool invert = false;
+                switch (mask)
+                {
+                    case 0: invert = (x + y) % 2 == 0; break;
+                    case 1: invert = y % 2 == 0; break;
+                    case 2: invert = x % 3 == 0; break;
+                    case 3: invert = (x + y) % 3 == 0; break;
+                    case 4: invert = (x / 3 + y / 2) % 2 == 0; break;
+                    case 5: invert = x * y % 2 + x * y % 3 == 0; break;
+                    case 6: invert = (x * y % 2 + x * y % 3) % 2 == 0; break;
+                    case 7: invert = ((x + y) % 2 + x * y % 3) % 2 == 0; break;
+                    default: break;
+                }
+                if (invert)
+                    modules[idx] ^= 1;
+            }
+        }
+    }
+
+    static int finderPenaltyCountPatterns(const int runHistory[7], int size)
+    {
+        int n = runHistory[1];
+        bool core = n > 0 && runHistory[2] == n && runHistory[3] == n * 3 &&
+                    runHistory[4] == n && runHistory[5] == n;
+        int result = 0;
+        if (core && runHistory[0] >= n * 4 && runHistory[6] >= n) result++;
+        if (core && runHistory[6] >= n * 4 && runHistory[0] >= n) result++;
+        (void)size;
+        return result;
+    }
+
+    static int finderPenaltyTerminateAndCount(bool currentRunColor, int currentRunLength,
+                                              int runHistory[7], int size)
+    {
+        if (currentRunColor)
+        {
+            for (int i = 6; i > 0; i--) runHistory[i] = runHistory[i - 1];
+            runHistory[0] = currentRunLength;
+            currentRunLength = 0;
+        }
+        currentRunLength += size;
+        for (int i = 6; i > 0; i--) runHistory[i] = runHistory[i - 1];
+        runHistory[0] = currentRunLength;
+        return finderPenaltyCountPatterns(runHistory, size);
+    }
+
+    static void finderPenaltyAddHistory(int currentRunLength, int runHistory[7])
+    {
+        for (int i = 6; i > 0; i--) runHistory[i] = runHistory[i - 1];
+        runHistory[0] = currentRunLength;
+    }
+
+    int getPenaltyScore() const
+    {
+        int result = 0;
+
+        // Adjacent modules in row having same color, and finder-like patterns
+        for (int y = 0; y < size; y++)
+        {
+            bool runColor = false;
+            int runX = 0;
+            int runHistory[7] = {};
+            for (int x = 0; x < size; x++)
+            {
+                if (module(x, y) == runColor)
+                {
+                    runX++;
+                    if (runX == 5)
+                        result += PENALTY_N1;
+                    else if (runX > 5)
+                        result++;
+                }
+                else
+                {
+                    finderPenaltyAddHistory(runX, runHistory);
+                    if (!runColor)
+                        result += finderPenaltyCountPatterns(runHistory, size) * PENALTY_N3;
+                    runColor = module(x, y);
+                    runX = 1;
+                }
+            }
+            result += finderPenaltyTerminateAndCount(runColor, runX, runHistory, size) * PENALTY_N3;
+        }
+
+        // Adjacent modules in column having same color, and finder-like patterns
+        for (int x = 0; x < size; x++)
+        {
+            bool runColor = false;
+            int runY = 0;
+            int runHistory[7] = {};
+            for (int y = 0; y < size; y++)
+            {
+                if (module(x, y) == runColor)
+                {
+                    runY++;
+                    if (runY == 5)
+                        result += PENALTY_N1;
+                    else if (runY > 5)
+                        result++;
+                }
+                else
+                {
+                    finderPenaltyAddHistory(runY, runHistory);
+                    if (!runColor)
+                        result += finderPenaltyCountPatterns(runHistory, size) * PENALTY_N3;
+                    runColor = module(x, y);
+                    runY = 1;
+                }
+            }
+            result += finderPenaltyTerminateAndCount(runColor, runY, runHistory, size) * PENALTY_N3;
+        }
+
+        // 2x2 blocks of modules having same color
+        for (int y = 0; y < size - 1; y++)
+        {
+            for (int x = 0; x < size - 1; x++)
+            {
+                bool color = module(x, y);
+                if (color == module(x + 1, y) &&
+                    color == module(x, y + 1) &&
+                    color == module(x + 1, y + 1))
+                {
+                    result += PENALTY_N2;
+                }
+            }
+        }
+
+        // Balance of dark and light modules
+        int dark = 0;
+        for (uint8_t m : modules)
+            if (m != 0) dark++;
+        int total = size * size;
+        int k = (std::abs(dark * 20 - total * 10) + total - 1) / total - 1;
+        if (k > 0)
+            result += k * PENALTY_N4;
+
+        return result;
     }
 };
 
@@ -143,215 +467,108 @@ bool QrCode::getModule(int x, int y) const
 {
     if (x < 0 || x >= m_size || y < 0 || y >= m_size)
         return false;
-    return m_modules[y * m_size + x] != 0;
+    return m_modules[static_cast<size_t>(y * m_size + x)] != 0;
 }
 
 QrCode QrCode::encodeText(const char* text, Ecc ecl)
 {
-    size_t textLen = std::strlen(text);
-    BitBuffer bb;
+    size_t textLen = text ? std::strlen(text) : 0;
 
-    // Mode: Byte (0100)
-    bb.appendBits(0x4, 4);
-
-    // Determine version needed
-    int version = 1;
-    for (; version <= 10; version++)
+    int version = MIN_VERSION;
+    for (; version <= MAX_VERSION; version++)
     {
-        int countBits = (version < 10) ? 8 : 16;
-        int totalBits = 4 + countBits + textLen * 8;
-        int dataCapacityCodewords = getNumDataCodewords(version, ecl);
-        if (totalBits <= dataCapacityCodewords * 8)
+        int countBits = (version <= 9) ? 8 : 16;
+        size_t totalBits = 4 + static_cast<size_t>(countBits) + textLen * 8;
+        size_t capBits   = static_cast<size_t>(getNumDataCodewords(version, ecl)) * 8;
+        if (totalBits <= capBits)
             break;
     }
-    if (version > 10)
-        version = 10;
+    if (version > MAX_VERSION)
+        version = MAX_VERSION;
 
-    int charCountBits = (version < 10) ? 8 : 16;
+    int dataCapacityCodewords = getNumDataCodewords(version, ecl);
+    int dataCapacityBits      = dataCapacityCodewords * 8;
+    int charCountBits         = (version <= 9) ? 8 : 16;
+    size_t maxBytes           = static_cast<size_t>((dataCapacityBits - 4 - charCountBits) / 8);
+    if (textLen > maxBytes)
+        textLen = maxBytes;
+
+    BitBuffer bb;
+    bb.appendBits(0x4, 4); // Byte mode
     bb.appendBits(static_cast<uint32_t>(textLen), charCountBits);
     for (size_t i = 0; i < textLen; i++)
         bb.appendBits(static_cast<uint8_t>(text[i]), 8);
 
-    int dataCapacityCodewords = getNumDataCodewords(version, ecl);
-    int dataCapacityBits = dataCapacityCodewords * 8;
-
-    // Terminator
+    // Terminator + byte boundary padding
     int terminatorBits = std::min(4, dataCapacityBits - bb.bitLength);
     bb.appendBits(0, terminatorBits);
-
-    // Pad to byte boundary
     if (bb.bitLength % 8 != 0)
         bb.appendBits(0, 8 - (bb.bitLength % 8));
 
-    // Pad bytes 0xEC, 0x11
-    while (bb.bytes.size() < static_cast<size_t>(dataCapacityCodewords))
-    {
-        bb.bytes.push_back((bb.bytes.size() % 2 == 0) ? 0xEC : 0x11);
-    }
+    // Pad codewords: strictly alternating 0xEC, 0x11 starting with 0xEC
+    for (uint8_t padByte = 0xEC; bb.bytes.size() < static_cast<size_t>(dataCapacityCodewords); padByte ^= (0xEC ^ 0x11))
+        bb.bytes.push_back(padByte);
 
-    int qrSize = version * 4 + 17;
-    std::vector<uint8_t> grid(qrSize * qrSize, 0);
-    std::vector<uint8_t> isFunction(qrSize * qrSize, 0);
+    // Split into blocks and compute Reed-Solomon error correction
+    int eclIdx         = static_cast<int>(ecl);
+    int numBlocks      = NUM_ERROR_CORRECTION_BLOCKS[eclIdx][version];
+    int blockEcLen     = ECC_CODEWORDS_PER_BLOCK[eclIdx][version];
+    int rawCodewords   = getNumRawDataModules(version) / 8;
+    int numShortBlocks = numBlocks - rawCodewords % numBlocks;
+    int shortBlockLen  = rawCodewords / numBlocks;
 
-    auto setFunc = [&](int x, int y, bool isDark) {
-        grid[y * qrSize + x] = isDark ? 1 : 0;
-        isFunction[y * qrSize + x] = 1;
-    };
-
-    // Finder patterns
-    auto drawFinder = [&](int startX, int startY) {
-        for (int y = -1; y <= 7; y++)
-        {
-            for (int x = -1; x <= 7; x++)
-            {
-                int gx = startX + x;
-                int gy = startY + y;
-                if (gx < 0 || gx >= qrSize || gy < 0 || gy >= qrSize) continue;
-                bool dark = (x >= 0 && x <= 6 && (y == 0 || y == 6)) ||
-                            (y >= 0 && y <= 6 && (x == 0 || x == 6)) ||
-                            (x >= 2 && x <= 4 && y >= 2 && y <= 4);
-                setFunc(gx, gy, dark);
-            }
-        }
-    };
-    drawFinder(0, 0);
-    drawFinder(qrSize - 7, 0);
-    drawFinder(0, qrSize - 7);
-
-    // Timing patterns
-    for (int i = 0; i < qrSize; i++)
-    {
-        if (!isFunction[6 * qrSize + i])
-            setFunc(i, 6, (i % 2 == 0));
-        if (!isFunction[i * qrSize + 6])
-            setFunc(6, i, (i % 2 == 0));
-    }
-
-    // Dark module
-    setFunc(8, 4 * version + 9, true);
-
-    // Format info reserve
-    for (int i = 0; i < 9; i++)
-    {
-        if (i < qrSize) {
-            isFunction[8 * qrSize + i] = 1;
-            isFunction[i * qrSize + 8] = 1;
-        }
-    }
-    for (int i = 0; i < 8; i++)
-    {
-        if (qrSize - 1 - i >= 0) {
-            isFunction[8 * qrSize + (qrSize - 1 - i)] = 1;
-            isFunction[(qrSize - 1 - i) * qrSize + 8] = 1;
-        }
-    }
-
-    // Error correction
-    static const int8_t NUM_EC_BLOCKS[4][41] = {
-        { -1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 4 },
-        { -1, 1, 1, 1, 2, 2, 4, 4, 4, 5, 5 },
-        { -1, 1, 1, 2, 2, 4, 4, 6, 6, 8, 8 },
-        { -1, 1, 1, 2, 4, 4, 4, 5, 6, 8, 8 }
-    };
-    static const int8_t NUM_EC_CODEWORDS[4][41] = {
-        { -1,  7, 10, 15, 20, 26, 18, 20, 24, 30, 18 },
-        { -1, 10, 16, 26, 18, 24, 16, 18, 22, 22, 26 },
-        { -1, 13, 22, 18, 26, 18, 24, 18, 22, 20, 24 },
-        { -1, 17, 28, 22, 16, 22, 28, 26, 26, 24, 28 }
-    };
-
-    int eclIdx = static_cast<int>(ecl);
-    int numBlocks = NUM_EC_BLOCKS[eclIdx][version];
-    int blockEcLen = NUM_EC_CODEWORDS[eclIdx][version];
-    int shortBlockDataLen = dataCapacityCodewords / numBlocks;
-    int numShortBlocks = numBlocks - (dataCapacityCodewords % numBlocks);
-
-    std::vector<std::vector<uint8_t>> dataBlocks(numBlocks);
-    std::vector<std::vector<uint8_t>> ecBlocks(numBlocks);
-    auto divisor = reedSolomonComputeDivisor(blockEcLen);
+    std::vector<std::vector<uint8_t>> blocks(static_cast<size_t>(numBlocks));
+    std::vector<uint8_t> rsDiv = reedSolomonComputeDivisor(blockEcLen);
 
     size_t k = 0;
-    for (int b = 0; b < numBlocks; b++)
+    for (int i = 0; i < numBlocks; i++)
     {
-        int datLen = (b < numShortBlocks) ? shortBlockDataLen : (shortBlockDataLen + 1);
-        dataBlocks[b].assign(bb.bytes.begin() + k, bb.bytes.begin() + k + datLen);
-        k += datLen;
-        ecBlocks[b] = reedSolomonComputeRemainder(dataBlocks[b], divisor);
+        int datLen = shortBlockLen - blockEcLen + (i < numShortBlocks ? 0 : 1);
+        std::vector<uint8_t> dat(bb.bytes.begin() + static_cast<ptrdiff_t>(k),
+                                 bb.bytes.begin() + static_cast<ptrdiff_t>(k + static_cast<size_t>(datLen)));
+        k += static_cast<size_t>(datLen);
+        std::vector<uint8_t> ecc = reedSolomonComputeRemainder(dat, rsDiv);
+        if (i < numShortBlocks)
+            dat.push_back(0);
+        dat.insert(dat.end(), ecc.begin(), ecc.end());
+        blocks[static_cast<size_t>(i)] = std::move(dat);
     }
 
     // Interleave codewords
     std::vector<uint8_t> allCodewords;
-    for (int i = 0; i <= shortBlockDataLen; i++)
+    allCodewords.reserve(static_cast<size_t>(rawCodewords));
+    for (size_t i = 0; i < blocks[0].size(); i++)
     {
-        for (int b = 0; b < numBlocks; b++)
+        for (int j = 0; j < numBlocks; j++)
         {
-            if (i < static_cast<int>(dataBlocks[b].size()))
-                allCodewords.push_back(dataBlocks[b][i]);
+            if (i != static_cast<size_t>(shortBlockLen - blockEcLen) || j >= numShortBlocks)
+                allCodewords.push_back(blocks[static_cast<size_t>(j)][i]);
         }
     }
-    for (int i = 0; i < blockEcLen; i++)
-    {
-        for (int b = 0; b < numBlocks; b++)
-            allCodewords.push_back(ecBlocks[b][i]);
-    }
 
-    // Place codewords into grid
-    int bitIdx = 0;
-    int totalCodewordBits = allCodewords.size() * 8;
-    int right = qrSize - 1;
-    while (right > 0)
+    QrBuilder qr(version, ecl);
+    qr.drawCodewords(allCodewords);
+
+    // Pick mask pattern with minimum ISO penalty score
+    int minPenalty = INT_MAX;
+    int bestMask   = 0;
+    for (int mask = 0; mask < 8; mask++)
     {
-        if (right == 6) right--; // skip vertical timing line
-        for (int vert = 0; vert < qrSize; vert++)
+        qr.applyMask(mask);
+        qr.drawFormatBits(mask);
+        int penalty = qr.getPenaltyScore();
+        if (penalty < minPenalty)
         {
-            for (int j = 0; j < 2; j++)
-            {
-                int x = right - j;
-                bool upwards = ((right + 1) & 2) == 0;
-                int y = upwards ? (qrSize - 1 - vert) : vert;
-                if (!isFunction[y * qrSize + x])
-                {
-                    bool dark = false;
-                    if (bitIdx < totalCodewordBits)
-                    {
-                        dark = ((allCodewords[bitIdx >> 3] >> (7 - (bitIdx & 7))) & 1) != 0;
-                        bitIdx++;
-                    }
-                    // Apply Mask 0: (x + y) % 2 == 0
-                    if ((x + y) % 2 == 0)
-                        dark = !dark;
-                    grid[y * qrSize + x] = dark ? 1 : 0;
-                }
-            }
+            minPenalty = penalty;
+            bestMask   = mask;
         }
-        right -= 2;
+        qr.applyMask(mask); // Undo mask
     }
 
-    // Format bits for Mask 0 and selected ECC
-    // Format bits calculation (15 bits with BCH code):
-    static const uint16_t FORMAT_BITS[4] = {
-        0x77C4, // Low, mask 0
-        0x5465, // Medium, mask 0
-        0x355F, // Quartile, mask 0
-        0x168B  // High, mask 0
-    };
-    uint16_t formatBits = FORMAT_BITS[eclIdx];
+    qr.applyMask(bestMask);
+    qr.drawFormatBits(bestMask);
 
-    // Draw format info
-    for (int i = 0; i <= 5; i++)
-        grid[8 * qrSize + i] = ((formatBits >> i) & 1);
-    grid[8 * qrSize + 7] = ((formatBits >> 6) & 1);
-    grid[8 * qrSize + 8] = ((formatBits >> 7) & 1);
-    grid[7 * qrSize + 8] = ((formatBits >> 8) & 1);
-    for (int i = 9; i < 15; i++)
-        grid[(14 - i) * qrSize + 8] = ((formatBits >> i) & 1);
-
-    for (int i = 0; i <= 7; i++)
-        grid[(qrSize - 1 - i) * qrSize + 8] = ((formatBits >> i) & 1);
-    for (int i = 8; i < 15; i++)
-        grid[8 * qrSize + (qrSize - 15 + i)] = ((formatBits >> i) & 1);
-
-    return QrCode(qrSize, grid);
+    return QrCode(qr.size, std::move(qr.modules));
 }
 
 } // namespace qrcodegen

@@ -62,6 +62,8 @@ struct RequestOptions
     std::string contentType;     // e.g. "application/json", "application/x-www-form-urlencoded"
     std::vector<std::string> headers; // e.g. "Authorization: Bearer ...", "Depth: 0"
     std::string userPwd;         // "username:password" for HTTP Basic Auth
+    std::string username;        // Separate username/password (safe when containing ':')
+    std::string password;
     long timeoutSec = 25;
     bool followLocation = true;
 };

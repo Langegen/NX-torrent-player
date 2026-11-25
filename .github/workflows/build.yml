@@ -69,7 +69,13 @@ jobs:
       - name: Configure
         env:
           TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
-        run: cmake -B build -DPLATFORM_SWITCH=ON -DCMAKE_BUILD_TYPE=Release -DTMDB_API_KEY="$TMDB_API_KEY"
+          GDRIVE_CLIENT_ID: ${{ secrets.GDRIVE_CLIENT_ID }}
+          GDRIVE_CLIENT_SECRET: ${{ secrets.GDRIVE_CLIENT_SECRET }}
+        run: >
+          cmake -B build -DPLATFORM_SWITCH=ON -DCMAKE_BUILD_TYPE=Release
+          -DTMDB_API_KEY="$TMDB_API_KEY"
+          -DGDRIVE_CLIENT_ID="$GDRIVE_CLIENT_ID"
+          -DGDRIVE_CLIENT_SECRET="$GDRIVE_CLIENT_SECRET"
 
       - name: Build
         run: cmake --build build --target NX-torrent-player.nro -j "$(nproc)"
@@ -134,6 +140,8 @@ jobs:
       - name: Build Android APK
         env:
           TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
+          GDRIVE_CLIENT_ID: ${{ secrets.GDRIVE_CLIENT_ID }}
+          GDRIVE_CLIENT_SECRET: ${{ secrets.GDRIVE_CLIENT_SECRET }}
         run: |
           cd android
           chmod +x gradlew

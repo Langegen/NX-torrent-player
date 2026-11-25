@@ -2227,8 +2227,6 @@ int main(int argc, char* argv[])
     http::applyProxy();
     history::load();
     library::load();
-    cloud_sync::init();
-    cloud_sync::triggerAutoSync();
     // Now, while nothing can be playing: a file fetched for the result being
     // played is only referenced once the player records it.
     jackett::pruneCache();
@@ -2383,6 +2381,9 @@ int main(int argc, char* argv[])
             if (r.ok && r.installable()) update::promptInstall(r);
         });
 
+    cloud_sync::init();
+    cloud_sync::triggerAutoSync();
+
     // Application::exit(): exitEvent -> the activities are destroyed (the
     // player's last progress save is queued on brls::async) -> the task thread
     // is joined, dropping whatever is still queued -> exitDoneEvent.
@@ -2405,10 +2406,10 @@ int main(int argc, char* argv[])
     // The new version is picked up on the next launch.
     update::applyPending();
 
-    cloud_sync::shutdown();
     // The network pool's threads, joined before main() returns (see
     // workers.hpp): a request still running past it would crash on the Switch.
     workers::stop();
+    cloud_sync::shutdown();
     // The connections http::get/postJson kept open, now that every thread
     // that used them is joined (borealis' task thread in Application::exit).
     http::shutdown();
