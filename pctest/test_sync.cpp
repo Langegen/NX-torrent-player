@@ -421,12 +421,13 @@ static void test_gdrive_oauth_and_api()
     config::get().syncGdriveClientSecret = "GOCSPX-secret";
     CHECK(cloud_sync::GdriveProvider::hasClientCredentials() == true);
 
-    // 1. startDeviceAuth success (using verification_uri fallback)
+    // 1. startDeviceAuth success (using verification_uri fallback and drive.file scope)
     http::g_mockHandler = [](const std::string& url, const http::RequestOptions& opt,
                              std::string& resp, std::string&, long* status) {
         CHECK(url == "https://oauth2.googleapis.com/device/code");
         CHECK(opt.method == "POST");
-        CHECK(opt.body.find("drive.appdata") != std::string::npos);
+        CHECK(opt.body.find("drive.file") != std::string::npos);
+        CHECK(opt.body.find("drive.appdata") == std::string::npos);
         if (status) *status = 200;
         resp = "{\"device_code\":\"dev123\",\"user_code\":\"ABCD-EFGH\",\"verification_uri\":\"https://www.google.com/device\",\"expires_in\":1800,\"interval\":5}";
         return true;
@@ -487,7 +488,7 @@ static void test_gdrive_oauth_and_api()
     CHECK(tokens.refreshToken == "ref123");
     CHECK(tokens.userEmail == "user@example.com");
 
-    // 4. testConnection checks appDataFolder files endpoint (not /about)
+    // 4. testConnection checks spaces=drive files endpoint (not /about or appDataFolder)
     cloud_sync::GdriveCredentials creds{ "cid", "csec", "ref123" };
     http::g_mockHandler = [](const std::string& url, const http::RequestOptions&,
                              std::string& resp, std::string&, long* status) {
@@ -496,7 +497,8 @@ static void test_gdrive_oauth_and_api()
             resp = "{\"access_token\":\"acc999\",\"expires_in\":3600}";
         else
         {
-            CHECK(url.find("spaces=appDataFolder") != std::string::npos);
+            CHECK(url.find("spaces=drive") != std::string::npos);
+            CHECK(url.find("appDataFolder") == std::string::npos);
             CHECK(url.find("/about") == std::string::npos);
             resp = "{\"files\":[]}";
         }
@@ -504,23 +506,70 @@ static void test_gdrive_oauth_and_api()
     };
     CHECK(prov.testConnection(creds, err) == true);
 
-    // 5. pull and push cycle
+    // 5a. pull when NX-Torrent-Player folder does not exist yet
+    std::string rLib = "stale", rHist = "stale";
+    http::g_mockHandler = [](const std::string& url, const http::RequestOptions& opt,
+                             std::string& resp, std::string&, long* status) {
+        if (status) *status = 200;
+        if (url.find("/token") != std::string::npos)
+            resp = "{\"access_token\":\"acc999\",\"expires_in\":3600}";
+        else
+        {
+            CHECK(opt.method == "GET");
+            CHECK(url.find("spaces=drive") != std::string::npos);
+            resp = "{\"files\":[]}";
+        }
+        return true;
+    };
+    CHECK(prov.pull(creds, rLib, rHist, err) == true);
+    CHECK(rLib.empty());
+    CHECK(rHist.empty());
+
+    // 5b. pull when folder + nx_library.json exist
     http::g_mockHandler = [](const std::string& url, const http::RequestOptions& opt,
                              std::string& resp, std::string&, long* status) {
         if (status) *status = 200;
         if (url.find("alt=media") != std::string::npos)
             resp = "{\"entries\":[]}";
+        else if (opt.method == "GET" && url.find("vnd.google-apps.folder") != std::string::npos)
+            resp = "{\"files\":[{\"id\":\"folder1\",\"name\":\"NX-Torrent-Player\"}]}";
         else if (opt.method == "GET")
             resp = "{\"files\":[{\"id\":\"fid1\",\"name\":\"nx_library.json\"}]}";
         else
             resp = "{\"id\":\"fid_new\"}";
         return true;
     };
-    std::string rLib, rHist;
     CHECK(prov.pull(creds, rLib, rHist, err) == true);
     CHECK(rLib == "{\"entries\":[]}");
     CHECK(rHist.empty());
+
+    // 5c. push creates folder and uploads files with parents:["folder1"]
+    bool sawCreateFolder = false;
+    bool sawUploadParent = false;
+    http::g_mockHandler = [&](const std::string& url, const http::RequestOptions& opt,
+                              std::string& resp, std::string&, long* status) {
+        if (status) *status = 200;
+        if (opt.method == "GET")
+        {
+            resp = "{\"files\":[]}";
+        }
+        else if (opt.method == "POST" && url.find("uploadType=multipart") == std::string::npos)
+        {
+            CHECK(opt.body.find("NX-Torrent-Player") != std::string::npos);
+            sawCreateFolder = true;
+            resp = "{\"id\":\"folder1\"}";
+        }
+        else
+        {
+            CHECK(opt.body.find("\"parents\": [\"folder1\"]") != std::string::npos);
+            sawUploadParent = true;
+            resp = "{\"id\":\"fid_new\"}";
+        }
+        return true;
+    };
     CHECK(prov.push(creds, "{\"entries\":[]}", "{\"history\":[]}", err) == true);
+    CHECK(sawCreateFolder);
+    CHECK(sawUploadParent);
 
     http::g_mockHandler = nullptr;
     std::printf("      PASSED\n");

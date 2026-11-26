@@ -19,6 +19,8 @@ namespace cloud_sync
 namespace
 {
 
+static constexpr const char* kSyncFolderName = "NX-Torrent-Player";
+
 std::string extractGoogleError(const std::string& resp, const std::string& netErr, long status)
 {
     if (!resp.empty())
@@ -134,7 +136,7 @@ bool GdriveProvider::startDeviceAuth(const std::string& clientId, DeviceAuthInfo
 
     std::string url = "https://oauth2.googleapis.com/device/code";
     std::string postData = "client_id=" + http::urlEncode(clientId) +
-                           "&scope=" + http::urlEncode("https://www.googleapis.com/auth/drive.appdata email");
+                           "&scope=" + http::urlEncode("https://www.googleapis.com/auth/drive.file email");
 
     http::RequestOptions opt;
     opt.method      = "POST";
@@ -330,12 +332,13 @@ bool GdriveProvider::ensureAccessToken(const GdriveCredentials& creds, std::stri
     return true;
 }
 
-bool GdriveProvider::findAppDataFile(const std::string& token, const std::string& filename, std::string& fileId, std::string& err)
+bool GdriveProvider::findSyncFolder(const std::string& token, std::string& folderId, std::string& err)
 {
-    fileId.clear();
+    folderId.clear();
     err.clear();
-    std::string q = "name='" + filename + "' and trashed=false";
-    std::string url = "https://www.googleapis.com/drive/v3/files?spaces=appDataFolder&q=" +
+    std::string q = std::string("mimeType='application/vnd.google-apps.folder' and name='") +
+                    kSyncFolderName + "' and trashed=false";
+    std::string url = "https://www.googleapis.com/drive/v3/files?spaces=drive&q=" +
                       http::urlEncode(q) + "&fields=files(id,name)&pageSize=10";
 
     http::RequestOptions opt;
@@ -347,7 +350,76 @@ bool GdriveProvider::findAppDataFile(const std::string& token, const std::string
     long status = 0;
     if (!http::request(url, opt, resp, err, &status) || status != 200)
     {
-        err = "Failed to query appDataFolder (HTTP " + std::to_string(status) + "): " +
+        err = "Failed to query Drive folder (HTTP " + std::to_string(status) + "): " +
+              extractGoogleError(resp, err, status);
+        return false;
+    }
+
+    std::vector<std::string> files = json::objects(resp, "files");
+    for (const auto& f : files)
+    {
+        if (json::str(f, "name") == kSyncFolderName)
+        {
+            folderId = json::str(f, "id");
+            break;
+        }
+    }
+    return true;
+}
+
+bool GdriveProvider::ensureSyncFolder(const std::string& token, std::string& folderId, std::string& err)
+{
+    if (!findSyncFolder(token, folderId, err))
+        return false;
+    if (!folderId.empty())
+        return true;
+
+    http::RequestOptions opt;
+    opt.method      = "POST";
+    opt.contentType = "application/json";
+    opt.body        = std::string("{\"name\":\"") + kSyncFolderName +
+                      "\",\"mimeType\":\"application/vnd.google-apps.folder\"}";
+    opt.headers     = { "Authorization: Bearer " + token };
+    opt.timeoutSec  = 20;
+
+    std::string resp;
+    long status = 0;
+    if (!http::request("https://www.googleapis.com/drive/v3/files?fields=id", opt, resp, err, &status) ||
+        (status != 200 && status != 201))
+    {
+        err = "Failed to create Drive folder (HTTP " + std::to_string(status) + "): " +
+              extractGoogleError(resp, err, status);
+        return false;
+    }
+
+    folderId = json::str(resp, "id");
+    if (folderId.empty())
+    {
+        err = "Google Drive did not return folder ID";
+        return false;
+    }
+    return true;
+}
+
+bool GdriveProvider::findSyncFile(const std::string& token, const std::string& folderId,
+                                  const std::string& filename, std::string& fileId, std::string& err)
+{
+    fileId.clear();
+    err.clear();
+    std::string q = "name='" + filename + "' and '" + folderId + "' in parents and trashed=false";
+    std::string url = "https://www.googleapis.com/drive/v3/files?spaces=drive&q=" +
+                      http::urlEncode(q) + "&fields=files(id,name)&pageSize=10";
+
+    http::RequestOptions opt;
+    opt.method     = "GET";
+    opt.headers    = { "Authorization: Bearer " + token };
+    opt.timeoutSec = 20;
+
+    std::string resp;
+    long status = 0;
+    if (!http::request(url, opt, resp, err, &status) || status != 200)
+    {
+        err = "Failed to query Drive files (HTTP " + std::to_string(status) + "): " +
               extractGoogleError(resp, err, status);
         return false;
     }
@@ -364,7 +436,7 @@ bool GdriveProvider::findAppDataFile(const std::string& token, const std::string
     return true;
 }
 
-bool GdriveProvider::downloadAppDataFile(const std::string& token, const std::string& fileId, std::string& content, std::string& err)
+bool GdriveProvider::downloadSyncFile(const std::string& token, const std::string& fileId, std::string& content, std::string& err)
 {
     content.clear();
     err.clear();
@@ -386,10 +458,11 @@ bool GdriveProvider::downloadAppDataFile(const std::string& token, const std::st
     return true;
 }
 
-bool GdriveProvider::uploadAppDataFile(const std::string& token, const std::string& filename, const std::string& content, std::string& err)
+bool GdriveProvider::uploadSyncFile(const std::string& token, const std::string& folderId,
+                                    const std::string& filename, const std::string& content, std::string& err)
 {
     std::string fileId;
-    if (!findAppDataFile(token, filename, fileId, err))
+    if (!findSyncFile(token, folderId, filename, fileId, err))
         return false;
 
     if (!fileId.empty())
@@ -415,11 +488,11 @@ bool GdriveProvider::uploadAppDataFile(const std::string& token, const std::stri
     }
     else
     {
-        // Create new file via multipart
+        // Create new file via multipart inside NX-Torrent-Player folder
         std::string boundary = "NX_SYNC_BOUNDARY_982341";
         std::string url = "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart";
 
-        std::string metadata = "{\"name\": \"" + filename + "\", \"parents\": [\"appDataFolder\"]}";
+        std::string metadata = "{\"name\": \"" + filename + "\", \"parents\": [\"" + folderId + "\"]}";
         std::string multipartBody = "--" + boundary + "\r\n"
                                     "Content-Type: application/json; charset=UTF-8\r\n\r\n"
                                     + metadata + "\r\n"
@@ -458,7 +531,7 @@ bool GdriveProvider::testConnection(const GdriveCredentials& creds, std::string&
     if (!ensureAccessToken(creds, token, err))
         return false;
 
-    std::string url = "https://www.googleapis.com/drive/v3/files?spaces=appDataFolder&pageSize=1&fields=files(id)";
+    std::string url = "https://www.googleapis.com/drive/v3/files?spaces=drive&pageSize=1&fields=files(id)";
     http::RequestOptions opt;
     opt.method     = "GET";
     opt.headers    = { "Authorization: Bearer " + token };
@@ -486,12 +559,23 @@ bool GdriveProvider::pull(const GdriveCredentials& creds, std::string& remoteLib
     if (!ensureAccessToken(creds, token, err))
         return false;
 
+    std::string folderId;
+    if (!findSyncFolder(token, folderId, err))
+        return false;
+
+    if (folderId.empty())
+    {
+        remoteLibraryJson.clear();
+        remoteHistoryJson.clear();
+        return true;
+    }
+
     std::string libId;
-    if (!findAppDataFile(token, "nx_library.json", libId, err))
+    if (!findSyncFile(token, folderId, "nx_library.json", libId, err))
         return false;
     if (!libId.empty())
     {
-        if (!downloadAppDataFile(token, libId, remoteLibraryJson, err))
+        if (!downloadSyncFile(token, libId, remoteLibraryJson, err))
             return false;
     }
     else
@@ -500,11 +584,11 @@ bool GdriveProvider::pull(const GdriveCredentials& creds, std::string& remoteLib
     }
 
     std::string histId;
-    if (!findAppDataFile(token, "nx_history.json", histId, err))
+    if (!findSyncFile(token, folderId, "nx_history.json", histId, err))
         return false;
     if (!histId.empty())
     {
-        if (!downloadAppDataFile(token, histId, remoteHistoryJson, err))
+        if (!downloadSyncFile(token, histId, remoteHistoryJson, err))
             return false;
     }
     else
@@ -526,10 +610,14 @@ bool GdriveProvider::push(const GdriveCredentials& creds, const std::string& lib
     if (!ensureAccessToken(creds, token, err))
         return false;
 
-    if (!uploadAppDataFile(token, "nx_library.json", libraryJson, err))
+    std::string folderId;
+    if (!ensureSyncFolder(token, folderId, err))
         return false;
 
-    if (!uploadAppDataFile(token, "nx_history.json", historyJson, err))
+    if (!uploadSyncFile(token, folderId, "nx_library.json", libraryJson, err))
+        return false;
+
+    if (!uploadSyncFile(token, folderId, "nx_history.json", historyJson, err))
         return false;
 
     return true;

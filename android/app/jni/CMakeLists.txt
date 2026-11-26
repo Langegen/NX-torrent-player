@@ -82,6 +82,7 @@ set(ENGINE_SRC
     ${ENGINE_DIR}/listen.c ${ENGINE_DIR}/upnp.c ${ENGINE_DIR}/engine_log.c
     ${ENGINE_DIR}/engine_services.c
     ${ENGINE_DIR}/udpdiag.c ${ENGINE_DIR}/stream.c ${ENGINE_DIR}/httpsrc.c
+    ${ENGINE_DIR}/hls_proxy.c
     ${ROOT_DIR}/pctest/compat/sha1.c
     ${ROOT_DIR}/pctest/nbstub.c
     ${ROOT_DIR}/pctest/utpstub.c)
@@ -95,8 +96,8 @@ set(UPDATE_API_URL "https://api.github.com/repos/${UPDATE_REPO}/releases/latest"
 set(UPDATE_TAG_URL "https://api.github.com/repos/${UPDATE_REPO}/releases/tags/" CACHE STRING "")
 set(TMDB_API_KEY "8cf43ad9c085135b9479ad5cf6bbcbda" CACHE STRING "Default TMDB API key / read token")
 set(TMDB_PROXY_URL "" CACHE STRING "Default TMDB proxy URL")
-set(GDRIVE_CLIENT_ID "" CACHE STRING "Default Google Drive OAuth Client ID")
-set(GDRIVE_CLIENT_SECRET "" CACHE STRING "Default Google Drive OAuth Client Secret")
+set(GDRIVE_CLIENT_ID "368701728051-fphf1cnob488rv09q5gsjfsjul7ekuid.apps.googleusercontent.com" CACHE STRING "Default Google Drive OAuth Client ID")
+set(GDRIVE_CLIENT_SECRET "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" CACHE STRING "Default Google Drive OAuth Client Secret")
 
 add_library(curl STATIC IMPORTED)
 set_target_properties(curl PROPERTIES IMPORTED_LOCATION
