@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <functional>
 
 // The app's network work, a few requests at a time. brls::async runs every
@@ -33,6 +34,11 @@ enum class Priority
 constexpr int kThreads = 4;
 
 void run(std::function<void()> task, Priority p = Priority::High);
+
+// Monotonic generation for cancellable low-priority image work. Bumped on tab
+// switches so queued poster decodes/downloads for departed tabs bail out early.
+uint64_t lowGeneration();
+void bumpLowGeneration();
 
 // As the app quits, before main() returns: aborts the requests in flight,
 // drops what has not started, and joins the threads. A network call still

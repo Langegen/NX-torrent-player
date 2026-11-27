@@ -93,7 +93,8 @@ class Threading
 
     static void stop();
 
-    static void performSyncTasks();
+    // LOCAL PATCH (NX-torrent-player): returns true when at least one sync or delayed task ran.
+    static bool performSyncTasks();
 
     static std::vector<std::function<void()>>* getSyncFunctions()
     {

@@ -12,7 +12,14 @@ namespace
 inline float inset() { return platform_ui::sideInset(); }
 inline float posterWidth()
 {
-    return (platform_ui::isMobile() && platform_ui::isPortrait()) ? 156.0f : 150.0f;
+    if (platform_ui::isMobile() && platform_ui::isPortrait())
+    {
+        float avail = brls::Application::contentWidth - 2.0f * inset() - 14.0f;
+        int cols = avail >= 420.0f ? 3 : 2;
+        float w = (avail - (cols - 1) * 14.0f) / (float)cols;
+        return std::clamp(w, 128.0f, 180.0f);
+    }
+    return 150.0f;
 }
 inline float gapWidth()
 {
@@ -23,16 +30,73 @@ inline float gapWidth()
 constexpr float kNearBottom = 400.0f;
 } // namespace
 
+int PosterGrid::computeColumns() const
+{
+    float gap    = gapWidth();
+    float usable = brls::Application::contentWidth - 2.0f * inset() + gap;
+    int minCols  = (platform_ui::isMobile() && platform_ui::isPortrait()) ? 2 : 3;
+    return std::max(minCols, (int)(usable / (posterWidth() + gap)));
+}
+
 PosterGrid::PosterGrid()
 {
     setAxis(brls::Axis::COLUMN);
     setPadding(6.0f, 0.0f, 24.0f, 0.0f);
-    float gap    = gapWidth();
-    float usable = brls::Application::contentWidth - 2.0f * inset() + gap;
-    columns      = std::max(3, (int)(usable / (posterWidth() + gap)));
+    columns = computeColumns();
+    resizeSub = brls::Application::getWindowSizeChangedEvent()->subscribe(
+        [this]() { relayout(); });
+    resizeSubscribed = true;
 }
 
-PosterGrid::~PosterGrid() { *alive = false; }
+PosterGrid::~PosterGrid()
+{
+    *alive = false;
+    if (resizeSubscribed)
+    {
+        brls::Application::getWindowSizeChangedEvent()->unsubscribe(resizeSub);
+        resizeSubscribed = false;
+    }
+}
+
+void PosterGrid::relayout()
+{
+    int nextCols = computeColumns();
+    if (nextCols == columns && !(platform_ui::isMobile() && platform_ui::isPortrait()))
+        return;
+    columns = nextCols;
+    if (collectedItems.empty()) return;
+
+    for (brls::View* v = brls::Application::getCurrentFocus(); v; v = v->getParent())
+        if (v == this)
+        {
+            if (parkTarget) brls::Application::giveFocus(parkTarget);
+            break;
+        }
+    *alive = false;
+    alive  = std::make_shared<bool>(true);
+    if (status) removeView(status, false);
+    clearViews();
+    row       = nullptr;
+    firstCard = nullptr;
+    shown     = 0;
+    float gap = gapWidth();
+    float pw  = posterWidth();
+    for (const auto& it : collectedItems)
+    {
+        if (!row || (int)row->getChildren().size() >= columns)
+        {
+            row = new ui::NearestRow();
+            row->setPaddingLeft(inset());
+            row->setMarginBottom(gap);
+            addView(row);
+        }
+        brls::Box* card = catalogPoster(it, alive, pw);
+        if (!firstCard) firstCard = card;
+        row->addView(card);
+        shown++;
+    }
+    if (status) addView(status);
+}
 
 void PosterGrid::load(const tmdb::ListQuery& q, brls::ScrollingFrame* frame)
 {
@@ -47,6 +111,7 @@ void PosterGrid::load(const tmdb::ListQuery& q, brls::ScrollingFrame* frame)
     *alive = false;
     alive  = std::make_shared<bool>(true);
     clearViews();
+    collectedItems.clear();
     row    = nullptr;
     status = nullptr;
     firstCard = nullptr;
@@ -54,6 +119,7 @@ void PosterGrid::load(const tmdb::ListQuery& q, brls::ScrollingFrame* frame)
     page   = 0;
     totalPages = 1;
     loading    = false;
+    columns    = computeColumns();
     query  = q;
     scroll = frame;
     next();
@@ -70,6 +136,7 @@ void PosterGrid::loadPersonCredits(int personId, bool isDirector, brls::Scrollin
     *alive = false;
     alive  = std::make_shared<bool>(true);
     clearViews();
+    collectedItems.clear();
     row    = nullptr;
     status = nullptr;
     firstCard = nullptr;
@@ -77,6 +144,7 @@ void PosterGrid::loadPersonCredits(int personId, bool isDirector, brls::Scrollin
     page   = 0;
     totalPages = 1;
     loading    = true;
+    columns    = computeColumns();
     query  = tmdb::ListQuery();
     scroll = frame;
 
@@ -173,6 +241,7 @@ void PosterGrid::focusFirstIfLost()
 
 void PosterGrid::add(const content::Item& it)
 {
+    collectedItems.push_back(it);
     float gap = gapWidth();
     if (!row || (int)row->getChildren().size() >= columns)
     {

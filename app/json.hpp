@@ -49,4 +49,10 @@ std::string topLevel(const std::string& obj);
 // The text of the object at `key` ("external_ids": {...}), or "".
 std::string object(const std::string& body, const char* key);
 
+// All top-level `"key": "value"` string pairs inside a JSON object `{...}`.
+std::vector<std::pair<std::string, std::string>> stringMap(const std::string& obj);
+
+// The top-level objects of a JSON array `[{...}, {...}]`.
+std::vector<std::string> arrayObjects(const std::string& jsonArray);
+
 } // namespace json

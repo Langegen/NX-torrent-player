@@ -1,10 +1,14 @@
 package org.libsdl.app;
 
 import android.app.Activity;
+import android.app.UiModeManager;
 import android.content.ContentResolver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.content.pm.PackageManager;
+import android.content.res.Configuration;
+import android.content.res.Resources;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.net.ConnectivityManager;
@@ -17,7 +21,11 @@ import android.net.wifi.WifiManager;
 import android.os.BatteryManager;
 import android.os.Message;
 import android.provider.Settings;
+import android.util.DisplayMetrics;
+import android.view.DisplayCutout;
+import android.view.View;
 import android.view.Window;
+import android.view.WindowInsets;
 import android.view.WindowManager;
 
 public class PlatformUtils {
@@ -175,8 +183,17 @@ public class PlatformUtils {
         if (data == null || data.length == 0) return null;
         Bitmap bmp = null;
         try {
+            BitmapFactory.Options bounds = new BitmapFactory.Options();
+            bounds.inJustDecodeBounds = true;
+            BitmapFactory.decodeByteArray(data, 0, data.length, bounds);
+            int sample = 1;
+            int maxDim = Math.max(bounds.outWidth, bounds.outHeight);
+            while (maxDim / sample > 1280) {
+                sample *= 2;
+            }
             BitmapFactory.Options opts = new BitmapFactory.Options();
             opts.inPreferredConfig = Bitmap.Config.ARGB_8888;
+            opts.inSampleSize = sample;
             bmp = BitmapFactory.decodeByteArray(data, 0, data.length, opts);
             if (bmp == null) return null;
             if (bmp.getConfig() != Bitmap.Config.ARGB_8888) {
@@ -240,5 +257,64 @@ public class PlatformUtils {
         WindowManager.LayoutParams lp = window.getAttributes();
         if (lp.screenBrightness < 0) return getSystemScreenBrightness(activity);
         return lp.screenBrightness;
+    }
+
+    public static boolean isAndroidTv() {
+        try {
+            Context context = SDLActivity.getContext();
+            if (context == null) return false;
+            UiModeManager um = (UiModeManager) context.getSystemService(Context.UI_MODE_SERVICE);
+            if (um != null && um.getCurrentModeType() == Configuration.UI_MODE_TYPE_TELEVISION) {
+                return true;
+            }
+            PackageManager pm = context.getPackageManager();
+            if (pm != null) {
+                boolean leanback = pm.hasSystemFeature(PackageManager.FEATURE_LEANBACK);
+                boolean touch = pm.hasSystemFeature(PackageManager.FEATURE_TOUCHSCREEN);
+                if (leanback && !touch) return true;
+            }
+        } catch (Exception ignored) {
+        }
+        return false;
+    }
+
+    public static int[] getDisplayMetrics() {
+        try {
+            Context context = SDLActivity.getContext();
+            Resources res = context != null ? context.getResources() : Resources.getSystem();
+            DisplayMetrics dm = res.getDisplayMetrics();
+            Configuration cfg = res.getConfiguration();
+            int densityX1000 = Math.max(500, Math.round(dm.density * 1000.0f));
+            int swDp = cfg != null ? cfg.smallestScreenWidthDp : 0;
+            return new int[] { dm.widthPixels, dm.heightPixels, densityX1000, swDp };
+        } catch (Exception ignored) {
+        }
+        return new int[] { 0, 0, 1000, 0 };
+    }
+
+    public static int[] getSafeInsetsPx() {
+        int[] out = new int[] { 0, 0, 0, 0 };
+        try {
+            Context context = SDLActivity.getContext();
+            if (!(context instanceof Activity)) return out;
+            Window window = ((Activity) context).getWindow();
+            if (window == null) return out;
+            View decor = window.getDecorView();
+            if (decor == null) return out;
+            if (android.os.Build.VERSION.SDK_INT >= 28) {
+                WindowInsets insets = decor.getRootWindowInsets();
+                if (insets != null) {
+                    DisplayCutout cutout = insets.getDisplayCutout();
+                    if (cutout != null) {
+                        out[0] = Math.max(0, cutout.getSafeInsetTop());
+                        out[1] = Math.max(0, cutout.getSafeInsetRight());
+                        out[2] = Math.max(0, cutout.getSafeInsetBottom());
+                        out[3] = Math.max(0, cutout.getSafeInsetLeft());
+                    }
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        return out;
     }
 }

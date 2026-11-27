@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <strings.h>
@@ -77,17 +78,23 @@
 
 extern "C" {
 #include "httpsrc.h"
+#include "hls_proxy.h"
 #include "torrent.h"
 #include "torrentfs.h"
 #include "engine_services.h"
 }
 
 #include "i18n.hpp"
+#include "osk.hpp"
 
 namespace
 {
 // Textures borealis may keep after no view uses them (see main()).
+#if defined(__ANDROID__) || defined(ANDROID)
+constexpr size_t kUnusedTextures = 32;
+#else
 constexpr size_t kUnusedTextures = 48;
+#endif
 
 #ifdef __SWITCH__
 // --- Async log sink ---------------------------------------------------------
@@ -924,22 +931,8 @@ void promptMagnetInput(std::function<void(std::string)> onDone)
         if (onDone) onDone(magnet);
     };
 
-#ifdef __SWITCH__
-    SwkbdConfig kbd;
-    if (R_FAILED(swkbdCreate(&kbd, 0)))
-        return;
-    swkbdConfigMakePresetDefault(&kbd);
-    swkbdConfigSetHeaderText(&kbd, tr("Magnet link or info hash"));
-    swkbdConfigSetGuideText(&kbd, tr("magnet:?xt=... or a 40-character hash"));
-    swkbdConfigSetStringLenMax(&kbd, 2000);
-    char raw[2048] = { 0 };
-    Result rc = swkbdShow(&kbd, raw, sizeof(raw));
-    swkbdClose(&kbd);
-    if (R_FAILED(rc) || !raw[0])
-        return;
-    persistAndFinish(raw);
-#else
     std::string initial;
+#ifndef __SWITCH__
 #ifdef __SDL2__
     if (char* clip = SDL_GetClipboardText())
     {
@@ -964,14 +957,14 @@ void promptMagnetInput(std::function<void(std::string)> onDone)
         }
     }
 #endif
+#endif
     brls::Application::getImeManager()->openForText(
         [persistAndFinish](std::string out) {
             if (out.empty()) return;
             persistAndFinish(out);
         },
         tr("Magnet link or info hash"),
-        tr("magnet:?xt=... or a 40-character hash"), 2000, initial);
-#endif
+        tr("magnet:?xt=... or a 40-character hash"), 500, initial);
 }
 
 #if defined(__ANDROID__) || defined(ANDROID)
@@ -1341,6 +1334,27 @@ brls::View* buildLocalTab()
 class BrowserFrame : public brls::AppletFrame
 {
   public:
+    BrowserFrame()
+    {
+#if defined(__ANDROID__) || defined(ANDROID)
+        this->registerAction(
+            tr("Back"), brls::BUTTON_B,
+            [this](brls::View*) {
+                auto now = std::chrono::steady_clock::now();
+                if (this->backArmed && now < this->backArmedUntil)
+                {
+                    brls::Application::quit();
+                    return true;
+                }
+                this->backArmed      = true;
+                this->backArmedUntil = now + std::chrono::milliseconds(2500);
+                brls::Application::notify(tr("Press Back again to exit"));
+                return true;
+            },
+            false, false, brls::SOUND_BACK);
+#endif
+    }
+
     // On teardown -- app exit above all -- the header views this frame owns and
     // the live StremioTab beneath it are freed in an order we do not control.
     // Several global sinks bridge those two subtrees: viewTabSink captures the
@@ -1399,6 +1413,8 @@ class BrowserFrame : public brls::AppletFrame
 
   private:
     bool onStremio = false;
+    bool backArmed = false;
+    std::chrono::steady_clock::time_point backArmedUntil;
     // Resolved once: getView() walks the tree by id, which has no business
     // running every frame.
     brls::View* iconSlot = nullptr;
@@ -1663,26 +1679,50 @@ void attachTopTabBar(brls::AppletFrame* frame, brls::Box* content)
     };
 
     auto select = [content, tabButtons, sourceBtn, frame, curTab, restyleTabs,
-                   isSource](config::Tab tab) {
+                   isSource, barScroll, bar](config::Tab tab) {
         *curTab = tab;
         restyleTabs();
         // L and R cycle the Stremio views or the top menu tabs depending on active tab.
         setStremioViewKeys(frame, tab == config::Tab::STREMIO);
         setMenuTabKeys(frame, tab != config::Tab::STREMIO);
-        content->clearViews();  // deletes the previous tab
+
+        brls::Button* active = sourceBtn;
+        for (const auto& t : tabButtons)
+            if (t.tab == tab) active = t.btn;
+
+        ui::safeClearViews(content, active);  // moves focus safely & deletes previous tab
+        workers::bumpLowGeneration();
+        ui::prunePendingUploads();
         brls::View* v = buildTab(tab);
         v->setGrow(1.0f);
         content->addView(v);
         applyTabIdentity(frame, tab);
+
+        // Keep active tab button visible inside the scrollable header bar.
+        if (barScroll && bar && active && bar->getWidth() > barScroll->getWidth())
+        {
+            float bx  = active->getX() - bar->getX();
+            float bw  = active->getWidth();
+            float sw  = barScroll->getWidth();
+            float cw  = bar->getWidth();
+            float cur = barScroll->getContentOffsetX();
+            if (bw > 0.0f && sw > 0.0f)
+            {
+                float target = cur;
+                if (bx < cur)
+                    target = std::max(0.0f, bx - 12.0f);
+                else if (bx + bw > cur + sw)
+                    target = std::min(cw - sw, bx + bw - sw + 12.0f);
+                if (target != cur)
+                    barScroll->setContentOffsetX(target, true);
+            }
+        }
 
         // B returns to the tab bar, which is what TabFrame does for its sidebar
         // -- and the only reliable way back up here. Navigating UP out of a list
         // does not do it: ScrollingFrame::getNextFocus keeps the focus inside
         // while the list can still scroll up, so a deep tab (Stremio's library
         // sits under two more boxes than the local list) never hands it over.
-        brls::Button* active = sourceBtn;
-        for (const auto& t : tabButtons)
-            if (t.tab == tab) active = t.btn;
         v->registerAction(
             tr("Back"), brls::BUTTON_B,
             [active](brls::View*) {
@@ -1747,12 +1787,13 @@ void attachTopTabBar(brls::AppletFrame* frame, brls::Box* content)
             if (*curTab == tabs[i]) sel = i;
         auto* dd = new brls::Dropdown(
             tr("Sources"), { "Jackett", tr("Local"), "Stremio" },
+            [](int) {},
+            sel,
             [select](int i) {
                 const config::Tab t[] = { config::Tab::JACKETT, config::Tab::LOCAL,
                                           config::Tab::STREMIO };
                 if (i >= 0 && i < 3) select(t[i]);
-            },
-            sel);
+            });
         brls::Application::pushActivity(new brls::Activity(dd));
         return true;
     });
@@ -1943,17 +1984,21 @@ void attachTopTabBar(brls::AppletFrame* frame, brls::Box* content)
         bool mobile   = platform_ui::isMobile();
         bool stremio  = *curView >= 0;
 
+        float st = 0.0f, sr = 0.0f, sb = 0.0f, sl = 0.0f;
+        platform_ui::safeInsets(st, sr, sb, sl);
+
         float headerW = cw;
         if (mobile)
         {
             float sideMargin = portrait ? 0.0f : 12.0f;
             float sidePad    = portrait ? 12.0f : 16.0f;
-            float headerH    = portrait ? 74.0f : 80.0f;
+            float baseH      = portrait ? 74.0f : 80.0f;
+            float headerH    = baseH + st;
             headerW          = cw - 2.0f * sideMargin;
             if (auto* header = frame->getHeader())
             {
                 header->setMargins(0.0f, sideMargin, 0.0f, sideMargin);
-                header->setPadding(0.0f, sidePad, 0.0f, sidePad);
+                header->setPadding(st, sidePad + sr, 0.0f, sidePad + sl);
                 header->setHeight(headerH);
                 if (!header->getChildren().empty())
                 {
@@ -1970,7 +2015,7 @@ void attachTopTabBar(brls::AppletFrame* frame, brls::Box* content)
                 float iconSz = portrait ? 40.0f : 48.0f;
                 ic->setDimensions(iconSz, iconSz);
             }
-            float topY = (headerH - 48.0f) * 0.5f;
+            float topY = st + (baseH - 48.0f) * 0.5f;
             barScroll->setClipsToBounds(true);
             barScroll->setHeight(48.0f);
             barScroll->setPositionTop(topY);
@@ -1978,8 +2023,8 @@ void attachTopTabBar(brls::AppletFrame* frame, brls::Box* content)
             viewBar->setPositionTop(topY);
         }
 
-        float leftPad  = mobile ? (portrait ? 58.0f : 74.0f) : (portrait ? 78.0f : 105.0f);
-        float rightPad = mobile ? (portrait ? 8.0f : 16.0f) : (portrait ? 12.0f : 30.0f);
+        float leftPad  = (mobile ? (portrait ? 58.0f : 74.0f) : (portrait ? 78.0f : 105.0f)) + sl;
+        float rightPad = (mobile ? (portrait ? 8.0f : 16.0f) : (portrait ? 12.0f : 30.0f)) + sr;
         float tabPadV  = mobile && portrait ? 8.0f : (portrait ? 10.0f : 12.0f);
         float tabPadH  = mobile && portrait ? 9.0f : (portrait ? 11.0f : 16.0f);
         float tabFont  = mobile && portrait ? 17.0f : btnFont;
@@ -2215,12 +2260,19 @@ int main(int argc, char* argv[])
     // https:// playback verifies against the same bundle as the app's own
     // requests (app/http.cpp): the console mounts no CA store.
     httpsrc_set_ca("romfs:/cacert.pem");
+    hls_proxy_set_ca("romfs:/cacert.pem");
 #elif defined(__ANDROID__) || defined(ANDROID)
     if (access(APPDATA_DIR "/cacert.pem", F_OK) == 0)
+    {
         httpsrc_set_ca(APPDATA_DIR "/cacert.pem");
+        hls_proxy_set_ca(APPDATA_DIR "/cacert.pem");
+    }
 #else
     if (access("resources/cacert.pem", F_OK) == 0)
+    {
         httpsrc_set_ca("resources/cacert.pem");
+        hls_proxy_set_ca("resources/cacert.pem");
+    }
 #endif
 
     config::load();
@@ -2319,6 +2371,15 @@ int main(int argc, char* argv[])
     }
 
     brls::Application::createWindow("NX Torrent Player");
+    osk::applyConfig();
+#ifdef __SWITCH__
+    // Adaptive idle FPS in menus reduces GPU/Mesa queue backlog so Switch
+    // Capture screenshots respond quickly while keeping 60 FPS during active
+    // navigation and playback (player disables idle throttling via keepAwake).
+    brls::Application::setDeactivatedTime(1500);
+    brls::Application::setDeactivatedFPS(20);
+    brls::Application::setAutomaticDeactivation(true);
+#endif
     if (platform_ui::isMobile())
     {
         brls::AppletFrame::HIDE_BOTTOM_BAR = true;
@@ -2374,12 +2435,14 @@ int main(int argc, char* argv[])
         brls::sync([initialUri]() { handleIncomingMagnet(initialUri); });
 #endif
 
+#ifdef __SWITCH__
     // A quiet check: it only ever surfaces when there IS a newer release, so a
     // missing network or an unreachable GitHub costs nothing but a log line.
     if (config::get().checkUpdates)
         update::checkAsync([](update::Release r) {
             if (r.ok && r.installable()) update::promptInstall(r);
         });
+#endif
 
     cloud_sync::init();
     cloud_sync::triggerAutoSync();

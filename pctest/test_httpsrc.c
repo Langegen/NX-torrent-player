@@ -186,7 +186,7 @@ static void test_sequential_read(void) {
     }
     CHECK(httpsrc_read(s, pos, buf, 10) == 0);   // EOF
     printf("      %d requests for %d bytes\n", sv.requests, FILE_SIZE);
-    CHECK(sv.requests == 3);                     // 4 + 4 + 2 MiB
+    CHECK(sv.requests == 5);                     // 0.5 + 1 + 2 + 4 + 2.5 MiB ramp
     free(buf);
     httpsrc_close(s);
     server_stop(&sv);

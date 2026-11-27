@@ -43,11 +43,16 @@ static void on_applet_hook(AppletHookType hook, void* arg)
             {
                 case AppletFocusState_InFocus:
                     brls::Logger::info("AppletFocusState_InFocus");
+                    // LOCAL PATCH (NX-torrent-player): resume UI rendering on focus gain
+                    brls::Application::setInBackground(false);
+                    brls::Application::setActiveEvent(true);
                     brls::Application::getWindowFocusChangedEvent()->fire(true);
                     break;
                 case AppletFocusState_OutOfFocus:
                 case AppletFocusState_Background:
                     brls::Logger::info("AppletFocusState_OutOfFocus");
+                    // LOCAL PATCH (NX-torrent-player): pause GL/NanoVG draws behind overlays/Home
+                    brls::Application::setInBackground(true);
                     brls::Application::getWindowFocusChangedEvent()->fire(false);
                     break;
                 default:

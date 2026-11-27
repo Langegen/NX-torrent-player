@@ -19,6 +19,7 @@
 #include <borealis/views/scrolling_frame.hpp>
 
 #include <algorithm>
+#include <atomic>
 #include <cstdio>
 #include <dirent.h>
 #include <sys/stat.h>
@@ -28,8 +29,10 @@
 #include <ctime>
 #include <deque>
 #include <map>
+#include <mutex>
 #include <set>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 #include "appdata.hpp"
@@ -317,8 +320,76 @@ int64_t posterCacheBytes()
     return total;
 }
 
+static std::mutex s_posterIdxMtx;
+static std::unordered_set<std::string> s_posterFiles;
+static bool s_posterIdxReady       = false;
+static bool s_posterIdxScanStarted = false;
+static uint64_t s_posterIdxEpoch   = 0;
+
+static std::string posterFileName(const std::string& fullPath)
+{
+    size_t pos = fullPath.find_last_of('/');
+    return pos == std::string::npos ? fullPath : fullPath.substr(pos + 1);
+}
+
+static void ensurePosterIndexStarted()
+{
+    uint64_t epoch = 0;
+    {
+        std::lock_guard<std::mutex> g(s_posterIdxMtx);
+        if (s_posterIdxScanStarted) return;
+        s_posterIdxScanStarted = true;
+        epoch = s_posterIdxEpoch;
+    }
+    workers::run([epoch]() {
+        std::unordered_set<std::string> found;
+        if (DIR* d = opendir(APPDATA_POSTERS))
+        {
+            struct dirent* e;
+            while ((e = readdir(d)))
+            {
+                if (e->d_name[0] == '.' &&
+                    (e->d_name[1] == '\0' || (e->d_name[1] == '.' && e->d_name[2] == '\0')))
+                    continue;
+                found.emplace(e->d_name);
+            }
+            closedir(d);
+        }
+        std::lock_guard<std::mutex> g(s_posterIdxMtx);
+        if (s_posterIdxEpoch != epoch)
+        {
+            // Cache was cleared while scanning; allow a future rescan.
+            s_posterIdxScanStarted = false;
+            return;
+        }
+        s_posterFiles.insert(found.begin(), found.end());
+        s_posterIdxReady = true;
+    }, workers::Priority::High);
+}
+
+static bool isPosterIndexed(const std::string& fullPath)
+{
+    ensurePosterIndexStarted();
+    std::string name = posterFileName(fullPath);
+    std::lock_guard<std::mutex> g(s_posterIdxMtx);
+    return s_posterIdxReady && s_posterFiles.count(name) > 0;
+}
+
+static void markPosterCached(const std::string& fullPath)
+{
+    std::string name = posterFileName(fullPath);
+    std::lock_guard<std::mutex> g(s_posterIdxMtx);
+    s_posterFiles.insert(std::move(name));
+}
+
 void clearPosterCache()
 {
+    {
+        std::lock_guard<std::mutex> g(s_posterIdxMtx);
+        s_posterFiles.clear();
+        s_posterIdxReady = true;
+        s_posterIdxEpoch++;
+    }
     if (DIR* d = opendir(APPDATA_POSTERS))
     {
         struct dirent* e;
@@ -1161,11 +1232,7 @@ std::string cachedPosterPath(const std::string& id)
 {
     if (id.empty()) return "";
     std::string path = posterCachePath(id);
-    if (FILE* f = std::fopen(path.c_str(), "rb"))
-    {
-        std::fclose(f);
-        return path;
-    }
+    if (isPosterIndexed(path)) return path;
     return "";
 }
 
@@ -1175,29 +1242,54 @@ std::string cachedPosterPath(const std::string& id)
 // Downloads in flight, by file: the same poster is often on screen twice (a
 // title both trending and popular) and asked for in the same frame. One
 // download, every caller told. UI thread only.
-static std::map<std::string, std::vector<std::function<void(std::string)>>> imagesInFlight;
+struct InFlightImage
+{
+    std::vector<std::function<void(std::string)>> cbs;
+    std::shared_ptr<std::atomic<uint64_t>> reqGen;
+    bool cancelable = true;
+};
+static std::map<std::string, InFlightImage> imagesInFlight;
 
 static void downloadImageAsync(const std::string& id, const std::string& url,
                         const std::string& path,
-                        std::function<void(std::string)> doneOne)
+                        std::function<void(std::string)> doneOne,
+                        bool cancelable = true)
 {
     auto waiting = imagesInFlight.find(path);
     if (waiting != imagesInFlight.end())
     {
-        waiting->second.push_back(std::move(doneOne));
+        waiting->second.reqGen->store(workers::lowGeneration(), std::memory_order_release);
+        if (!cancelable) waiting->second.cancelable = false;
+        waiting->second.cbs.push_back(std::move(doneOne));
         return;
     }
-    imagesInFlight[path].push_back(std::move(doneOne));
+    auto reqGen = std::make_shared<std::atomic<uint64_t>>(workers::lowGeneration());
+    imagesInFlight[path] = { { std::move(doneOne) }, reqGen, cancelable };
     auto done = [path](std::string result) {
         auto it = imagesInFlight.find(path);
         if (it == imagesInFlight.end()) return;
-        auto callbacks = std::move(it->second);
+        auto callbacks = std::move(it->second.cbs);
         imagesInFlight.erase(it);
         for (auto& cb : callbacks) cb(result);
     };
 
     // Low priority: what someone is waiting on (details, a search) goes first.
-    workers::run([id, url, path, done]() {
+    workers::run([id, url, path, done, reqGen, cancelable]() {
+        if (cancelable && reqGen->load(std::memory_order_acquire) != workers::lowGeneration())
+        {
+            brls::sync([done]() { done(""); });
+            return;
+        }
+        // Fallback disk check off the UI thread before hitting the network (e.g.
+        // during startup before the initial directory scan completes).
+        if (FILE* f = std::fopen(path.c_str(), "rb"))
+        {
+            std::fclose(f);
+            markPosterCached(path);
+            brls::sync([done, path]() { done(path); });
+            return;
+        }
+
         std::string body, err;
         // Ask for a format stb_image can actually decode.
         static const char* kAcceptImg = "Accept: image/jpeg,image/png;q=0.9";
@@ -1255,6 +1347,7 @@ static void downloadImageAsync(const std::string& id, const std::string& url,
                 wrote      = std::fclose(f) == 0 && wrote;
                 std::remove(path.c_str());
                 ok = wrote && std::rename(tmp.c_str(), path.c_str()) == 0;
+                if (ok) markPosterCached(path);
                 if (!ok) std::remove(tmp.c_str());
             }
             else
@@ -1375,14 +1468,13 @@ void fetchHqArtAsync(const std::string& id, const std::string& url,
     // Kept apart from the thumbnail cache: same id, different image. Sharing the
     // key would mean whichever screen ran first decided the quality for both.
     std::string path = posterCachePath(id) + ".hq.jpg";
-    if (FILE* f = std::fopen(path.c_str(), "rb"))
+    if (isPosterIndexed(path))
     {
-        std::fclose(f);
         done(path);
         return;
     }
 
-    downloadImageAsync(id, metahubSize(src, "/large/"), path, done);
+    downloadImageAsync(id, metahubSize(src, "/large/"), path, done, false);
 }
 
 // The account's addon collection, fetched once. It only changes when the user

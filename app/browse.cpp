@@ -129,10 +129,10 @@ std::string playableSource(const stremio::Stream& s)
 std::string deEmoji(const std::string& s)
 {
     struct { const char* from; const char* to; } map[] = {
-        { "👤", "seeds:" }, { "💾", "taille:" }, { "⚙️", "src:" },
+        { "👤", "seeds:" }, { "💾", "size:" },   { "⚙️", "src:" },
         { "⚙", "src:" },    { "🌐", "lang:" },   { "🎬", "" },
         { "📺", "" },        { "⭐", "" },        { "🔊", "audio:" },
-        { "🇬🇧", "EN" },     { "🇫🇷", "FR" },
+        { "🇬🇧", "EN" },     { "🇫🇷", "FR" },     { "🇷🇺", "RU" },
     };
     std::string out = s;
     for (const auto& m : map)
@@ -141,18 +141,31 @@ std::string deEmoji(const std::string& s)
         while ((p = out.find(m.from)) != std::string::npos)
             out.replace(p, std::strlen(m.from), m.to);
     }
-    // Anything still non-ASCII would draw as a blank box; strip it.
+    // Strip 4-byte emoji pictographs and misc 3-byte symbol blocks while
+    // preserving standard punctuation (en/em dashes, ellipsis, bullets) and Cyrillic/Latin.
     std::string clean;
     for (size_t i = 0; i < out.size();)
     {
         unsigned char c = out[i];
         if (c < 0x80) { clean += (char)c; i++; continue; }
         int len = (c >= 0xF0) ? 4 : (c >= 0xE0) ? 3 : (c >= 0xC0) ? 2 : 1;
-        // Keep Latin-1 range accents, drop pictographs.
-        if (len == 2) { clean += out.substr(i, 2); }
+        if (i + len > out.size()) break;
+        if (len == 2)
+        {
+            clean.append(out, i, 2);
+        }
+        else if (len == 3)
+        {
+            unsigned char c1 = out[i + 1];
+            unsigned char c2 = out[i + 2];
+            // Keep general punctuation (U+2000..U+206F) & Cyrillic/CJK text; drop dingbats/emoji symbols (U+2600..U+27BF)
+            uint32_t cp = ((c & 0x0F) << 12) | ((c1 & 0x3F) << 6) | (c2 & 0x3F);
+            if (!(cp >= 0x2600 && cp <= 0x27BF))
+                clean.append(out, i, 3);
+        }
         i += len;
     }
-    // Collapse the runs of spaces the removals leave behind.
+    // Collapse runs of spaces left by stripped pictographs.
     std::string tight;
     bool sp = false;
     for (char c : clean)

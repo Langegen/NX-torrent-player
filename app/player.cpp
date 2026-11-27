@@ -59,11 +59,13 @@
 #include "widgets.hpp"
 #include "release.hpp"  // episodeOfFile: which episode a file of a pack is
 #include "torrent_play.hpp"  // videoFilesOf, for the episode list
+#include "online/online_manager.hpp"
 #include "sync/sync_manager.hpp"
 
 extern "C" {
 #include "torrentfs.h"
 #include "httpsrc.h"
+#include "hls_proxy.h"
 #include "stream.h"
 #include "torrent.h"  // magnet metadata-fetch progress counters
 #include "engine_services.h"
@@ -244,18 +246,34 @@ class PlayPauseButton : public brls::Box
 };
 } // namespace
 
+inline void setMpvPropAsync(mpv_handle* m, const char* name, const char* val)
+{
+    if (!m || !name) return;
+    const char* v = val ? val : "";
+    mpv_set_property_async(m, 0, name, MPV_FORMAT_STRING, (void*)&v);
+}
+
 // The OS's "a video is playing" flag, counted per live player: switching
 // episodes builds the next player before the previous one's destructor runs,
 // and a plain true/false pair turned the flag off under the new episode.
 void keepAwake(int delta)
 {
-#ifdef __SWITCH__
     static int players = 0;  // UI thread only
     int before = players;
     players += delta;
     if (players < 0) players = 0;
-    if ((before > 0) != (players > 0)) appletSetMediaPlaybackState(players > 0);
+    if ((before > 0) != (players > 0))
+    {
+        const bool active = players > 0;
+#ifdef __SWITCH__
+        appletSetMediaPlaybackState(active);
+#else
+        if (auto* p = brls::Application::getPlatform())
+            p->disableScreenDimming(active, "video playback", "NX-torrent-player");
 #endif
+        // Keep video playback locked at full refresh; re-enable idle throttling in menus.
+        brls::Application::setAutomaticDeactivation(!active);
+    }
 }
 
 // Pops `n` activities back-to-back, then runs `then`. A free function, not a
@@ -426,7 +444,9 @@ MpvView::MpvView(const std::string& source, const PlayerArt& art,
         viaTorrServer = !torrserver::base().empty();
     if (currentSourceType.empty())
     {
-        if (!this->watch.itemId.empty())
+        if (this->watch.online.active)
+            currentSourceType = "Online";
+        else if (!this->watch.itemId.empty())
             currentSourceType = "Stremio";
         else if (direct)
             currentSourceType = "Link";
@@ -489,12 +509,16 @@ MpvView::MpvView(const std::string& source, const PlayerArt& art,
 
 #if defined(__ANDROID__) || defined(ANDROID)
     focusSub = brls::Application::getWindowFocusChangedEvent()->subscribe(
-        [this](bool focused) {
-            if (!focused && mpv && ready && !userPaused)
+        [this, live = alive](bool focused) {
+            if (!*live || focused || !mpv) return;
+            if (!userPaused)
             {
                 userPaused = true;
-                mpv_set_property_string(mpv, "pause", "yes");
+                setMpvPropAsync(mpv, "pause", "yes");
                 setControlsVisible(true);
+            }
+            if (ready)
+            {
                 maybePushWatchState(true);
                 maybeUpdateHistory(true);
             }
@@ -510,6 +534,50 @@ MpvView::MpvView(const std::string& source, const PlayerArt& art,
 // it inline froze the whole app on a black screen until it finished or failed.
 void MpvView::startEngine(const std::string& source, int fileIndex)
 {
+    if (watch.online.active)
+    {
+        if (!watch.online.subtitles.empty())
+        {
+            for (size_t i = 0; i < watch.online.subtitles.size(); i++)
+            {
+                const auto& s = watch.online.subtitles[i];
+                stremio::Subtitle sub;
+                sub.id    = "online_" + std::to_string(i);
+                sub.lang  = s.lang.empty() ? s.label : s.lang;
+                sub.addon = watch.online.balancerId.empty() ? "Online" : watch.online.balancerId;
+                sub.url   = s.url;
+                onlineSubs.push_back(std::move(sub));
+            }
+            if (watch.authKey.empty() || watch.videoId.empty())
+                onlineSubState = SubFetch::Done;
+        }
+        if (watch.online.episodes.size() >= 2)
+        {
+            playlist.clear();
+            for (size_t i = 0; i < watch.online.episodes.size(); i++)
+            {
+                const auto& ep = watch.online.episodes[i];
+                PlaylistItem p;
+                p.fileIndex = (int)i;
+                if (ep.episode > 0)
+                    p.label = tr("Episode ") + std::to_string(ep.episode) +
+                              (ep.title.empty() ? "" : (" \xC2\xB7 " + ep.title));
+                else
+                    p.label = ep.title;
+                p.path = ep.url;
+                playlist.push_back(std::move(p));
+            }
+            playlistCur      = watch.online.currentEpisodeIdx;
+            playlistEpisodic = true;
+            if (barSubtitle && playlistCur >= 0 && playlistCur < (int)playlist.size())
+            {
+                barSubtitle->setText(playlist[(size_t)playlistCur].label);
+                barSubtitle->setVisibility(brls::Visibility::VISIBLE);
+            }
+            refreshButtons();
+        }
+    }
+
     // A URL needs no engine: mpv opens it itself (the connect happens on mpv's
     // own thread, inside loadfile).
     if (direct)
@@ -690,16 +758,22 @@ bool MpvView::startMpv()
     mpv_set_option_string(mpv, "fbo-format", "rgba8");
     mpv_set_option_string(mpv, "config", "no");
 #if defined(__ANDROID__) || defined(ANDROID)
-    // Android uses AudioTrack/OpenSL ES and needs subfont.ttf + system fonts for ASS/SRT subs.
-    mpv_set_option_string(mpv, "ao", "audiotrack,opensles");
+    // Prefer native NDK AAudio on Android 8.1+ (avoids AudioTrack JNI stalls),
+    // falling back to AudioTrack/OpenSL ES on older devices.
+    mpv_set_option_string(mpv, "ao", "aaudio,audiotrack,opensles");
     mpv_set_option_string(mpv, "config-dir", androidStoragePath());
     mpv_set_option_string(mpv, "sub-fonts-dir", "/system/fonts");
 #endif
     mpv_set_option_string(mpv, "terminal", "no");
+#ifdef __SWITCH__
     // Switch audio output is strictly 48kHz stereo; resample all audio to 48kHz
     // upfront to eliminate clock drift between media stream and the hardware audio driver.
     mpv_set_option_string(mpv, "audio-samplerate", "48000");
     mpv_set_option_string(mpv, "audio-channels", "stereo");
+#else
+    mpv_set_option_string(mpv, "audio-channels",
+                          platform_ui::isMobile() ? "stereo" : "auto-safe");
+#endif
     // Do NOT normalize the downmix: "yes" scales the 5.1->stereo matrix down to
     // avoid clipping, which was one reason 5.1 tracks played quiet. "no" keeps the
     // standard downmix levels so the centre (dialogue) folds in at full strength.
@@ -779,12 +853,10 @@ bool MpvView::startMpv()
     // UTF-8 file is still read as UTF-8. CP1252 is the right guess for the
     // languages this app offers; a Cyrillic or Greek subtitle would still need
     // its own, which is a setting nobody has asked for yet.
-#if defined(__ANDROID__) || defined(ANDROID)
     mpv_set_option_string(mpv, "sub-codepage",
-                          i18n::lang() == "ru" ? "cp1251" : "cp1252");
-#else
-    mpv_set_option_string(mpv, "sub-codepage", "cp1252");
-#endif
+                          (i18n::lang() == "ru" || config::preferredSubLang() == "ru")
+                              ? "cp1251"
+                              : "cp1252");
     mpv_set_option_string(mpv, "cache", "yes");
     // Initial buffering is still controlled by our loading overlay (we start
     // paused until startTargetSecs()), so cache-pause-initial stays off.
@@ -797,8 +869,14 @@ bool MpvView::startMpv()
     // Give the demuxer enough headroom to buffer bufferSecs() before we
     // unpause. The sizes come from Options -> Buffer size.
     const config::BufferPreset buf = config::bufferPreset();
+#if defined(__ANDROID__) || defined(ANDROID)
+    int demuxMiB = std::min(buf.demuxerMaxMiB, sizeof(void*) == 4 ? 128 : 256);
+    mpv_set_option_string(mpv, "demuxer-max-bytes",
+                          (std::to_string(demuxMiB) + "MiB").c_str());
+#else
     mpv_set_option_string(mpv, "demuxer-max-bytes",
                           (std::to_string(buf.demuxerMaxMiB) + "MiB").c_str());
+#endif
     mpv_set_option_string(mpv, "demuxer-readahead-secs",
                           std::to_string(buf.readaheadSecs).c_str());
     // With cache=yes, mpv's cache-secs (default 10) *overrides*
@@ -810,8 +888,13 @@ bool MpvView::startMpv()
     // What was already played stays in the demuxer cache (mpv's default 50 MiB
     // is ~40 s of 1080p): a rewind inside it is instant, and for a direct link
     // it is the only copy -- the engine's back window covers torrents beyond it.
+#if defined(__ANDROID__) || defined(ANDROID)
+    mpv_set_option_string(mpv, "demuxer-max-back-bytes",
+                          sizeof(void*) == 4 ? "48MiB" : "96MiB");
+#else
     mpv_set_option_string(mpv, "demuxer-max-back-bytes",
                           config::isAppletMode() ? "32MiB" : "128MiB");
+#endif
 #if !defined(__ANDROID__) && !defined(ANDROID)
     // On Switch the hardware decoder's GPU work is async; without a glFinish
     // after mpv's render, glfwSwapBuffers can present before the video is drawn
@@ -889,6 +972,15 @@ bool MpvView::startMpv()
     mpv_observe_property(mpv, 0, "duration", MPV_FORMAT_DOUBLE);
     // The decoded picture's width: above 1080p the scalers go cheap.
     mpv_observe_property(mpv, 0, "width", MPV_FORMAT_INT64);
+    mpv_observe_property(mpv, 0, "height", MPV_FORMAT_INT64);
+    mpv_observe_property(mpv, 0, "container-fps", MPV_FORMAT_DOUBLE);
+    mpv_observe_property(mpv, 0, "frame-drop-count", MPV_FORMAT_INT64);
+    mpv_observe_property(mpv, 0, "decoder-frame-drop-count", MPV_FORMAT_INT64);
+    mpv_observe_property(mpv, 0, "hwdec-current", MPV_FORMAT_STRING);
+    mpv_observe_property(mpv, 0, "video-codec", MPV_FORMAT_STRING);
+    mpv_observe_property(mpv, 0, "video-format", MPV_FORMAT_STRING);
+    mpv_observe_property(mpv, 0, "video-params/pixelformat", MPV_FORMAT_STRING);
+    mpv_observe_property(mpv, 0, "volume", MPV_FORMAT_DOUBLE);
     // The subtitle track, for the subtitles chip's on/off.
     mpv_observe_property(mpv, 0, "sid", MPV_FORMAT_STRING);
 
@@ -896,30 +988,7 @@ bool MpvView::startMpv()
     {
         mpv_observe_property(mpv, 0, "cache-speed", MPV_FORMAT_DOUBLE);
         mpv_observe_property(mpv, 0, "file-size", MPV_FORMAT_INT64);
-        // http:// (and HLS over it) is FFmpeg's own; https:// is not compiled
-        // into this FFmpeg, so it goes through curl as nxhttps://.
-        std::string url = playUrl;
-        std::string proxy = http::proxyFor(url);  // "" for a local server
-        if (url.rfind("https://", 0) == 0)
-        {
-            httpsrc_set_proxy(proxy.c_str());
-            stream_register_http(mpv, &httpAbort);
-            url = "nx" + url;
-        }
-        else if (proxy.rfind("http://", 0) == 0)
-        {
-            // FFmpeg's http speaks to an http proxy only, not socks.
-            mpv_set_property_string(mpv, "http-proxy", proxy.c_str());
-        }
-        else if (!proxy.empty())
-        {
-            brls::Logger::warning("[player] a socks proxy cannot carry an http:// "
-                                  "stream; connecting directly");
-        }
-        mpvUrl = url;
-        const char* cmd[] = { "loadfile", url.c_str(), nullptr };
-        mpv_command(mpv, cmd);
-        brls::Logger::info("loadfile direct stream from {}", urlHost(playUrl));
+        loadDirectUrl(playUrl);
         return true;
     }
 
@@ -929,6 +998,163 @@ bool MpvView::startMpv()
     mpv_command(mpv, cmd);
     brls::Logger::info("loadfile torrent://stream issued");
     return true;
+}
+
+void MpvView::loadDirectUrl(const std::string& rawUrl, double seekToSec)
+{
+    if (!mpv) return;
+    std::string url   = rawUrl;
+    std::string proxy = http::proxyFor(url);
+
+    auto lowerStr = [](std::string s) {
+        for (char& c : s) c = (char)std::tolower((unsigned char)c);
+        return s;
+    };
+    auto looksLikeHls = [&](const std::string& u) {
+        std::string low = lowerStr(u);
+        std::string path = low.substr(0, low.find_first_of("?#"));
+        if (path.size() >= 5 && path.compare(path.size() - 5, 5, ".m3u8") == 0) return true;
+        if (low.find("m3u8") != std::string::npos) return true;
+        return false;
+    };
+
+    bool useHlsProxy = false;
+    bool isHttps     = (url.rfind("https://", 0) == 0);
+    bool isHttp      = (url.rfind("http://", 0) == 0);
+    bool isSocks     = (proxy.rfind("socks", 0) == 0);
+
+#ifdef __SWITCH__
+    // Portlibs FFmpeg has no https or crypto (AES-128) protocols, and nxhttps://
+    // only serves byte-ranged single files. Any HTTPS HLS stream, online balancer
+    // stream, custom-header stream, or SOCKS-proxied HTTP stream goes through
+    // our local loopback hls_proxy.
+    if (isHttps && (looksLikeHls(url) || watch.online.active || !watch.online.httpHeaders.empty()))
+        useHlsProxy = true;
+    else if (isHttp && (isSocks || !watch.online.httpHeaders.empty()))
+        useHlsProxy = true;
+#else
+    // PC & Android libmpv natively handle https:// and HLS; use hls_proxy only
+    // when routing through a SOCKS proxy (FFmpeg http-proxy only speaks HTTP).
+    (void)looksLikeHls;
+    if ((isHttps || isHttp) && isSocks) useHlsProxy = true;
+#endif
+
+    if (useHlsProxy)
+    {
+        hls_proxy_set_proxy(proxy.c_str());
+        if (!hlsProxy)
+        {
+            std::vector<const char*> hdrPtrs;
+            for (const auto& h : watch.online.httpHeaders) hdrPtrs.push_back(h.c_str());
+            char err[160] = { 0 };
+            hlsProxy = hls_proxy_start(hdrPtrs.empty() ? nullptr : hdrPtrs.data(),
+                                       (int)hdrPtrs.size(), err, sizeof(err));
+            if (!hlsProxy)
+                brls::Logger::warning("[player] hls_proxy_start failed: {}", err);
+        }
+        if (hlsProxy)
+        {
+            char proxied[4096] = { 0 };
+            if (hls_proxy_make_url(hlsProxy, url.c_str(), proxied, sizeof(proxied)) == 0)
+            {
+                url = proxied;
+                mpv_set_property_string(mpv, "http-proxy", "");
+            }
+        }
+    }
+    else if (isHttps)
+    {
+#ifdef __SWITCH__
+        httpsrc_set_proxy(proxy.c_str());
+        std::vector<const char*> hdrPtrs;
+        for (const auto& h : watch.online.httpHeaders) hdrPtrs.push_back(h.c_str());
+        httpsrc_set_headers(hdrPtrs.empty() ? nullptr : hdrPtrs.data(), (int)hdrPtrs.size());
+        stream_register_http(mpv, &httpAbort);
+        url = "nx" + url;
+#else
+        if (proxy.rfind("http://", 0) == 0)
+            mpv_set_property_string(mpv, "http-proxy", proxy.c_str());
+#endif
+    }
+    else if (proxy.rfind("http://", 0) == 0)
+    {
+        mpv_set_property_string(mpv, "http-proxy", proxy.c_str());
+    }
+    else if (!proxy.empty())
+    {
+        brls::Logger::warning("[player] a socks proxy cannot carry an http:// "
+                              "stream; connecting directly");
+    }
+
+#ifndef __SWITCH__
+    if (!useHlsProxy && !watch.online.httpHeaders.empty())
+    {
+        // Forward custom Referer / User-Agent / headers natively to libmpv.
+        std::vector<std::string> extra;
+        for (const auto& h : watch.online.httpHeaders)
+        {
+            size_t col = h.find(':');
+            if (col == std::string::npos) continue;
+            std::string k = lowerStr(h.substr(0, col));
+            std::string v = h.substr(col + 1);
+            while (!v.empty() && (v.front() == ' ' || v.front() == '\t')) v.erase(0, 1);
+            if (k == "user-agent")
+                mpv_set_property_string(mpv, "user-agent", v.c_str());
+            else if (k == "referer" || k == "referrer")
+                mpv_set_property_string(mpv, "referrer", v.c_str());
+            else
+                extra.push_back(h);
+        }
+        if (!extra.empty())
+        {
+            std::vector<const char*> ptrs;
+            for (const auto& e : extra) ptrs.push_back(e.c_str());
+            ptrs.push_back(nullptr);
+            mpv_node arr;
+            arr.format = MPV_FORMAT_NODE_ARRAY;
+            mpv_node_list list;
+            std::vector<mpv_node> vals(extra.size());
+            for (size_t i = 0; i < extra.size(); i++)
+            {
+                vals[i].format   = MPV_FORMAT_STRING;
+                vals[i].u.string = const_cast<char*>(extra[i].c_str());
+            }
+            list.num    = (int)vals.size();
+            list.values = vals.data();
+            list.keys   = nullptr;
+            arr.u.list  = &list;
+            mpv_set_property(mpv, "http-header-fields", MPV_FORMAT_NODE, &arr);
+        }
+    }
+#endif
+
+    if (seekToSec >= 0.0)
+    {
+        char st[32];
+        std::snprintf(st, sizeof(st), "%.1f", seekToSec);
+        mpv_set_property_string(mpv, "start", st);
+    }
+
+    mpvUrl = url;
+    const char* cmd[] = { "loadfile", url.c_str(), nullptr };
+    mpv_command(mpv, cmd);
+    brls::Logger::info("loadfile direct stream from {}{}", urlHost(rawUrl),
+                       useHlsProxy ? " (via hls_proxy)" : "");
+}
+
+void MpvView::switchOnlineQuality(int idx)
+{
+    if (!mpv || !watch.online.active) return;
+    if (idx < 0 || idx >= (int)watch.online.qualities.size()) return;
+    const auto& q = watch.online.qualities[(size_t)idx];
+    if (q.url.empty() || q.label == watch.online.currentQuality) return;
+
+    playUrl = q.url;
+    watch.online.currentQuality = q.label;
+    streamRetries = 0;
+    double pos = obsPos > 0.0 ? obsPos : lastPosSec;
+    loadDirectUrl(playUrl, pos);
+    flashPill(tr("Quality  ") + q.label);
 }
 
 namespace
@@ -1201,9 +1427,18 @@ bool MpvView::command(Cmd c)
 // the player -- that last one only on a second press while a video plays.
 void MpvView::onBack()
 {
+    singleTapPending = false;
     if (seeking)
     {
         cancelSeek();
+        return;
+    }
+    if (platform_ui::isMobile())
+    {
+        backArmed = false;
+        brls::Logger::info("[teardown] Back (mobile) -> popActivity()");
+        bool ok = brls::Application::popActivity();
+        brls::Logger::info("[teardown] popActivity() returned {}", ok);
         return;
     }
     if (controlsShown && ready)
@@ -1955,6 +2190,16 @@ void MpvView::updateSleepTimer()
 // "Season 1 · Episode 5" (or the file's name) for what "next" would open.
 std::string MpvView::nextEpisodeLabel()
 {
+    if (watch.online.active && playlistCur >= 0 &&
+        playlistCur + 1 < (int)watch.online.episodes.size())
+    {
+        const auto& ep = watch.online.episodes[(size_t)playlistCur + 1];
+        int s = ep.season > 0 ? ep.season : watch.season;
+        if (s > 0 && ep.episode > 0)
+            return tr("Season ") + std::to_string(s) + " \xC2\xB7 " + tr("Episode ") +
+                   std::to_string(ep.episode);
+        return ep.title;
+    }
     if (playlistCur >= 0 && playlistCur + 1 < (int)playlist.size())
     {
         const PlaylistItem& p = playlist[(size_t)playlistCur + 1];
@@ -2171,6 +2416,101 @@ void MpvView::fetchTorrServerPlaylist(const std::string& link)
 void MpvView::playPlaylistItem(int i)
 {
     if (i < 0 || i >= (int)playlist.size() || i == playlistCur || ended || switching) return;
+
+    if (watch.online.active && i < (int)watch.online.episodes.size())
+    {
+        const PlayerOnlineEpisode ep = watch.online.episodes[(size_t)i];
+        switching     = true;
+        nextCardShown = false;
+        if (nextCard) nextCard->setVisibility(brls::Visibility::GONE);
+
+        auto launchEp = [this, i](const PlayerOnlineEpisode& resolvedEp) {
+            const auto& cfg = config::get();
+            std::string chosenLabel;
+            std::string chosenUrl;
+            if (!resolvedEp.qualities.empty())
+            {
+                std::vector<online::OnlineQuality> qs;
+                for (const auto& q : resolvedEp.qualities)
+                    qs.push_back({ q.label, q.url, q.height });
+                int qIdx = online::pickBestQualityIndex(qs, cfg.onlinePreferQuality, cfg.hide4k);
+                if (qIdx >= 0 && qIdx < (int)qs.size())
+                {
+                    chosenLabel = qs[(size_t)qIdx].label;
+                    chosenUrl   = qs[(size_t)qIdx].url;
+                }
+            }
+            if (chosenUrl.empty()) chosenUrl = resolvedEp.url;
+
+            int s = resolvedEp.season > 0 ? resolvedEp.season : watch.season;
+            int e = resolvedEp.episode;
+            PlayHint h = episodeHint(watch.content, s, e, watch.nextPop);
+            WatchInfo w = h.watch;
+            w.endPop    = watch.endPop;
+            w.resumeSec = 0.0;
+            w.online    = watch.online;
+            w.online.currentEpisodeIdx = i;
+            w.online.currentQuality    = chosenLabel;
+            if (!resolvedEp.qualities.empty()) w.online.qualities = resolvedEp.qualities;
+            if (!resolvedEp.subtitles.empty()) w.online.subtitles = resolvedEp.subtitles;
+            if (!resolvedEp.headers.empty()) w.online.httpHeaders = resolvedEp.headers;
+            if (i + 1 < (int)w.online.episodes.size())
+            {
+                const auto& nx = w.online.episodes[(size_t)(i + 1)];
+                int ns = nx.season > 0 ? nx.season : s;
+                if (nx.episode > 0)
+                    w.nextVideoId = watch.content.key() + ":" + std::to_string(ns) + ":" +
+                                    std::to_string(nx.episode);
+            }
+
+            PlayerArt a      = art;
+            std::string t    = h.title;
+            brls::sync([act = getParentActivity(), chosenUrl, a, t, w]() {
+                popPlayerThen(act, 1, [chosenUrl, a, t, w]() {
+                    startPlaybackPrompt(chosenUrl, a, t, -1, w, "Online");
+                });
+            });
+        };
+
+        if (ep.isCall)
+        {
+            flashPill(tr("Fetching stream link..."), 5000);
+            online::OnlineEntry hint;
+            hint.season    = ep.season > 0 ? ep.season : watch.season;
+            hint.episode   = ep.episode;
+            hint.voiceName = !ep.voiceName.empty() ? ep.voiceName : watch.online.voiceName;
+            hint.title     = ep.title;
+            hint.url       = ep.url;
+            auto live = this->alive;
+            online::resolveCallAsync(watch.online.pluginId, ep.url, hint,
+                                     [this, live, ep, launchEp](online::ResolveResult rr) {
+                                         if (!*live) return;
+                                         if (!rr.ok)
+                                         {
+                                             switching = false;
+                                             flashPill(tr("Failed: ") + rr.error, 3000);
+                                             return;
+                                         }
+                                         PlayerOnlineEpisode resolved = ep;
+                                         resolved.isCall              = false;
+                                         resolved.url                 = rr.entry.url;
+                                         resolved.qualities.clear();
+                                         for (const auto& q : rr.entry.qualities)
+                                             resolved.qualities.push_back({ q.label, q.url, q.height });
+                                         resolved.subtitles.clear();
+                                         for (const auto& s : rr.entry.subtitles)
+                                             resolved.subtitles.push_back({ s.label, s.lang, s.url });
+                                         if (!rr.entry.headers.empty()) resolved.headers = rr.entry.headers;
+                                         launchEp(resolved);
+                                     });
+        }
+        else
+        {
+            launchEp(ep);
+        }
+        return;
+    }
+
     const PlaylistItem f = playlist[(size_t)i];
 
     // The same source: a magnet reopens from the metadata the engine kept when
@@ -2613,6 +2953,44 @@ void MpvView::openEpisodesPanel()
     if (!ready || playlist.size() < 2) return;
     std::vector<std::string> labels, details;
 
+    if (watch.online.active && watch.online.episodes.size() == playlist.size())
+    {
+        library::Entry lib;
+        bool haveLib = library::find(watch.content.key(), lib);
+        for (size_t i = 0; i < playlist.size(); i++)
+        {
+            const auto& ep = watch.online.episodes[i];
+            std::string l = ep.episode > 0
+                                ? (tr("Episode ") + std::to_string(ep.episode) +
+                                   (ep.title.empty() || ep.title == tr("Episode ") + std::to_string(ep.episode)
+                                        ? ""
+                                        : (" \xC2\xB7 " + ep.title)))
+                                : playlist[i].label;
+            labels.push_back(l);
+            std::string d;
+            if ((int)i == playlistCur)
+                d = tr("Now playing");
+            else if (haveLib && ep.episode > 0)
+            {
+                int s = ep.season > 0 ? ep.season : watch.season;
+                if (const library::EpisodeProgress* p = lib.episode(s, ep.episode))
+                {
+                    if (p->done)
+                        d = tr("Watched");
+                    else if (p->pos >= 15.0)
+                        d = fmtTime(p->pos);
+                }
+            }
+            details.push_back(d);
+        }
+        auto live = this->alive;
+        openChoicePanel(tr("Episodes"), labels, details, playlistCur, [this, live](int sel) {
+            if (!*live) return;
+            playPlaylistItem(sel);
+        });
+        return;
+    }
+
     // "Episode 16 · April in Quahog" rather than the file's name: in a pack
     // every name starts with the same "Family.Guy.S08...", and that was all
     // the row had room for. A pack of several seasons says which one.
@@ -2777,6 +3155,22 @@ void MpvView::openTrackMenu()
         }));
 
     content->addView(panelSection(tr("VIDEO"), 18.0f));
+
+    if (watch.online.active && watch.online.qualities.size() > 1)
+    {
+        std::vector<std::string> qLabels;
+        int qCur = 0;
+        for (size_t i = 0; i < watch.online.qualities.size(); i++)
+        {
+            qLabels.push_back(watch.online.qualities[i].label);
+            if (watch.online.qualities[i].label == watch.online.currentQuality) qCur = (int)i;
+        }
+        auto* qCell = new TrackCell();
+        qCell->init(tr("Quality"), qLabels, qCur, [this](int sel) {
+            switchOnlineQuality(sel);
+        }, panel, panelAlive);
+        content->addView(qCell);
+    }
 
     // Video size (Lampa's "Размер видео"): how the picture meets the screen.
     content->addView(new StepperCell(
@@ -3117,10 +3511,16 @@ MpvView::~MpvView()
     // An nxhttps:// open still connecting: mpv_terminate_destroy would wait
     // it out on this (UI) thread.
     httpAbort = true;
+    if (hlsProxy) hls_proxy_abort(hlsProxy);
     if (renderCtx)
         mpv_render_context_free(renderCtx);
     if (mpv)
         mpv_terminate_destroy(mpv);
+    if (hlsProxy)
+    {
+        hls_proxy_stop(hlsProxy);
+        hlsProxy = nullptr;
+    }
 
     // Close the engine synchronously (~1 s: it joins the acceptors/workers).
     //
@@ -3166,7 +3566,7 @@ void MpvView::pumpEvents()
     if (bool want = audioBoostWanted(); want != boostApplied)
     {
         boostApplied = want;
-        mpv_set_property_string(mpv, "af", want ? kAudioBoostFilter : "");
+        setMpvPropAsync(mpv, "af", want ? kAudioBoostFilter : "");
         brls::Logger::info("[audio] loudness boost {}", want ? "on" : "off");
     }
 
@@ -3295,14 +3695,8 @@ void MpvView::pumpEvents()
             case MPV_EVENT_PLAYBACK_RESTART:
             {
                 // First frame is decoded (or decoder restarted after seek/hwdec switch):
-                // log the active decoder/codec/pixelformat once rather than polling per-frame.
-                char* hwc = mpv_get_property_string(mpv, "hwdec-current");
-                char* vc  = mpv_get_property_string(mpv, "video-codec");
-                char* vf  = mpv_get_property_string(mpv, "video-format");
-                char* pf  = mpv_get_property_string(mpv, "video-params/pixelformat");
-                obsVideoFormat = vf ? vf : "";
-                obsPixFmt      = pf ? pf : "";
-                bool sw        = (!hwc || !hwc[0] || std::strcmp(hwc, "no") == 0);
+                // use async-observed properties so pumpEvents never blocks on mpv core.
+                bool sw = (obsHwdec.empty() || obsHwdec == "no");
                 softwareDecode = sw;
                 if (lastVideoWidth > 0)
                     applyRenderLoad(lastVideoWidth);
@@ -3311,11 +3705,9 @@ void MpvView::pumpEvents()
                     swDecodeWarnPending = true;
 #endif
                 brls::Logger::info("[mpv event] playback restart (hwdec={}, codec={}, pixfmt={})",
-                                   hwc ? hwc : "none", vc ? vc : "-", pf ? pf : "-");
-                if (hwc) mpv_free(hwc);
-                if (vc)  mpv_free(vc);
-                if (vf)  mpv_free(vf);
-                if (pf)  mpv_free(pf);
+                                   obsHwdec.empty() ? "none" : obsHwdec,
+                                   obsVideoCodec.empty() ? "-" : obsVideoCodec,
+                                   obsPixFmt.empty() ? "-" : obsPixFmt);
                 break;
             }
             case MPV_EVENT_LOG_MESSAGE:
@@ -3352,6 +3744,10 @@ void MpvView::pumpEvents()
                     }
                     else if (std::strcmp(p->name, "cache-speed") == 0)
                         obsCacheSpeed = v;
+                    else if (std::strcmp(p->name, "container-fps") == 0)
+                        obsFps = v;
+                    else if (std::strcmp(p->name, "volume") == 0)
+                        volume = v;
                 }
                 else if (p->format == MPV_FORMAT_FLAG &&
                          std::strcmp(p->name, "demuxer-cache-idle") == 0)
@@ -3359,17 +3755,36 @@ void MpvView::pumpEvents()
                 else if (p->format == MPV_FORMAT_FLAG &&
                          std::strcmp(p->name, "paused-for-cache") == 0)
                     obsPausedForCache = *(int*)p->data != 0;
-                else if (p->format == MPV_FORMAT_INT64 &&
-                         std::strcmp(p->name, "file-size") == 0)
-                    obsFileSize = *(int64_t*)p->data;
-                else if (p->format == MPV_FORMAT_INT64 &&
-                         std::strcmp(p->name, "width") == 0)
-                    applyRenderLoad(*(int64_t*)p->data);
-                else if (p->format == MPV_FORMAT_STRING &&
-                         std::strcmp(p->name, "sid") == 0)
+                else if (p->format == MPV_FORMAT_INT64)
+                {
+                    int64_t iv = *(int64_t*)p->data;
+                    if (std::strcmp(p->name, "file-size") == 0)
+                        obsFileSize = iv;
+                    else if (std::strcmp(p->name, "width") == 0)
+                    {
+                        obsWidth = iv;
+                        applyRenderLoad(iv);
+                    }
+                    else if (std::strcmp(p->name, "height") == 0)
+                        obsHeight = iv;
+                    else if (std::strcmp(p->name, "frame-drop-count") == 0)
+                        obsFrameDrops = iv;
+                    else if (std::strcmp(p->name, "decoder-frame-drop-count") == 0)
+                        obsDecDrops = iv;
+                }
+                else if (p->format == MPV_FORMAT_STRING)
                 {
                     const char* s = *(const char**)p->data;
-                    obsSid = s ? s : "no";
+                    if (std::strcmp(p->name, "sid") == 0)
+                        obsSid = s ? s : "no";
+                    else if (std::strcmp(p->name, "hwdec-current") == 0)
+                        obsHwdec = s ? s : "";
+                    else if (std::strcmp(p->name, "video-codec") == 0)
+                        obsVideoCodec = s ? s : "";
+                    else if (std::strcmp(p->name, "video-format") == 0)
+                        obsVideoFormat = s ? s : "";
+                    else if (std::strcmp(p->name, "video-params/pixelformat") == 0)
+                        obsPixFmt = s ? s : "";
                 }
                 break;
             }
@@ -3448,9 +3863,9 @@ void MpvView::applyRenderLoad(int64_t width)
                        light ? "bilinear" : "default");
     const char* up   = light ? "bilinear" : "lanczos";
     const char* down = light ? "bilinear" : "hermite";
-    mpv_set_property_string(mpv, "scale", up);
-    mpv_set_property_string(mpv, "cscale", up);
-    mpv_set_property_string(mpv, "dscale", down);
+    setMpvPropAsync(mpv, "scale", up);
+    setMpvPropAsync(mpv, "cscale", up);
+    setMpvPropAsync(mpv, "dscale", down);
 }
 
 // Paints `path` as the background, blurring it first when the artwork is a
@@ -3458,8 +3873,15 @@ void MpvView::applyRenderLoad(int64_t width)
 void MpvView::setBackgroundArt(const std::string& path)
 {
     if (!bgImage || path.empty()) return;
-    std::string use = art.blurBg ? stremio::blurredPosterPath(path) : "";
-    bgImage->setImageFromFile(use.empty() ? path : use);
+    bgImage->setImageFromFile(path);
+    if (!art.blurBg) return;
+    workers::run([this, live = alive, path]() {
+        std::string use = stremio::blurredPosterPath(path);
+        if (use.empty()) return;
+        brls::sync([this, live, use]() {
+            if (*live && bgImage) bgImage->setImageFromFile(use);
+        });
+    });
 }
 
 void MpvView::buildLoadingOverlay(const std::string& title)
@@ -3514,14 +3936,12 @@ void MpvView::buildLoadingOverlay(const std::string& title)
     }
 
     // Everything the user actually reads, centred over the background.
-    auto* column = new brls::Box();
-    column->setAxis(brls::Axis::COLUMN);
-    column->setJustifyContent(brls::JustifyContent::CENTER);
-    column->setAlignItems(brls::AlignItems::CENTER);
-    column->setGrow(1.0f);
-    float loadPad = (platform_ui::isMobile() && platform_ui::isPortrait()) ? 28.0f : 60.0f;
-    column->setPadding(0, loadPad, 0, loadPad);
-    loadingOverlay->addView(column);
+    loadingColumn = new brls::Box();
+    loadingColumn->setAxis(brls::Axis::COLUMN);
+    loadingColumn->setJustifyContent(brls::JustifyContent::CENTER);
+    loadingColumn->setAlignItems(brls::AlignItems::CENTER);
+    loadingColumn->setGrow(1.0f);
+    loadingOverlay->addView(loadingColumn);
 
     // The poster when the caller knows what we're playing, otherwise a vector
     // app mark on mobile or the bundled logo on Switch/desktop.
@@ -3529,11 +3949,11 @@ void MpvView::buildLoadingOverlay(const std::string& title)
     {
         auto* logo = new brls::Image();
         logo->setImageFromFile(art.posterPath);
-        logo->setDimensions(148.0f, 222.0f);  // posters are 2:3
         logo->setCornerRadius(8.0f);           // rounded poster corners
         logo->setScalingType(brls::ImageScalingType::FIT);
-        logo->setMargins(0, 0, 28, 0);
-        column->addView(logo);
+        loadingColumn->addView(logo);
+        loadingArt         = logo;
+        loadingArtIsPoster = true;
     }
     else if (platform_ui::isMobile())
     {
@@ -3546,84 +3966,71 @@ void MpvView::buildLoadingOverlay(const std::string& title)
             }
         };
         auto* mark = new AppMarkBox();
-        mark->setDimensions(112.0f, 112.0f);
-        mark->setMargins(0, 0, 28, 0);
-        column->addView(mark);
+        loadingColumn->addView(mark);
+        loadingArt         = mark;
+        loadingArtIsPoster = false;
     }
     else
     {
         auto* logo = new brls::Image();
         logo->setImageFromRes("NX-torrent-player-bg-rounded.png");
-        logo->setDimensions(148.0f, 148.0f);
         logo->setScalingType(brls::ImageScalingType::FIT);
-        logo->setMargins(0, 0, 28, 0);
-        column->addView(logo);
+        loadingColumn->addView(logo);
+        loadingArt         = logo;
+        loadingArtIsPoster = false;
     }
 
-    auto* titleLabel = new brls::Label();
-    titleLabel->setText(title);
-    titleLabel->setFontSize(28);
-    titleLabel->setTextColor(theme.getColor("brls/text"));
-    titleLabel->setHorizontalAlign(brls::HorizontalAlign::CENTER);
-    titleLabel->setMargins(0, 0, 44, 0);
-    column->addView(titleLabel);
+    loadingTitle = new brls::Label();
+    loadingTitle->setText(title);
+    loadingTitle->setTextColor(theme.getColor("brls/text"));
+    loadingTitle->setHorizontalAlign(brls::HorizontalAlign::CENTER);
+    loadingColumn->addView(loadingTitle);
 
     statusLabel = new brls::Label();
     statusLabel->setText(tr("Connecting to peers..."));
-    statusLabel->setFontSize(21);
     statusLabel->setTextColor(theme.getColor("brls/text"));
     statusLabel->setHorizontalAlign(brls::HorizontalAlign::CENTER);
-    statusLabel->setMargins(0, 0, 22, 0);
-    column->addView(statusLabel);
+    loadingColumn->addView(statusLabel);
 
-    // Progress bar: a rounded track (spanning the screen width) holding an
-    // accent-coloured fill.
-    auto* barTrack = new brls::Box();
-    barTrack->setAxis(brls::Axis::ROW);
-    barTrack->setAlignItems(brls::AlignItems::CENTER);
-    barTrack->setWidthPercentage(100.0f);
-    barTrack->setHeight(10.0f);
-    barTrack->setCornerRadius(5.0f);
-    barTrack->setBackgroundColor(nvgRGBA(255, 255, 255, 38));
+    // Progress bar: a rounded track holding an accent-coloured fill.
+    loadingBarTrack = new brls::Box();
+    loadingBarTrack->setAxis(brls::Axis::ROW);
+    loadingBarTrack->setAlignItems(brls::AlignItems::CENTER);
+    loadingBarTrack->setHeight(10.0f);
+    loadingBarTrack->setCornerRadius(5.0f);
+    loadingBarTrack->setBackgroundColor(nvgRGBA(255, 255, 255, 38));
 
     barFill = new brls::Box();
     barFill->setHeight(10.0f);
     barFill->setWidthPercentage(0.0f);
     barFill->setCornerRadius(5.0f);
     barFill->setBackgroundColor(theme.getColor("brls/accent"));
-    barTrack->addView(barFill);
-    column->addView(barTrack);
+    loadingBarTrack->addView(barFill);
+    loadingColumn->addView(loadingBarTrack);
 
     percentLabel = new brls::Label();
     percentLabel->setText("0%");
-    percentLabel->setFontSize(18);
     percentLabel->setTextColor(theme.getColor("brls/text"));
     percentLabel->setHorizontalAlign(brls::HorizontalAlign::CENTER);
-    percentLabel->setMargins(16, 0, 0, 0);
-    column->addView(percentLabel);
+    loadingColumn->addView(percentLabel);
 
     statsLabel = new brls::Label();
     statsLabel->setText("");
-    statsLabel->setFontSize(16);
     statsLabel->setTextColor(dimText);
     statsLabel->setHorizontalAlign(brls::HorizontalAlign::CENTER);
-    statsLabel->setMargins(30, 0, 0, 0);
-    column->addView(statsLabel);
+    loadingColumn->addView(statsLabel);
 
     // Animated spinner so it's clear the app is working even when the swarm is
     // slow to feed us.
-    auto* spinner = new brls::ProgressSpinner(brls::ProgressSpinnerSize::LARGE);
-    spinner->setDimensions(52.0f, 52.0f);
-    spinner->setMargins(34, 0, 0, 0);
-    spinner->animate(true);
-    column->addView(spinner);
+    loadingSpinner = new brls::ProgressSpinner(brls::ProgressSpinnerSize::LARGE);
+    loadingSpinner->animate(true);
+    loadingColumn->addView(loadingSpinner);
 
     // Hint that B cancels and returns to the list (clickable button on mobile).
     if (platform_ui::isMobile())
     {
-        auto* backBtnLoad = ui::actionButton(tr("Back"), false, [this]() { onBack(); });
-        backBtnLoad->setMargins(34.0f, 0.0f, 0.0f, 0.0f);
-        column->addView(backBtnLoad);
+        loadingBackView = ui::actionButton(tr("Back"), false, [this]() { onBack(); });
+        loadingColumn->addView(loadingBackView);
     }
     else
     {
@@ -3632,10 +4039,11 @@ void MpvView::buildLoadingOverlay(const std::string& title)
         backHint->setFontSize(18);
         backHint->setTextColor(dimText);
         backHint->setHorizontalAlign(brls::HorizontalAlign::CENTER);
-        backHint->setMargins(40, 0, 0, 0);
-        column->addView(backHint);
+        loadingColumn->addView(backHint);
+        loadingBackView = backHint;
     }
 
+    updateLoadingOverlayLayout();
     this->addView(loadingOverlay);
 
     // Separate, small buffering badge shown over the video when playback stalls
@@ -3654,10 +4062,10 @@ void MpvView::buildLoadingOverlay(const std::string& title)
     bufferOverlay->setBackgroundColor(nvgRGBA(0, 0, 0, 170));
     bufferOverlay->setVisibility(brls::Visibility::GONE);
 
-    auto* bufSpinner =
+    bufSpinner =
         new brls::ProgressSpinner(brls::ProgressSpinnerSize::NORMAL);
     bufSpinner->setDimensions(28.0f, 28.0f);
-    bufSpinner->animate(true);
+    bufSpinner->animate(false);
     bufferOverlay->addView(bufSpinner);
 
     auto* bufLabel = new brls::Label();
@@ -3852,6 +4260,15 @@ void MpvView::buildLoadingOverlay(const std::string& title)
     // The control panel: title bar + timeline + buttons (see buildControls).
     buildControls();
 
+    // Vertical swipe HUD (left = brightness, right = volume), drawn on top of controls.
+    gestureHud = new player_ui::GestureHud();
+    gestureHud->setPositionType(brls::PositionType::ABSOLUTE);
+    gestureHud->setPositionTop(0.0f);
+    gestureHud->setPositionLeft(0.0f);
+    gestureHud->setWidthPercentage(100.0f);
+    gestureHud->setHeightPercentage(100.0f);
+    this->addView(gestureHud);
+
     // --- Touch controls --------------------------------------------------
     // Tap the video to show/hide the panel; double-tap left/right to seek
     // -/+10s. Taps on the children (buttons, timeline, centre play button,
@@ -3862,6 +4279,96 @@ void MpvView::buildLoadingOverlay(const std::string& title)
             if (status.state != brls::GestureState::END) return;
             onVideoTap(status.position, sound);
         }));
+
+    if (platform_ui::isMobile())
+    {
+        this->addGestureRecognizer(new brls::PanGestureRecognizer(
+            [this](brls::PanGestureStatus status, brls::Sound*) {
+                if (status.state == brls::GestureState::FAILED ||
+                    status.state == brls::GestureState::INTERRUPTED)
+                {
+                    swipeSide = SwipeSide::None;
+                    return;
+                }
+                if (hasOverlay() || !ready || !mpv)
+                {
+                    swipeSide = SwipeSide::None;
+                    return;
+                }
+                if (controlsLocked)
+                {
+                    if (status.state == brls::GestureState::START) flashLock();
+                    swipeSide = SwipeSide::None;
+                    return;
+                }
+                if (status.state == brls::GestureState::START)
+                {
+                    singleTapPending = false;
+                    if (controlsShown &&
+                        ((topBar && topBar->getFrame().pointInside(status.startPosition)) ||
+                         (bottomBar && bottomBar->getFrame().pointInside(status.startPosition))))
+                    {
+                        swipeSide = SwipeSide::None;
+                        return;
+                    }
+                    float w   = getWidth();
+                    float rel = (w > 0.0f) ? (status.startPosition.x - getX()) / w : 0.5f;
+                    if (rel < 0.5f)
+                    {
+                        swipeSide         = SwipeSide::Brightness;
+                        brls::Platform* p = brls::Application::getPlatform();
+                        float b           = p ? p->getBacklightBrightness() : -1.0f;
+                        swipeStartVal     = (b >= 0.0f && b <= 1.0f) ? b : 0.5f;
+                    }
+                    else
+                    {
+                        swipeSide     = SwipeSide::Volume;
+                        swipeStartVal = (float)volume;
+                    }
+                }
+                if (swipeSide == SwipeSide::None) return;
+
+                if (status.state == brls::GestureState::END)
+                {
+                    swipeSide = SwipeSide::None;
+                    return;
+                }
+
+                float range = std::max(180.0f, getHeight() * 0.55f);
+                float norm  = (status.startPosition.y - status.position.y) / range;
+
+                if (swipeSide == SwipeSide::Brightness)
+                {
+                    float b = std::clamp(swipeStartVal + norm, 0.02f, 1.0f);
+                    if (brls::Platform* p = brls::Application::getPlatform())
+                        p->setBacklightBrightness(b);
+                    int pct = (int)std::lround(b * 100.0f);
+                    if (gestureHud)
+                        gestureHud->show(player_ui::GestureHud::Kind::Brightness, b,
+                                         std::string(tr("Brightness")) + " " +
+                                             std::to_string(pct) + "%");
+                }
+                else if (swipeSide == SwipeSide::Volume)
+                {
+                    double v = std::clamp((double)swipeStartVal + (double)norm * 100.0,
+                                          0.0, 100.0);
+                    double r = std::round(v);
+                    if (r != volume)
+                    {
+                        volume = r;
+                        mpv_set_property_async(mpv, 0, "volume", MPV_FORMAT_DOUBLE,
+                                               &volume);
+                    }
+                    int pct = (int)r;
+                    if (gestureHud)
+                        gestureHud->show(player_ui::GestureHud::Kind::Volume,
+                                         (float)(r / 100.0),
+                                         std::string(tr("Volume")) + " " +
+                                             std::to_string(pct) + "%");
+                }
+            },
+            brls::PanAxis::VERTICAL));
+    }
 
     // Tap the padlock pill to toggle the lock -- like the Y button, and NOT
     // gated, so a tap on it is the way to unlock by touch too. (While locked
@@ -3913,16 +4420,22 @@ void MpvView::buildLoadingOverlay(const std::string& title)
 double MpvView::startTargetSecs() const
 {
     const double maxSecs = bufferSecs();
-    double bytes = tfs ? (double)torrentfs_size(tfs) : (double)obsFileSize;
-    double rate  = tfs ? rateEwma : obsCacheSpeed;
+    if (!tfs)
+    {
+        double directCap = maxSecs <= 10.0 ? 2.5 : (maxSecs <= 15.0 ? 3.0 : 4.5);
+        return std::min(maxSecs, directCap);
+    }
+    double torrentCap = maxSecs <= 15.0 ? 8.0 : maxSecs;
+    double bytes      = (double)torrentfs_size(tfs);
+    double rate       = rateEwma;
     // Until the bitrate and a settled rate are known, the preset decides.
-    if (obsDur <= 1.0 || bytes <= 0.0 || rate <= 0.0 || (tfs && rateSamples < 4))
-        return maxSecs;
+    if (obsDur <= 1.0 || bytes <= 0.0 || rate <= 0.0 || rateSamples < 2)
+        return std::min(maxSecs, torrentCap);
     double bitrate = bytes / obsDur;   // average, bytes per second
-    double need = kMinStartSecs +
+    double need    = 2.5 +
                   (bitrate * kStartRateMargin / rate - 1.0) * kStartDeficitSecs;
-    if (need < kMinStartSecs) need = kMinStartSecs;
-    if (need > maxSecs) need = maxSecs;
+    if (need < 2.5) need = 2.5;
+    if (need > torrentCap) need = torrentCap;
     return need;
 }
 
@@ -4082,6 +4595,8 @@ void MpvView::updateBufferIndicator()
         buffering = stalling;
         bufferOverlay->setVisibility(stalling ? brls::Visibility::VISIBLE
                                               : brls::Visibility::GONE);
+        if (bufSpinner)
+            bufSpinner->animate(stalling);
     }
 }
 
@@ -4201,30 +4716,21 @@ void MpvView::updateInfoOverlay()
     torrentfs_last_err(tfs, lastErr, sizeof(lastErr));
     int64_t plen = torrentfs_piece_len(tfs);
 
-    // Playback / decode stats. If "Dropped" climbs during the stutters it's the
-    // decoder/CPU that can't keep up; if it stays flat with a full buffer, the
-    // hitch is frame pacing/judder, not dropped frames.
-    double buf = 0.0, fps = 0.0;
-    int64_t w = 0, h = 0, drop = 0, decDrop = 0;
-    char* hwdec = nullptr;
-    if (mpv)
-    {
-        mpv_get_property(mpv, "demuxer-cache-duration", MPV_FORMAT_DOUBLE, &buf);
-        mpv_get_property(mpv, "width", MPV_FORMAT_INT64, &w);
-        mpv_get_property(mpv, "height", MPV_FORMAT_INT64, &h);
-        mpv_get_property(mpv, "container-fps", MPV_FORMAT_DOUBLE, &fps);
-        mpv_get_property(mpv, "frame-drop-count", MPV_FORMAT_INT64, &drop);
-        mpv_get_property(mpv, "decoder-frame-drop-count", MPV_FORMAT_INT64,
-                        &decDrop);
-        mpv_get_property(mpv, "hwdec-current", MPV_FORMAT_STRING, &hwdec);
-    }
+    // Playback / decode stats from async property observations so ZR overlay
+    // never blocks the render thread on a synchronous mpv_get_property().
+    double buf      = obsCacheSecs;
+    double fps      = obsFps;
+    int64_t w       = obsWidth;
+    int64_t h       = obsHeight;
+    int64_t drop    = obsFrameDrops;
+    int64_t decDrop = obsDecDrops;
     const char* hw =
-        (hwdec && hwdec[0] && std::strcmp(hwdec, "no") != 0) ? hwdec : "software";
+        (!obsHwdec.empty() && obsHwdec != "no") ? obsHwdec.c_str() : "software";
 
-    // Video buffered in RAM: mpv's demuxer forward cache. Read out of the
-    // demuxer-cache-state node's total-bytes field.
+    // Video buffered in RAM: mpv's demuxer forward cache. Only inspect
+    // synchronously when mpv isn't stalled on cache I/O.
     int64_t ramBytes = 0;
-    if (mpv)
+    if (mpv && ready && !obsPausedForCache)
     {
         mpv_node node;
         if (mpv_get_property(mpv, "demuxer-cache-state", MPV_FORMAT_NODE, &node) >= 0)
@@ -4440,9 +4946,6 @@ void MpvView::updateInfoOverlay()
                   startupLine.empty() ? "-" : startupLine.c_str(),
                   hdr.c_str(), dl.c_str());
     if (infoLabel2) infoLabel2->setText(right);
-
-    if (hwdec)
-        mpv_free(hwdec);
 }
 
 void MpvView::logStats()
@@ -4652,11 +5155,20 @@ void MpvView::maybeUpdateHistory(bool force)
     bool finished = ended || (lastDurSec > 0.0 && lastPosSec >= lastDurSec * 0.95);
 
     history::Item it;
-    it.source = currentSource;
+    if (watch.online.active)
+    {
+        it.source = online::makeOnlineSourceUri(
+            { watch.online.pluginId, watch.online.balancerId, watch.online.voiceName });
+        it.sourceType = "Online";
+    }
+    else
+    {
+        it.source = currentSource;
+        it.sourceType = currentSourceType;
+    }
     it.fileIndex = currentFileIndex;
     it.title = !currentTitle.empty() ? currentTitle :
                (!watch.displayTitle.empty() ? watch.displayTitle : currentSource);
-    it.sourceType = currentSourceType;
     it.posterPath = art.posterPath;
     it.positionSec = finished ? 0.0 : lastPosSec;
     it.durationSec = lastDurSec;
@@ -4679,8 +5191,8 @@ void MpvView::maybeUpdateHistory(bool force)
     // it came from (library.cpp writes in the background).
     if (watch.content.tmdbId > 0)
         library::recordProgress(watch.content, watch.season, watch.episode, lastPosSec,
-                                lastDurSec, finished, currentSource, currentFileIndex,
-                                currentSourceType);
+                                lastDurSec, finished, it.source, currentFileIndex,
+                                it.sourceType);
 }
 
 // Start aiming a seek: the cursor starts where playback is. The stick and a
@@ -4712,6 +5224,17 @@ void MpvView::updateSeekCommit()
 void MpvView::onVideoTap(brls::Point pos, brls::Sound* sound)
 {
     if (hasOverlay()) return;
+    if (platform_ui::isMobile())
+    {
+        float st = 0.0f, sr = 0.0f, sb = 0.0f, sl = 0.0f;
+        platform_ui::safeInsets(st, sr, sb, sl);
+        float w = getWidth();
+        float x0 = getX();
+        float edgeL = std::max(28.0f, sl + 18.0f);
+        float edgeR = std::max(28.0f, sr + 18.0f);
+        if (pos.x < x0 || pos.x > x0 + w || pos.x - x0 < edgeL || (x0 + w) - pos.x < edgeR)
+            return;
+    }
     if (controlsLocked)
     {
         singleTapPending = false;
@@ -5245,7 +5768,10 @@ void MpvView::buildControls()
 
     updateControlsLayout();
     resizeSub = brls::Application::getWindowSizeChangedEvent()->subscribe(
-        [this]() { updateControlsLayout(); });
+        [this]() {
+            updateControlsLayout();
+            updateLoadingOverlayLayout();
+        });
     resizeSubscribed = true;
 
     refreshButtons();
@@ -5254,12 +5780,14 @@ void MpvView::buildControls()
 void MpvView::updateControlsLayout()
 {
     bool portrait = brls::Application::contentHeight > brls::Application::contentWidth;
+    float st = 0.0f, sr = 0.0f, sb = 0.0f, sl = 0.0f;
+    platform_ui::safeInsets(st, sr, sb, sl);
+    float sideL = (portrait ? 20.0f : 60.0f) + sl;
+    float sideR = (portrait ? 20.0f : 60.0f) + sr;
     if (topBar)
     {
-        topBar->setPadding(portrait ? 24.0f : 36.0f,
-                           portrait ? 20.0f : 60.0f, 0.0f,
-                           portrait ? 20.0f : 60.0f);
-        topBar->setHeight(portrait ? 130.0f : 160.0f);
+        topBar->setPadding((portrait ? 24.0f : 36.0f) + st, sideR, 0.0f, sideL);
+        topBar->setHeight((portrait ? 130.0f : 160.0f) + st);
     }
     if (topLeft)
         topLeft->setMarginRight(portrait ? 12.0f : 30.0f);
@@ -5281,10 +5809,8 @@ void MpvView::updateControlsLayout()
         barEnds->setFontSize(portrait ? 14.0f : 17.0f);
     if (bottomBar)
     {
-        bottomBar->setPadding(0.0f, portrait ? 20.0f : 60.0f,
-                              portrait ? 20.0f : 28.0f,
-                              portrait ? 20.0f : 60.0f);
-        bottomBar->setHeight(portrait ? 186.0f : 236.0f);
+        bottomBar->setPadding(0.0f, sideR, (portrait ? 20.0f : 28.0f) + sb, sideL);
+        bottomBar->setHeight((portrait ? 186.0f : 236.0f) + sb);
     }
     if (timeRow)
         timeRow->setMarginBottom(portrait ? 14.0f : 28.0f);
@@ -5311,9 +5837,136 @@ void MpvView::updateControlsLayout()
         buttons[i]->setMargins(0.0f, mg, 0.0f, mg);
     }
     if (nextCard)
-        nextCard->setPositionRight(portrait ? 20.0f : 60.0f);
+        nextCard->setPositionRight(sideR);
     if (bufferOverlay)
-        bufferOverlay->setPositionRight(portrait ? 20.0f : 60.0f);
+    {
+        bufferOverlay->setPositionTop(124.0f + st);
+        bufferOverlay->setPositionRight(sideR);
+    }
+}
+
+void MpvView::updateLoadingOverlayLayout()
+{
+    if (!loadingColumn) return;
+
+    float cw = brls::Application::contentWidth;
+    float ch = brls::Application::contentHeight;
+    if (cw <= 0.0f) cw = 1280.0f;
+    if (ch <= 0.0f) ch = 720.0f;
+    bool portrait = ch > cw;
+
+    float st = 0.0f, sr = 0.0f, sb = 0.0f, sl = 0.0f;
+    platform_ui::safeInsets(st, sr, sb, sl);
+
+    float basePadX = portrait ? 28.0f : 48.0f;
+    float basePadY = portrait ? 18.0f : 12.0f;
+    float padL = basePadX + sl;
+    float padR = basePadX + sr;
+    float padT = basePadY + st;
+    float padB = basePadY + sb;
+    loadingColumn->setPadding(padT, padR, padB, padL);
+
+    float availW = std::max(240.0f, cw - padL - padR);
+    float availH = std::max(220.0f, ch - padT - padB);
+    float maxTextW = std::min(availW, portrait ? availW : 820.0f);
+    float barW = std::min(maxTextW, 680.0f);
+
+    const bool veryCompact = !portrait && availH < 460.0f;
+    const bool compact     = !portrait && availH < 660.0f && !veryCompact;
+
+    if (loadingArt)
+    {
+        if (veryCompact)
+        {
+            loadingArt->setVisibility(brls::Visibility::GONE);
+        }
+        else if (compact)
+        {
+            loadingArt->setVisibility(brls::Visibility::VISIBLE);
+            if (loadingArtIsPoster)
+                loadingArt->setDimensions(76.0f, 114.0f);
+            else
+                loadingArt->setDimensions(68.0f, 68.0f);
+            loadingArt->setMargins(0.0f, 0.0f, 12.0f, 0.0f);
+        }
+        else
+        {
+            loadingArt->setVisibility(brls::Visibility::VISIBLE);
+            if (loadingArtIsPoster)
+                loadingArt->setDimensions(148.0f, 222.0f);
+            else if (platform_ui::isMobile())
+                loadingArt->setDimensions(112.0f, 112.0f);
+            else
+                loadingArt->setDimensions(148.0f, 148.0f);
+            loadingArt->setMargins(0.0f, 0.0f, 28.0f, 0.0f);
+        }
+    }
+
+    if (loadingTitle)
+    {
+        loadingTitle->setMaxWidth(maxTextW);
+        loadingTitle->setSingleLine(veryCompact || compact);
+        loadingTitle->setFontSize(veryCompact ? 20.0f : (compact ? 22.0f : 28.0f));
+        loadingTitle->setMargins(0.0f, 0.0f,
+                                 veryCompact ? 10.0f : (compact ? 16.0f : (portrait ? 28.0f : 44.0f)),
+                                 0.0f);
+    }
+
+    if (statusLabel)
+    {
+        statusLabel->setMaxWidth(maxTextW);
+        statusLabel->setSingleLine(veryCompact);
+        statusLabel->setFontSize(veryCompact ? 16.0f : (compact ? 17.0f : 21.0f));
+        statusLabel->setMargins(0.0f, 0.0f,
+                                veryCompact ? 10.0f : (compact ? 12.0f : 22.0f),
+                                0.0f);
+    }
+
+    float barH = (veryCompact || compact) ? 8.0f : 10.0f;
+    if (loadingBarTrack)
+    {
+        loadingBarTrack->setWidth(barW);
+        loadingBarTrack->setHeight(barH);
+        loadingBarTrack->setCornerRadius(barH * 0.5f);
+    }
+    if (barFill)
+    {
+        barFill->setHeight(barH);
+        barFill->setCornerRadius(barH * 0.5f);
+    }
+
+    if (percentLabel)
+    {
+        percentLabel->setMaxWidth(maxTextW);
+        percentLabel->setFontSize(veryCompact ? 15.0f : (compact ? 16.0f : 18.0f));
+        percentLabel->setMargins(veryCompact ? 8.0f : (compact ? 10.0f : 16.0f),
+                                 0.0f, 0.0f, 0.0f);
+    }
+
+    if (statsLabel)
+    {
+        statsLabel->setMaxWidth(maxTextW);
+        statsLabel->setSingleLine(veryCompact || compact);
+        statsLabel->setFontSize(veryCompact ? 14.0f : (compact ? 14.0f : 16.0f));
+        statsLabel->setMargins(veryCompact ? 10.0f : (compact ? 14.0f : (portrait ? 24.0f : 30.0f)),
+                               0.0f, 0.0f, 0.0f);
+    }
+
+    if (loadingSpinner)
+    {
+        float spinSz = veryCompact ? 32.0f : (compact ? 38.0f : 52.0f);
+        loadingSpinner->setDimensions(spinSz, spinSz);
+        loadingSpinner->setMargins(veryCompact ? 12.0f : (compact ? 16.0f : (portrait ? 28.0f : 34.0f)),
+                                   0.0f, 0.0f, 0.0f);
+    }
+
+    if (loadingBackView)
+    {
+        float backMt = veryCompact ? 12.0f
+                     : (compact ? 16.0f
+                     : (platform_ui::isMobile() ? (portrait ? 28.0f : 34.0f) : 40.0f));
+        loadingBackView->setMargins(backMt, 0.0f, 0.0f, 0.0f);
+    }
 }
 
 // Per frame while the panel is up: the timeline, the times, the clock.
@@ -5384,6 +6037,10 @@ void MpvView::updateControls()
 void MpvView::updateBattery()
 {
     if (!barBattery || !barBatteryPct) return;
+    auto now = std::chrono::steady_clock::now();
+    if (batteryValid && now - batteryLast < std::chrono::seconds(15)) return;
+    batteryValid = true;
+    batteryLast  = now;
     brls::Platform* p = brls::Application::getPlatform();
     if (!p || !p->canShowBatteryLevel())
     {
@@ -5446,8 +6103,21 @@ void renderMpvFrame(NVGcontext* vg, mpv_render_context* rctx)
     glDisable(GL_DEPTH_TEST);
     glDisable(GL_BLEND);
     glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+#ifdef GL_UNIFORM_BUFFER
+    glBindBuffer(GL_UNIFORM_BUFFER, 0);
+#endif
 
+    mpv_render_context_update(rctx);
     mpv_render_context_render(rctx, params);
+
+    glActiveTexture(GL_TEXTURE0);
+#ifdef GL_PIXEL_UNPACK_BUFFER
+    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
+#endif
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+#ifdef GL_UNPACK_ROW_LENGTH
+    glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+#endif
 
     glBindFramebuffer(GL_FRAMEBUFFER, fbo);
     glViewport(0, 0, brls::Application::windowWidth, brls::Application::windowHeight);
@@ -5489,7 +6159,10 @@ void MpvView::draw(NVGcontext* vg, float x, float y, float width, float height,
     // presses to pause/resume once the screen had been tapped. Nothing here uses
     // touch, so keep it in GAMEPAD mode; the next A then acts on the first press.
     // Do not override input mode while an overlay panel is open on top of us.
-    if (!hasOverlay() && brls::Application::getInputType() == brls::InputType::TOUCH)
+    // Keep Switch handheld/controller mode snapped back after stray taps, but never
+    // fight touch input on phones and tablets.
+    if (!platform_ui::isMobile() && !hasOverlay() &&
+        brls::Application::getInputType() == brls::InputType::TOUCH)
         brls::Application::setInputType(brls::InputType::GAMEPAD);
 
     // No render context yet: the engine is still opening (a magnet spends up to
@@ -5520,7 +6193,7 @@ void MpvView::draw(NVGcontext* vg, float x, float y, float width, float height,
     {
         // Buffered enough: start playback and take the loading screen down.
         if (mpv)
-            mpv_set_property_string(mpv, "pause", "no");
+            setMpvPropAsync(mpv, "pause", "no");
         {
             char what[160];
             std::snprintf(what, sizeof(what),
@@ -5531,6 +6204,8 @@ void MpvView::draw(NVGcontext* vg, float x, float y, float width, float height,
             startupMark(what);
         }
         loadingOverlay->setVisibility(brls::Visibility::GONE);
+        if (loadingSpinner) loadingSpinner->animate(false);
+        if (bufSpinner && !buffering) bufSpinner->animate(false);
         overlayHidden = true;
     }
     if (overlayHidden && swDecodeWarnPending && !swDecodeWarned)

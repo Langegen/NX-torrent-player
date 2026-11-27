@@ -103,7 +103,7 @@ class BookmarksRoot : public brls::Box
 
     ~BookmarksRoot() override { *alive = false; }
 
-    // A status changed on a card pushed over this tab: rebuild on return.
+    // A status changed on a card or dialog pushed over this tab: defer rebuild until on top.
     void draw(NVGcontext* vg, float x, float y, float w, float h, brls::Style style,
               brls::FrameContext* ctx) override
     {
@@ -111,7 +111,21 @@ class BookmarksRoot : public brls::Box
         if (gen != seenGen)
         {
             seenGen = gen;
-            rebuild();
+            dirty   = true;
+        }
+        if (dirty && !rebuildQueued && ui::isOnTop(this))
+        {
+            rebuildQueued = true;
+            auto live     = alive;
+            brls::sync([this, live]() {
+                if (!*live) return;
+                rebuildQueued = false;
+                if (dirty && ui::isOnTop(this))
+                {
+                    dirty = false;
+                    rebuild();
+                }
+            });
         }
         brls::Box::draw(vg, x, y, w, h, style, ctx);
     }
@@ -124,12 +138,16 @@ class BookmarksRoot : public brls::Box
     brls::Button* manageFoldersBtn = nullptr;
     brls::Button* exportBtn = nullptr;
     uint32_t seenGen = 0;
+    bool dirty = false;
+    bool rebuildQueued = false;
     std::string activeFilter = ""; // "" = All, "__watching__", "__planned__", etc., or folder name
 
     void promptCreateFolder()
     {
+        auto live = alive;
         brls::Application::getImeManager()->openForText(
-            [this](std::string text) {
+            [this, live](std::string text) {
+                if (!*live) return;
                 while (!text.empty() && (text.front() == ' ' || text.front() == '\t')) text.erase(0, 1);
                 while (!text.empty() && (text.back() == ' ' || text.back() == '\t')) text.pop_back();
                 if (text.empty()) return;
@@ -137,7 +155,7 @@ class BookmarksRoot : public brls::Box
                 {
                     activeFilter = text;
                     brls::Application::notify(tr("Folder created"));
-                    rebuild();
+                    dirty = true;
                 }
                 else
                 {
@@ -149,15 +167,17 @@ class BookmarksRoot : public brls::Box
 
     void promptRenameFolder(const std::string& oldName)
     {
+        auto live = alive;
         brls::Application::getImeManager()->openForText(
-            [this, oldName](std::string text) {
+            [this, live, oldName](std::string text) {
+                if (!*live) return;
                 while (!text.empty() && (text.front() == ' ' || text.front() == '\t')) text.erase(0, 1);
                 while (!text.empty() && (text.back() == ' ' || text.back() == '\t')) text.pop_back();
                 if (text.empty() || text == oldName) return;
                 if (library::renameFolder(oldName, text))
                 {
                     if (activeFilter == oldName) activeFilter = text;
-                    rebuild();
+                    dirty = true;
                 }
                 else
                 {
@@ -169,14 +189,18 @@ class BookmarksRoot : public brls::Box
 
     void promptDeleteFolder(const std::string& name)
     {
+        auto live = alive;
         auto* d = new brls::Dialog(
             std::string(tr("Delete folder")) + " \"" + name + "\"?\n\n" +
             tr("Titles in this folder will remain in your bookmarks."));
         d->addButton(tr("Cancel"), []() {});
-        d->addButton(tr("Delete"), [this, name]() {
+        d->addButton(tr("Delete"), [this, live, name]() {
             library::deleteFolder(name);
-            if (activeFilter == name) activeFilter = "";
-            rebuild();
+            if (*live)
+            {
+                if (activeFilter == name) activeFilter = "";
+                dirty = true;
+            }
         });
         d->open();
     }
@@ -185,19 +209,22 @@ class BookmarksRoot : public brls::Box
     {
         auto custom = library::customFolders();
         if (custom.empty()) return;
-        auto* dd = new brls::Dropdown(tr("Manage folders"), custom, [this, custom](int i) {
-            if (i < 0 || i >= (int)custom.size()) return;
-            std::string selected = custom[i];
-            auto* d = new brls::Dialog(std::string(tr("Folder: ")) + selected);
-            d->addButton(tr("Rename folder"), [this, selected]() {
-                promptRenameFolder(selected);
+        auto live = alive;
+        auto* dd = new brls::Dropdown(
+            tr("Manage folders"), custom, [](int) {}, -1,
+            [this, live, custom](int i) {
+                if (!*live || i < 0 || i >= (int)custom.size()) return;
+                std::string selected = custom[i];
+                auto* d = new brls::Dialog(std::string(tr("Folder: ")) + selected);
+                d->addButton(tr("Rename folder"), [this, live, selected]() {
+                    if (*live) promptRenameFolder(selected);
+                });
+                d->addButton(tr("Delete folder"), [this, live, selected]() {
+                    if (*live) promptDeleteFolder(selected);
+                });
+                d->addButton(tr("Cancel"), []() {});
+                d->open();
             });
-            d->addButton(tr("Delete folder"), [this, selected]() {
-                promptDeleteFolder(selected);
-            });
-            d->addButton(tr("Cancel"), []() {});
-            d->open();
-        });
         brls::Application::pushActivity(new brls::Activity(dd));
     }
 
@@ -208,17 +235,22 @@ class BookmarksRoot : public brls::Box
             tr("Bookmark"),
             tr("Remove from bookmarks")
         };
-        auto* dd = new brls::Dropdown(it.title, opts, [this, it](int i) {
-            if (i == 0)
-                openFolderPicker(it);
-            else if (i == 1)
-                openStatusPicker(it);
-            else if (i == 2)
-            {
-                library::setStatus(it, library::Status::None);
-                brls::Application::notify(tr("Removed from bookmarks"));
-            }
-        });
+        auto live = alive;
+        auto* dd = new brls::Dropdown(
+            it.title, opts,
+            [it](int i) {
+                if (i == 2)
+                {
+                    library::setStatus(it, library::Status::None);
+                    brls::Application::notify(tr("Removed from bookmarks"));
+                }
+            },
+            -1,
+            [this, live, it](int i) {
+                if (!*live) return;
+                if (i == 0) openFolderPicker(it);
+                else if (i == 1) openStatusPicker(it);
+            });
         brls::Application::pushActivity(new brls::Activity(dd));
     }
 
@@ -232,36 +264,37 @@ class BookmarksRoot : public brls::Box
         for (const auto& f : custom)
         {
             bool inThis = hasEntry && en.inFolder(f);
-            labels.push_back((inThis ? "[\xE2\x9C\x93]  " : "[   ]  ") + f);
+            labels.push_back((inThis ? "[x]  " : "[ ]  ") + f);
         }
         labels.push_back(std::string("+  ") + tr("New folder..."));
         if (hasEntry && !en.folders.empty())
             labels.push_back(tr("Remove from all folders"));
 
-        auto* dd = new brls::Dropdown(tr("Folders"), labels, [this, item, custom](int i) {
-            if (i < 0) return;
-            if (i < (int)custom.size())
-            {
-                library::toggleFolder(item, custom[i]);
-            }
-            else if (i == (int)custom.size())
-            {
+        auto live = alive;
+        auto* dd = new brls::Dropdown(
+            tr("Folders"), labels,
+            [item, custom](int i) {
+                if (i < 0) return;
+                if (i < (int)custom.size())
+                    library::toggleFolder(item, custom[i]);
+                else if (i > (int)custom.size())
+                    library::setFolders(item, {});
+            },
+            -1,
+            [item, custom, live](int i) {
+                if (i != (int)custom.size()) return;
                 brls::Application::getImeManager()->openForText(
-                    [this, item](std::string text) {
+                    [item, live](std::string text) {
                         while (!text.empty() && (text.front() == ' ' || text.front() == '\t')) text.erase(0, 1);
                         while (!text.empty() && (text.back() == ' ' || text.back() == '\t')) text.pop_back();
                         if (text.empty()) return;
                         library::createFolder(text);
                         library::toggleFolder(item, text);
                         brls::Application::notify(tr("Folder created"));
+                        (void)live;
                     },
                     tr("New folder"), "", 64, "");
-            }
-            else
-            {
-                library::setFolders(item, {});
-            }
-        });
+            });
         brls::Application::pushActivity(new brls::Activity(dd));
     }
 
@@ -299,7 +332,8 @@ class BookmarksRoot : public brls::Box
 
     void rebuildFilters()
     {
-        filterBox->clearViews();
+        ui::safeClearViews(filterBox, newFolderBtn);
+        auto live = alive;
         std::vector<std::pair<std::string, std::string>> filters = {
             { "", tr("All") },
             { "__watching__", tr("Watching") },
@@ -309,13 +343,14 @@ class BookmarksRoot : public brls::Box
         };
         auto custom = library::customFolders();
         for (const auto& f : custom)
-            filters.push_back({ f, "\xF0\x9F\x93\x81 " + f });
+            filters.push_back({ f, f });
 
         for (const auto& item : filters)
         {
             std::string filterKey = item.first;
             bool isActive = (activeFilter == filterKey);
-            auto* btn = ui::actionButton(item.second, false, [this, filterKey]() {
+            auto* btn = ui::actionButton(item.second, false, [this, live, filterKey]() {
+                if (!*live) return;
                 if (activeFilter != filterKey)
                 {
                     activeFilter = filterKey;
@@ -330,6 +365,7 @@ class BookmarksRoot : public brls::Box
 
     void rebuild()
     {
+        dirty = false;
         // The focus comes back to the card it was on when a pushed card
         // closes -- and that card is about to be freed. Park it first.
         for (brls::View* v = brls::Application::getCurrentFocus(); v; v = v->getParent())
@@ -384,7 +420,7 @@ class BookmarksRoot : public brls::Box
             {
                 auto entries = library::withFolder(f);
                 if (entries.empty()) continue;
-                list->addView(ui::heading("\xF0\x9F\x93\x81 " + f + "  \xC2\xB7  " +
+                list->addView(ui::heading(f + "  \xC2\xB7  " +
                                               std::to_string(entries.size()),
                                           ins));
                 auto* row = new brls::Box();
@@ -435,7 +471,7 @@ class BookmarksRoot : public brls::Box
             header->setPadding(4.0f, ins, 12.0f, ins);
             header->setAlignItems(brls::AlignItems::CENTER);
 
-            auto* headingLbl = ui::heading("\xF0\x9F\x93\x81 " + activeFilter + "  \xC2\xB7  " +
+            auto* headingLbl = ui::heading(activeFilter + "  \xC2\xB7  " +
                                                std::to_string(entries.size()), 0);
             header->addView(headingLbl);
 

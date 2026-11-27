@@ -9,6 +9,7 @@
 #include "mse_peer.h"
 #include "utp_nb.h"
 
+#ifndef ENGINE_HAS_UTP_NB
 int  utp_nb_init(void) { return -1; }
 void utp_nb_exit(void) {}
 int  utp_nb_fd(void) { return -1; }
@@ -27,6 +28,7 @@ int  utp_nb_write(utp_nb_sess *s, const void *buf, int len) {
     return -1;
 }
 int  utp_nb_state(const utp_nb_sess *s) { (void)s; return -1; }
+#endif
 
 void mse_rc4_init(mse_rc4 *r, const uint8_t *key, size_t key_len) {
     (void)key; (void)key_len;

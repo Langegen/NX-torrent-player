@@ -25,6 +25,8 @@ typedef struct httpsrc httpsrc;
 void httpsrc_set_ca(const char *ca_path);
 // `proxy`: a curl proxy string ("http://host:3128", "socks5h://host:1080").
 void httpsrc_set_proxy(const char *proxy);
+// Optional HTTP headers ("Referer: ...", "User-Agent: ..."), up to 16 lines.
+void httpsrc_set_headers(const char *const *headers, int count);
 
 // Opens `url` (http:// or https://): one request to learn the size and that
 // the server honours ranges. NULL on failure, with a reason in err.

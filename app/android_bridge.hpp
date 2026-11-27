@@ -13,3 +13,9 @@ const char* androidStoragePath();
 
 // Returns and clears any pending launch magnet/file URI captured by MainActivity.
 std::string androidConsumePendingIntentUri();
+
+// Android device form-factor & display helpers (safe defaults on non-Android).
+bool androidIsTv();
+float androidDisplayDensity();
+int androidSmallestWidthDp();
+void androidSafeInsetsPx(int& top, int& right, int& bottom, int& left);

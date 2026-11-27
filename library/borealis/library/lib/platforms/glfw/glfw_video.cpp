@@ -55,6 +55,10 @@ std::unique_ptr<brls::D3D11Context> D3D11_CONTEXT;
 #include <windows.h>
 #endif
 
+#ifdef __SWITCH__
+#include <switch.h>
+#endif
+
 namespace brls
 {
 
@@ -402,7 +406,8 @@ GLFWVideoContext::GLFWVideoContext(const std::string& windowTitle, uint32_t wind
     }
 
 #ifdef __SWITCH__
-    this->monitor = glfwGetPrimaryMonitor();
+    this->lastOpMode = (int)appletGetOperationMode();
+    this->monitor    = glfwGetPrimaryMonitor();
     if (this->monitor)
     {
         const char* name = glfwGetMonitorName(this->monitor);
@@ -420,21 +425,27 @@ GLFWVideoContext::GLFWVideoContext(const std::string& windowTitle, uint32_t wind
 void GLFWVideoContext::beginFrame()
 {
 #ifdef __SWITCH__
-    if (!this->monitor)
-        this->monitor = glfwGetPrimaryMonitor();
-
-    const GLFWvidmode* r = this->monitor ? glfwGetVideoMode(this->monitor) : nullptr;
-
-    if (r && r->width > 0 && r->height > 0 && (oldWidth != r->width || oldHeight != r->height))
+    // LOCAL PATCH (NX-torrent-player): only query glfwGetVideoMode when applet operation
+    // mode changes (dock/handheld), instead of polling monitor state every frame.
+    int opMode = (int)appletGetOperationMode();
+    if (opMode != this->lastOpMode)
     {
-        oldWidth  = r->width;
-        oldHeight = r->height;
+        this->lastOpMode = opMode;
+        if (!this->monitor)
+            this->monitor = glfwGetPrimaryMonitor();
 
-        // LOCAL PATCH (NX-torrent-player): flush pending GPU commands before
-        // resizing the native Switch window (nwindowSetDimensions), preventing
-        // driver crashes while buffers are active in Mesa/Nouveau.
-        glFinish();
-        glfwSetWindowSize(window, r->width, r->height);
+        const GLFWvidmode* r = this->monitor ? glfwGetVideoMode(this->monitor) : nullptr;
+
+        if (r && r->width > 0 && r->height > 0 && (oldWidth != r->width || oldHeight != r->height))
+        {
+            oldWidth  = r->width;
+            oldHeight = r->height;
+
+            // Flush pending GPU commands before resizing the native Switch window
+            // (nwindowSetDimensions), preventing driver crashes while buffers are active.
+            glFinish();
+            glfwSetWindowSize(window, r->width, r->height);
+        }
     }
 #elif defined(BOREALIS_USE_D3D11)
     D3D11_CONTEXT->beginFrame();
@@ -444,7 +455,20 @@ void GLFWVideoContext::beginFrame()
 void GLFWVideoContext::endFrame()
 {
 #ifdef BOREALIS_USE_OPENGL
+#ifdef __SWITCH__
+    // LOCAL PATCH (NX-torrent-player): fence-pace Mesa/Nouveau submission so at most
+    // one GPU frame sits in flight, keeping Switch Capture responsive.
+    if (this->frameFence)
+    {
+        glClientWaitSync((GLsync)this->frameFence, GL_SYNC_FLUSH_COMMANDS_BIT, 50000000ULL);
+        glDeleteSync((GLsync)this->frameFence);
+        this->frameFence = nullptr;
+    }
+#endif
     glfwSwapBuffers(this->window);
+#ifdef __SWITCH__
+    this->frameFence = (void*)glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+#endif
 #elif defined(BOREALIS_USE_D3D11)
     D3D11_CONTEXT->endFrame();
 #endif
@@ -528,6 +552,13 @@ GLFWVideoContext::~GLFWVideoContext()
     {
         Logger::error("Cannot delete nvg Context");
     }
+#if defined(__SWITCH__) && defined(BOREALIS_USE_OPENGL)
+    if (this->frameFence)
+    {
+        glDeleteSync((GLsync)this->frameFence);
+        this->frameFence = nullptr;
+    }
+#endif
     glfwDestroyWindow(this->window);
     glfwTerminate();
 }

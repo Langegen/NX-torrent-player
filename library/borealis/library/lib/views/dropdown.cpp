@@ -218,9 +218,23 @@ RecyclerCell* Dropdown::cellForRow(RecyclerFrame* recycler, IndexPath index)
 
 void Dropdown::didSelectRowAt(RecyclerFrame* recycler, IndexPath index)
 {
-    this->cb(index.row);
-    Application::popActivity(TransitionAnimation::FADE, [this, index]
-        { this->dismissCb(index.row); });
+    // LOCAL PATCH (NX-torrent-player): Copy dismissCb & row before popActivity
+    // so freeing `this` during dismiss cannot cause UAF, and guard popActivity
+    // if cb() already replaced the top activity.
+    auto dcb = this->dismissCb;
+    int row  = index.row;
+    this->cb(row);
+    auto stack = Application::getActivitiesStack();
+    if (!stack.empty() && stack.back() == this->getParentActivity())
+    {
+        Application::popActivity(TransitionAnimation::FADE, [dcb, row] {
+            if (dcb) dcb(row);
+        });
+    }
+    else if (dcb)
+    {
+        dcb(row);
+    }
 }
 
 AppletFrame* Dropdown::getAppletFrame()

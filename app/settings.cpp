@@ -24,6 +24,7 @@
 #include "theme.hpp"
 #include "update.hpp"
 #include "stremio.hpp"
+#include "online/online_manager.hpp"
 
 #include "sync/sync_manager.hpp"
 #include "sync/sync_dialog.hpp"
@@ -35,6 +36,7 @@ extern "C" {
 }
 
 #include "i18n.hpp"
+#include "osk.hpp"
 #include "platform_ui.hpp"
 #include "widgets.hpp"  // ui::FieldFrame
 
@@ -85,6 +87,7 @@ brls::View* playbackPane();
 brls::View* streamingPane();
 brls::View* stremioPane();
 brls::View* jackettPane();
+brls::View* onlinePane();
 brls::View* syncPane();
 brls::View* networkPane();
 brls::View* aboutPane();
@@ -220,7 +223,12 @@ brls::View* generalPane()
     variant->init(
         tr("Theme"),
         { tr("Dark (default)"), tr("Light"),
-          platform_ui::isMobile() ? tr("Follow system") : tr("Follow the console") },
+#ifdef __SWITCH__
+          tr("Follow the console")
+#else
+          tr("Follow system")
+#endif
+        },
         [] {
             for (size_t i = 0; i < kVariantIds.size(); i++)
                 if (kVariantIds[i] == config::get().themeVariant) return (int)i;
@@ -259,63 +267,47 @@ brls::View* generalPane()
         });
     list->addView(accent);
 
-    // Index-matched with the cell's labels. The library rows are built once and
-    // kept for the life of the tab, so marking it stale is what re-renders them
-    // -- on the next return to the list.
-    static const std::vector<std::string> kListStyles = { "posters", "cards",
-                                                          "classic" };
-    auto* listStyle = new brls::SelectorCell();
-    listStyle->init(tr("List style"), { tr("Posters (default)"), tr("Cards"), tr("Classic") },
-                    [&] {
-                        for (size_t i = 0; i < kListStyles.size(); i++)
-                            if (kListStyles[i] == cfg.listStyle) return (int)i;
-                        return 0;
-                    }(),
-                    [](int sel) {
-                        config::get().listStyle = kListStyles[sel];
-                        config::save();
-                        stremio::markLibraryStale();
-                    });
-    list->addView(listStyle);
+    auto* builtinKbd = new brls::BooleanCell();
+    builtinKbd->init(tr("Built-in keyboard"), config::get().builtinKeyboard, [](bool on) {
+        config::get().builtinKeyboard = on;
+        config::save();
+        osk::applyConfig();
+    });
+    list->addView(builtinKbd);
+    list->addView(caption(tr("Use the app's own on-screen keyboard instead of the system one. Helps if the system keyboard crashes.")));
 
     auto* sizeHdr = new brls::Header();
     sizeHdr->setTitle(tr("UI size"));
     list->addView(sizeHdr);
 
-    if (platform_ui::isMobile())
-    {
-        auto* mobileUi = new brls::SelectorCell();
-        mobileUi->init(tr("Interface scale"), uiLabels(config::kDefaultHandheldUiWidth),
-                       uiIndex(config::get().handheldUiWidth), [](int sel) {
-                           config::get().handheldUiWidth = config::uiWidths()[sel];
-                           config::save();
-                           brls::sync([] { applyUiScale(); });
-                       });
-        list->addView(mobileUi);
-    }
-    else
-    {
-        auto* dockedUi = new brls::SelectorCell();
-        dockedUi->init(tr("Docked"), uiLabels(config::kDefaultDockedUiWidth),
-                       uiIndex(config::get().dockedUiWidth), [](int sel) {
-                           config::get().dockedUiWidth = config::uiWidths()[sel];
-                           config::save();
-                           // Next frame, not now: the selector's dropdown is still
-                           // closing, and relaying out the activity stack from under
-                           // it is asking for trouble.
-                           brls::sync([] { applyUiScale(); });
-                       });
-        list->addView(dockedUi);
+#ifdef __SWITCH__
+    auto* dockedUi = new brls::SelectorCell();
+    dockedUi->init(tr("Docked"), uiLabels(config::kDefaultDockedUiWidth),
+                   uiIndex(config::get().dockedUiWidth), [](int sel) {
+                       config::get().dockedUiWidth = config::uiWidths()[sel];
+                       config::save();
+                       brls::sync([] { applyUiScale(); });
+                   });
+    list->addView(dockedUi);
 
-        auto* handheldUi = new brls::SelectorCell();
-        handheldUi->init(tr("Handheld"), uiLabels(config::kDefaultHandheldUiWidth),
-                         uiIndex(config::get().handheldUiWidth), [](int sel) {
-                             config::get().handheldUiWidth = config::uiWidths()[sel];
-                             config::save();
-                             brls::sync([] { applyUiScale(); });
-                         });
-        list->addView(handheldUi);
-    }
+    auto* handheldUi = new brls::SelectorCell();
+    handheldUi->init(tr("Handheld"), uiLabels(config::kDefaultHandheldUiWidth),
+                     uiIndex(config::get().handheldUiWidth), [](int sel) {
+                         config::get().handheldUiWidth = config::uiWidths()[sel];
+                         config::save();
+                         brls::sync([] { applyUiScale(); });
+                     });
+    list->addView(handheldUi);
+#else
+    auto* scaleCell = new brls::SelectorCell();
+    scaleCell->init(tr("Interface scale"), uiLabels(config::defaultHandheldUiWidth()),
+                    uiIndex(config::get().handheldUiWidth), [](int sel) {
+                        config::get().handheldUiWidth = config::uiWidths()[sel];
+                        config::save();
+                        brls::sync([] { applyUiScale(); });
+                    });
+    list->addView(scaleCell);
+#endif
 
     return pane;
 }
@@ -351,7 +343,11 @@ brls::View* playbackPane()
 
     auto* audioBoost = new brls::BooleanCell();
     audioBoost->init(
-        platform_ui::isMobile() ? tr("Boost quiet audio") : tr("Boost quiet audio in handheld"),
+#ifdef __SWITCH__
+        tr("Boost quiet audio in handheld"),
+#else
+        tr("Boost quiet audio"),
+#endif
         cfg.audioBoost, [](bool on) {
         config::get().audioBoost = on;
         config::save();
@@ -386,7 +382,11 @@ brls::View* playbackPane()
     // themselves are on the calibration screen, next to the patterns they are
     // judged against -- and in the player's panel, against the film.
     auto* picHdr = new brls::Header();
-    picHdr->setTitle(platform_ui::isMobile() ? tr("Picture") : tr("Picture in handheld"));
+#ifdef __SWITCH__
+    picHdr->setTitle(tr("Picture in handheld"));
+#else
+    picHdr->setTitle(tr("Picture"));
+#endif
     list->addView(picHdr);
 
     auto* pic = new brls::DetailCell();
@@ -405,10 +405,13 @@ brls::View* playbackPane()
     });
     list->addView(pic);
     list->addView(caption(
-        platform_ui::isMobile()
-            ? tr("Brightness, contrast, gamma, saturation and RGB balance of the video.")
-            : tr("Brightness, contrast, gamma, saturation and RGB balance of the video on the console's "
-                 "screen. Docked they are off: the TV sets the picture.")));
+#ifdef __SWITCH__
+        tr("Brightness, contrast, gamma, saturation and RGB balance of the video on the console's "
+           "screen. Docked they are off: the TV sets the picture.")
+#else
+        tr("Brightness, contrast, gamma, saturation and RGB balance of the video.")
+#endif
+    ));
 
     return pane;
 }
@@ -621,6 +624,208 @@ brls::View* jackettPane()
     });
     list->addView(testBtn);
 
+    return pane;
+}
+
+brls::View* onlinePane()
+{
+    brls::Box* list = nullptr;
+    auto* pane      = newPane(&list);
+
+    auto* modeCell = new brls::SelectorCell();
+    int curMode    = (config::get().defaultWatchMode == "online") ? 1
+                   : (config::get().defaultWatchMode == "ask")    ? 2
+                                                                  : 0;
+    modeCell->init(tr("Default watch source"), { tr("Torrents"), tr("Online"), tr("Ask") }, curMode,
+                   [](int sel) {
+                       config::get().defaultWatchMode = (sel == 1) ? "online"
+                                                      : (sel == 2) ? "ask"
+                                                                   : "torrents";
+                       config::save();
+                   });
+    list->addView(modeCell);
+    list->addView(caption(tr(
+        "Which source the Watch button and episode clicks open by default. "
+        "Both Torrents and Online buttons remain available on every card.")));
+
+    static const int kQualVals[]     = { 0, 2160, 1080, 720, 480 };
+    std::vector<std::string> qLabels = { tr("Auto (best)"), "2160p", "1080p", "720p", "480p" };
+    int curQ                         = 2;
+    for (int i = 0; i < 5; i++)
+        if (kQualVals[i] == config::get().onlinePreferQuality) curQ = i;
+    auto* qCell = new brls::SelectorCell();
+    qCell->init(tr("Preferred quality"), qLabels, curQ, [](int sel) {
+        if (sel < 0 || sel >= 5) return;
+        config::get().onlinePreferQuality = kQualVals[sel];
+        config::save();
+    });
+    list->addView(qCell);
+
+    auto* hdr = new brls::Header();
+    hdr->setTitle(tr("Online plugins"));
+    list->addView(hdr);
+
+    auto* pluginsBox = new AsyncBox();
+    pluginsBox->setAxis(brls::Axis::COLUMN);
+    list->addView(pluginsBox);
+
+    auto rebuildPlugins = std::make_shared<std::function<void()>>();
+    auto live           = pluginsBox->alive;
+
+    *rebuildPlugins = [pluginsBox, modeCell, live, rebuildPlugins]() {
+        if (!*live) return;
+        for (brls::View* v = brls::Application::getCurrentFocus(); v; v = v->getParent())
+        {
+            if (v == pluginsBox)
+            {
+                brls::Application::giveFocus(modeCell);
+                break;
+            }
+        }
+        pluginsBox->clearViews();
+        const auto& plugins = config::get().onlinePlugins;
+        if (plugins.empty())
+        {
+            pluginsBox->addView(caption(tr(
+                "No plugins added yet. Add a Lampa/Lampac server or plugin URL "
+                "(e.g. https://app.bwa.ad/online.js or http://IP:9118) or an NX Online Plugin.")));
+            return;
+        }
+
+        for (size_t i = 0; i < plugins.size(); i++)
+        {
+            const auto& p = plugins[i];
+            auto* cell    = new brls::DetailCell();
+            cell->setText(p.name.empty() ? p.url : p.name);
+            std::string kindLabel = (p.kind == "nx_plugin") ? "NX Plugin" : "Lampa/Lampac";
+            cell->setDetailText(kindLabel + " \xC2\xB7 " +
+                                (p.enabled ? tr("Enabled") : tr("Disabled")));
+            cell->setDetailTextColor(p.enabled ? theme::textGood() : theme::textMuted());
+
+            cell->registerClickAction([i, live, rebuildPlugins](brls::View*) {
+                if (i >= config::get().onlinePlugins.size()) return true;
+                const auto cur                   = config::get().onlinePlugins[i];
+                std::vector<std::string> actions = {
+                    tr("Test connection"),
+                    cur.enabled ? tr("Disable") : tr("Enable"),
+                    tr("Edit token"),
+                    tr("Rename"),
+                    tr("Delete"),
+                };
+                auto* dd = new brls::Dropdown(
+                    cur.name, actions, [](int) {}, -1,
+                    [i, live, rebuildPlugins](int sel) {
+                        if (!*live || i >= config::get().onlinePlugins.size()) return;
+                        if (sel == 0)
+                        {
+                            auto cfgCopy = config::get().onlinePlugins[i];
+                            brls::Application::notify(tr("Testing..."));
+                            online::testPluginAsync(cfgCopy, [](bool ok, const std::string& msg) {
+                                std::string txt = ok
+                                    ? (std::string(tr("Connected")) + " (" + msg + ")")
+                                    : (std::string(tr("Connection failed: ")) + msg);
+                                note(txt);
+                            });
+                        }
+                        else if (sel == 1)
+                        {
+                            config::get().onlinePlugins[i].enabled =
+                                !config::get().onlinePlugins[i].enabled;
+                            config::save();
+                            (*rebuildPlugins)();
+                        }
+                        else if (sel == 2)
+                        {
+                            std::string curTok = config::get().onlinePlugins[i].token;
+                            brls::Application::getImeManager()->openForText(
+                                [i, live, rebuildPlugins](std::string text) {
+                                    if (!*live || i >= config::get().onlinePlugins.size()) return;
+                                    config::get().onlinePlugins[i].token = text;
+                                    config::save();
+                                    (*rebuildPlugins)();
+                                },
+                                tr("Access token (optional)"), "", 128, curTok);
+                        }
+                        else if (sel == 3)
+                        {
+                            std::string curName = config::get().onlinePlugins[i].name;
+                            brls::Application::getImeManager()->openForText(
+                                [i, live, rebuildPlugins](std::string text) {
+                                    if (!*live || i >= config::get().onlinePlugins.size()) return;
+                                    if (!text.empty())
+                                    {
+                                        config::get().onlinePlugins[i].name = text;
+                                        config::save();
+                                        (*rebuildPlugins)();
+                                    }
+                                },
+                                tr("Plugin name"), "", 64, curName);
+                        }
+                        else if (sel == 4)
+                        {
+                            auto& vec = config::get().onlinePlugins;
+                            vec.erase(vec.begin() + (ptrdiff_t)i);
+                            config::save();
+                            (*rebuildPlugins)();
+                        }
+                    });
+                brls::Application::pushActivity(new brls::Activity(dd));
+                return true;
+            });
+            pluginsBox->addView(cell);
+        }
+    };
+    (*rebuildPlugins)();
+
+    auto runProbeAndAdd = [live, rebuildPlugins](const std::string& url, const std::string& token) {
+        brls::Application::notify(tr("Checking plugin..."));
+        online::probePluginAsync(url, token, [live, rebuildPlugins](online::ProbeResult pr) {
+            if (!pr.ok)
+            {
+                note(pr.error);
+                return;
+            }
+            config::get().onlinePlugins.push_back(pr.plugin);
+            config::save();
+            if (*live) (*rebuildPlugins)();
+            note(std::string(tr("Plugin added: ")) + pr.plugin.name + "\n" + pr.summary);
+        });
+    };
+
+    auto* addBtn = new brls::Button();
+    addBtn->setText(tr("+ Add plugin (Lampa / NX)"));
+    addBtn->setMargins(10.0f, 0.0f, 12.0f, 0.0f);
+    addBtn->registerClickAction([runProbeAndAdd](brls::View*) {
+        brls::Application::getImeManager()->openForText(
+            [runProbeAndAdd](std::string url) {
+                while (!url.empty() && std::isspace((unsigned char)url.front())) url.erase(0, 1);
+                while (!url.empty() && std::isspace((unsigned char)url.back())) url.pop_back();
+                if (url.empty()) return;
+
+                brls::sync([runProbeAndAdd, url]() {
+                    auto* d = new brls::Dialog(tr("Enter an access token if the plugin requires one:"));
+                    d->addButton(tr("No token"), [runProbeAndAdd, url]() {
+                        runProbeAndAdd(url, "");
+                    });
+                    d->addButton(tr("Enter token"), [runProbeAndAdd, url]() {
+                        brls::Application::getImeManager()->openForText(
+                            [runProbeAndAdd, url](std::string tok) {
+                                runProbeAndAdd(url, tok);
+                            },
+                            tr("Access token (optional)"), "", 128, "");
+                    });
+                    d->open();
+                });
+            },
+            tr("Plugin or server URL"), "https://app.bwa.ad/online.js", 256, "");
+        return true;
+    });
+    list->addView(addBtn);
+
+    list->addView(caption(tr(
+        "Supports Lampa/Lampac servers and plugin URLs (e.g. https://app.bwa.ad/online.js, "
+        "http://192.168.1.10:9118), as well as custom NX Online Plugin v1 endpoints. "
+        "Browser-only DOM scripts (like online_mod.js) are not supported natively.")));
     return pane;
 }
 
@@ -1300,12 +1505,14 @@ brls::View* aboutPane()
     version->setMargins(4.0f, 20.0f, 16.0f, 20.0f);
     list->addView(version);
 
+#ifdef __SWITCH__
     auto* checkUpd = new brls::BooleanCell();
     checkUpd->init(tr("Check for updates on startup"), cfg.checkUpdates, [](bool on) {
         config::get().checkUpdates = on;
         config::save();
     });
     list->addView(checkUpd);
+#endif
 
     auto* changelog = new brls::Button();
     changelog->setText(tr("View changelog"));
@@ -1339,7 +1546,7 @@ brls::View* aboutPane()
                      std::string(APP_VERSION) + ").");
             else if (!r.installable())
             {
-#if defined(__ANDROID__) || defined(ANDROID)
+#if !defined(__SWITCH__)
                 note(tr("Version ") + r.version +
                      tr(" is available on GitHub."));
 #else
@@ -1396,6 +1603,7 @@ class MobileSettingsView : public brls::Box
             { tr("Streaming"), [] { return streamingPane(); } },
             { "Stremio",       [] { return stremioPane(); } },
             { "Jackett",       [] { return jackettPane(); } },
+            { tr("Online"),    [] { return onlinePane(); } },
             { tr("Sync"),      [] { return syncPane(); } },
             { tr("Network"),   [] { return networkPane(); } },
             { tr("About"),     [] { return aboutPane(); } },
@@ -1456,7 +1664,7 @@ class MobileSettingsView : public brls::Box
         if (idx < 0 || idx >= (int)creators.size()) return;
         for (size_t i = 0; i < tabBtns.size(); i++)
             ui::setPillActive(tabBtns[i], (int)i == idx);
-        paneHost->clearViews();
+        ui::safeClearViews(paneHost, tabBtns[idx]);
         if (brls::View* v = creators[idx]())
         {
             v->setGrow(1.0f);
@@ -1494,35 +1702,61 @@ void applyUiScale()
     {
         int winW = brls::Application::windowWidth;
         int winH = brls::Application::windowHeight;
-        uint32_t baseW = (uint32_t)config::get().handheldUiWidth;
-        uint32_t baseH = baseW * 9 / 16;
+        float density = androidDisplayDensity();
+        if (density < 0.75f) density = 1.0f;
+#if !defined(__ANDROID__) && !defined(ANDROID)
+        // Desktop NX_MOBILE_UI=1 test mode has density 1.0; simulate ~2.5x phone density.
+        if (winW <= 900 || winH <= 900) density = 2.5f;
+#endif
+        double scaleFactor = 1280.0 / (double)std::max(640, config::get().handheldUiWidth);
+        double widthDp     = (winW > 0) ? (double)winW / density : 400.0;
+        double heightDp    = (winH > 0) ? (double)winH / density : 700.0;
+
         uint32_t w, h;
         if (winH > winW && winW > 0)
         {
-            // Portrait phone or tablet: keep physical scale legible vs landscape
-            double scale = (double)baseW / 1280.0;
-            uint32_t targetW = (uint32_t)std::lround((winW >= 1400 ? 800.0 : 720.0) * scale);
-            if (targetW < 640) targetW = 640;
-            if (targetW > 960) targetW = 960;
-            w = targetW;
+            // Portrait phone / tablet: compute logical width from dp so text and
+            // touch targets (~44-48dp) match native Android proportions (~35-45% larger
+            // than the old 720-800px cap).
+            double targetW = platform_ui::isTablet()
+                                 ? std::clamp(widthDp * 1.15, 680.0, 840.0)
+                                 : std::clamp(widthDp * 1.28, 460.0, 560.0);
+            w = (uint32_t)std::clamp(std::lround(targetW / scaleFactor), 360L, 1800L);
+            h = (uint32_t)std::ceil((double)w * winH / winW);
+        }
+        else if (winW > 0 && winH > 0)
+        {
+            // Landscape phone (e.g. 20:9) or tablet: drive vertical logical pixels
+            // from physical height dp rather than forcing 720p onto a 6" phone.
+            double targetH = platform_ui::isTablet()
+                                 ? std::clamp(heightDp * 1.15, 640.0, 740.0)
+                                 : std::clamp(heightDp * 1.35, 500.0, 580.0);
+            uint32_t hScaled = (uint32_t)std::clamp(std::lround(targetH / scaleFactor), 380L, 1600L);
+            w = (uint32_t)std::clamp((long)std::ceil((double)hScaled * winW / winH), 640L, 3200L);
             h = (uint32_t)std::ceil((double)w * winH / winW);
         }
         else
         {
-            // Landscape phone (e.g. 20:9), tablet (16:10), or Android TV (16:9):
-            // guarantee at least baseH (720 at 100%) vertical logical pixels.
-            w = baseW;
-            if (winW > 0 && winH > 0)
-            {
-                uint32_t minWForHeight = (uint32_t)std::ceil((double)baseH * winW / winH);
-                if (minWForHeight > w) w = minWForHeight;
-                h = (uint32_t)std::ceil((double)w * winH / winW);
-            }
-            else
-            {
-                h = baseH;
-            }
+            w = 1120;
+            h = 630;
         }
+
+        if (brls::Application::ORIGINAL_WINDOW_WIDTH == w &&
+            brls::Application::ORIGINAL_WINDOW_HEIGHT == h)
+            return;
+
+        brls::Application::ORIGINAL_WINDOW_WIDTH  = w;
+        brls::Application::ORIGINAL_WINDOW_HEIGHT = h;
+    }
+#ifdef __SWITCH__
+    else if (platform_ui::isTv())
+    {
+        int winW = brls::Application::windowWidth;
+        int winH = brls::Application::windowHeight;
+        uint32_t w = (uint32_t)std::clamp(config::get().handheldUiWidth, 960, 1920);
+        uint32_t h = (winW > 0 && winH > 0)
+                         ? (uint32_t)std::ceil((double)w * winH / winW)
+                         : (w * 9 / 16);
 
         if (brls::Application::ORIGINAL_WINDOW_WIDTH == w &&
             brls::Application::ORIGINAL_WINDOW_HEIGHT == h)
@@ -1533,12 +1767,6 @@ void applyUiScale()
     }
     else
     {
-        // borealis lays out in a fixed 1280x720 logical space and multiplies it by
-        // windowScale to fill the output, so the UI keeps the same relative size
-        // whatever it is drawn to -- docked it is simply 1.5x bigger, with no more
-        // content on screen. Widening the logical space shrinks the UI instead; how
-        // far is the user's call, separately per mode, since a 1080p TV metres away
-        // and a 6" panel at arm's length do not want the same thing.
         bool docked = brls::Application::windowWidth >= 1920;
         uint32_t w  = (uint32_t)(docked ? config::get().dockedUiWidth
                                         : config::get().handheldUiWidth);
@@ -1551,6 +1779,26 @@ void applyUiScale()
         brls::Application::ORIGINAL_WINDOW_WIDTH  = w;
         brls::Application::ORIGINAL_WINDOW_HEIGHT = h;
     }
+#else
+    else
+    {
+        // Android TV / Desktop PC: single clean UI scale setting (handheldUiWidth)
+        // preserving display aspect ratio on ultra-wide or non-16:9 monitors.
+        int winW = brls::Application::windowWidth;
+        int winH = brls::Application::windowHeight;
+        uint32_t w = (uint32_t)std::clamp(config::get().handheldUiWidth, 960, 2560);
+        uint32_t h = (winW > 0 && winH > 0)
+                         ? (uint32_t)std::ceil((double)w * winH / winW)
+                         : (w * 9 / 16);
+
+        if (brls::Application::ORIGINAL_WINDOW_WIDTH == w &&
+            brls::Application::ORIGINAL_WINDOW_HEIGHT == h)
+            return;
+
+        brls::Application::ORIGINAL_WINDOW_WIDTH  = w;
+        brls::Application::ORIGINAL_WINDOW_HEIGHT = h;
+    }
+#endif
 
     // Recomputes windowScale/contentWidth and relayouts the activity stack.
     // Safe to call from the window-size-changed listener: that event is fired by
@@ -1602,6 +1850,7 @@ brls::View* SettingsActivity::createContentView()
     tabs->addTab(tr("Streaming"), [] { return streamingPane(); });
     tabs->addTab("Stremio", [] { return stremioPane(); });
     tabs->addTab("Jackett", [] { return jackettPane(); });
+    tabs->addTab(tr("Online"), [] { return onlinePane(); });
     tabs->addTab(tr("Sync"), [] { return syncPane(); });
     tabs->addTab(tr("Network"), [] { return networkPane(); });
     tabs->addTab(tr("About"), [] { return aboutPane(); });

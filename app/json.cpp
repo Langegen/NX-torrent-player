@@ -504,4 +504,126 @@ std::vector<std::string> strings(const std::string& body, const char* key)
     return out;
 }
 
+std::vector<std::pair<std::string, std::string>> stringMap(const std::string& obj)
+{
+    std::vector<std::pair<std::string, std::string>> out;
+    size_t i = 0;
+    while (i < obj.size() && obj[i] != '{') i++;
+    if (i >= obj.size()) return out;
+    i++;
+
+    auto skipWs = [&](size_t& p) {
+        while (p < obj.size() && (obj[p] == ' ' || obj[p] == '\t' ||
+                                  obj[p] == '\r' || obj[p] == '\n'))
+            p++;
+    };
+    auto skipValue = [&](size_t& p) {
+        skipWs(p);
+        if (p >= obj.size()) return;
+        if (obj[p] == '"')
+        {
+            size_t endQ = p;
+            decodeQuoted(obj, p, endQ);
+            p = endQ + 1;
+            return;
+        }
+        if (obj[p] == '{' || obj[p] == '[')
+        {
+            int depth = 0;
+            bool inS  = false;
+            for (; p < obj.size(); p++)
+            {
+                char c = obj[p];
+                if (inS)
+                {
+                    if (c == '\\') { p++; continue; }
+                    if (c == '"') inS = false;
+                    continue;
+                }
+                if (c == '"') inS = true;
+                else if (c == '{' || c == '[') depth++;
+                else if (c == '}' || c == ']')
+                {
+                    if (--depth <= 0) { p++; break; }
+                }
+            }
+            return;
+        }
+        while (p < obj.size() && obj[p] != ',' && obj[p] != '}') p++;
+    };
+
+    while (i < obj.size())
+    {
+        skipWs(i);
+        if (i >= obj.size() || obj[i] == '}') break;
+        if (obj[i] == ',') { i++; continue; }
+        if (obj[i] != '"') { i++; continue; }
+
+        size_t endKey = i;
+        std::string key = decodeQuoted(obj, i, endKey);
+        i = endKey + 1;
+        skipWs(i);
+        if (i >= obj.size() || obj[i] != ':') continue;
+        i++;
+        skipWs(i);
+        if (i < obj.size() && obj[i] == '"')
+        {
+            size_t endVal = i;
+            std::string val = decodeQuoted(obj, i, endVal);
+            i = endVal + 1;
+            out.emplace_back(std::move(key), std::move(val));
+        }
+        else
+        {
+            skipValue(i);
+        }
+    }
+    return out;
+}
+
+std::vector<std::string> arrayObjects(const std::string& jsonArray)
+{
+    std::vector<std::string> out;
+    size_t open = 0;
+    while (open < jsonArray.size() &&
+           (jsonArray[open] == ' ' || jsonArray[open] == '\t' ||
+            jsonArray[open] == '\r' || jsonArray[open] == '\n'))
+        open++;
+    if (open >= jsonArray.size() || jsonArray[open] != '[') return out;
+
+    int depth      = 0;
+    bool inStr     = false;
+    size_t objFrom = std::string::npos;
+    for (size_t i = open + 1; i < jsonArray.size(); i++)
+    {
+        char c = jsonArray[i];
+        if (inStr)
+        {
+            if (c == '\\') { i++; continue; }
+            if (c == '"') inStr = false;
+            continue;
+        }
+        if (c == '"') { inStr = true; continue; }
+        if (c == '{')
+        {
+            if (depth == 0) objFrom = i;
+            depth++;
+        }
+        else if (c == '}')
+        {
+            depth--;
+            if (depth == 0 && objFrom != std::string::npos)
+            {
+                out.push_back(jsonArray.substr(objFrom, i - objFrom + 1));
+                objFrom = std::string::npos;
+            }
+        }
+        else if (c == ']' && depth == 0)
+        {
+            break;
+        }
+    }
+    return out;
+}
+
 } // namespace json

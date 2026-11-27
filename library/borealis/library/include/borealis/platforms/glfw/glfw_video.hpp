@@ -54,7 +54,11 @@ class GLFWVideoContext : public VideoContext
 
 #ifdef __SWITCH__
     int oldWidth = 0, oldHeight = 0;
+    int lastOpMode = -1;
     GLFWmonitor* monitor = nullptr;
+#ifdef BOREALIS_USE_OPENGL
+    void* frameFence = nullptr;
+#endif
 #endif
 };
 

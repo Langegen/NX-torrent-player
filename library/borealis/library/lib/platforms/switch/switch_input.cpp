@@ -197,12 +197,11 @@ void SwitchInputManager::updateUnifiedControllerState(ControllerState* state)
 
 short SwitchInputManager::getControllersConnectedCount()
 {
-    padUpdate(&this->padStateHandheld);
+    // LOCAL PATCH (NX-torrent-player): pad states are updated once per frame in runloopStart()
     int extra       = padStateHandheld.active_handheld ? 1 : 0;
     int controllers = extra;
     for (int i = 0; i < GAMEPADS_MAX - extra; i++)
     {
-        padUpdate(&this->padsState[i]);
         if (padsState[i].style_set == 0)
             break;
         controllers++;
@@ -212,7 +211,6 @@ short SwitchInputManager::getControllersConnectedCount()
 
 void SwitchInputManager::updateControllerState(ControllerState* state, int controller)
 {
-    padUpdate(&this->padStateHandheld);
     if (controller == 0 && padStateHandheld.active_handheld)
     {
         updateControllerStateInner(state, &padStateHandheld);
@@ -232,7 +230,6 @@ void SwitchInputManager::updateControllerState(ControllerState* state, int contr
 
 void SwitchInputManager::updateControllerStateInner(ControllerState* state, PadState* pad)
 {
-    padUpdate(pad);
     uint64_t keysDown = padGetButtons(pad);
 
     bool full = pad->style_set & HidNpadStyleSet_NpadFullCtrl;
@@ -365,10 +362,14 @@ void SwitchInputManager::updateMouseStates(RawMouseState* state)
 
 void SwitchInputManager::runloopStart()
 {
+    // LOCAL PATCH (NX-torrent-player): update pads once per frame instead of 3x,
+    // and skip 60Hz six-axis sensor polling (unused by the app; prevented idle FPS throttling).
+    padUpdate(&this->padStateHandheld);
+    for (int i = 0; i < GAMEPADS_MAX; i++)
+        padUpdate(&this->padsState[i]);
     upToDateMouseState();
     handleMouse();
     handleKeyboard();
-    handleControllerSensors();
 }
 
 void SwitchInputManager::upToDateMouseState()

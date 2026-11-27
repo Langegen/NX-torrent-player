@@ -177,6 +177,10 @@ class ShadeBox : public brls::Box
 // a worker and uploaded here. `alive` false (the view gone) drops it.
 void loadImageAsync(brls::Image* img, const std::string& path, std::shared_ptr<bool> alive);
 
+// Frees decoded RGBA buffers still waiting in the upload queue whose views
+// are already gone (called on tab switches).
+void prunePendingUploads();
+
 // Fills `img` once the artwork for `id` lands (thumbnail size, or full size
 // with `hq`). `alive` guards a fetch that lands after the view is gone.
 // `localPath`, when set, is used as is (history keeps posters on the SD card).
@@ -245,5 +249,9 @@ void setPillActive(brls::Button* b, bool active, bool onImage = false);
 // focus stack keeps a raw pointer to whichever one opened the screen above,
 // and hands the focus back to it when that screen closes.
 bool isOnTop(brls::View* v);
+
+// Parks focus onto `fallbackFocus` before clearing `container` if the current
+// focus lives inside `container`, preventing Borealis focus Use-After-Free.
+void safeClearViews(brls::Box* container, brls::View* fallbackFocus);
 
 } // namespace ui

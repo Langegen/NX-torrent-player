@@ -9,6 +9,8 @@
 #include "config.hpp"
 #include "i18n.hpp"
 #include "library.hpp"
+#include "online/online_manager.hpp"
+#include "online_view.hpp"
 #include "platform_ui.hpp"
 #include "player.hpp"  // fmtTime
 #include "sources.hpp"
@@ -52,6 +54,16 @@ std::string ratingText(double r)
     return b;
 }
 
+void openOnline(const content::Item& it, int season, int episode, int episodesInSeason = 0)
+{
+    if (!online::hasEnabledPlugins())
+    {
+        note(tr("No online plugins configured. Add a plugin in Options -> Online."));
+        return;
+    }
+    openOnlineScreen(it, season, episode, episodesInSeason);
+}
+
 // The sources screen for a film, a whole show (season 0) or one episode. It
 // gathers from Jackett and the Stremio addons both; with neither set up there
 // is nothing it could show, so say what would make it work instead.
@@ -65,6 +77,79 @@ void openSources(const content::Item& it, int season, int episode, int episodesI
         return;
     }
     openSourcesScreen(it, season, episode, episodesInSeason);
+}
+
+bool hasTorrentSource(const content::Item& it)
+{
+    return !config::get().jackettUrl.empty() ||
+           (!stremio::loadAuthKey().empty() && !it.imdbId.empty());
+}
+
+void openWithDefaultMode(const content::Item& it, int season, int episode,
+                         int episodesInSeason, bool preferRememberedOnline,
+                         bool usePlayEpisodeForTorrent)
+{
+    bool torrentsOn         = hasTorrentSource(it);
+    bool onlineOn           = online::hasEnabledPlugins();
+    const std::string& mode = config::get().defaultWatchMode;
+
+    int onlineSeason = (it.isSeries() && season <= 0) ? 1 : season;
+    int onlineEp     = (it.isSeries() && episode <= 0) ? 1 : episode;
+
+    auto launchOnline = [it, onlineSeason, onlineEp, episodesInSeason,
+                         preferRememberedOnline]() {
+        if (preferRememberedOnline && it.isSeries() && onlineEp > 0)
+        {
+            online::OnlineRef ref;
+            if (online::loadChoice(it.key(), ref))
+            {
+                online::resumeOnlineAsync(it, ref, onlineSeason, onlineEp, -1.0,
+                                          episodesInSeason);
+                return;
+            }
+        }
+        openOnline(it, onlineSeason, onlineEp, episodesInSeason);
+    };
+
+    auto launchTorrents = [it, season, episode, episodesInSeason,
+                           usePlayEpisodeForTorrent]() {
+        if (usePlayEpisodeForTorrent && it.isSeries() && episode > 0)
+            playEpisode(it, season, episode, episodesInSeason);
+        else
+            openSources(it, season, episode, episodesInSeason);
+    };
+
+    if (mode == "ask")
+    {
+        if (torrentsOn && onlineOn)
+        {
+            std::vector<std::string> labels = { tr("Online"), tr("Torrents") };
+            auto* dd = new brls::Dropdown(
+                tr("Choose source"), labels, [](int) {}, -1,
+                [launchOnline, launchTorrents](int sel) {
+                    if (sel == 0) launchOnline();
+                    else if (sel == 1) launchTorrents();
+                });
+            brls::Application::pushActivity(new brls::Activity(dd));
+            return;
+        }
+        if (onlineOn) { launchOnline(); return; }
+        if (torrentsOn) { launchTorrents(); return; }
+        openSources(it, season, episode, episodesInSeason);
+        return;
+    }
+
+    if (mode == "online" && onlineOn)
+    {
+        launchOnline();
+        return;
+    }
+    if (!torrentsOn && onlineOn)
+    {
+        launchOnline();
+        return;
+    }
+    launchTorrents();
 }
 
 // The card's state, shared by the callbacks that fill it in.
@@ -89,6 +174,7 @@ struct CardState
     brls::Label* cast          = nullptr;
     brls::Button* playBtn      = nullptr;
     brls::Button* torrentsBtn  = nullptr;
+    brls::Button* onlineBtn    = nullptr;
     brls::Button* markBtn      = nullptr;  // the bookmark status
     brls::Button* folderBtn    = nullptr;  // the bookmark folder/category
     brls::Box* seasonsSection  = nullptr;
@@ -232,12 +318,21 @@ class CardView : public brls::Box
         setBgHeight(shadeLeft);
         setBgHeight(shadeBottom);
 
+        if (backBtn && mobile)
+        {
+            float st, sr, sb, sl;
+            platform_ui::safeInsets(st, sr, sb, sl);
+            backBtn->setPositionTop(14.0f + st);
+            backBtn->setPositionLeft(16.0f + sl);
+        }
         if (body)
         {
             if (mobile)
             {
+                float st    = platform_ui::safeInsetTop();
                 float inset = platform_ui::sideInset();
-                body->setPadding(portrait ? 70.0f : 68.0f, inset, 32.0f, inset);
+                body->setPadding((portrait ? 70.0f : 68.0f) + st, inset,
+                                 32.0f + platform_ui::safeInsetBottom(), inset);
             }
             else if (portrait)
                 body->setPadding(24.0f, 24.0f, 32.0f, 24.0f);
@@ -275,6 +370,7 @@ class CardView : public brls::Box
 
                 moveTo(st->playBtn, pActRow1);
                 moveTo(st->torrentsBtn, pActRow2);
+                moveTo(st->onlineBtn, pActRow2);
                 moveTo(st->markBtn, pActRow2);
                 moveTo(st->folderBtn, pActRow2);
 
@@ -287,9 +383,10 @@ class CardView : public brls::Box
                     b->setJustifyContent(brls::JustifyContent::CENTER);
                 };
                 styleBtn(st->playBtn, 1.0f, 0.0f, 48.0f, 16.0f);
-                styleBtn(st->torrentsBtn, 1.0f, 10.0f, 44.0f, 8.0f);
-                styleBtn(st->markBtn, 1.0f, 10.0f, 44.0f, 8.0f);
-                styleBtn(st->folderBtn, 1.0f, 0.0f, 44.0f, 8.0f);
+                styleBtn(st->torrentsBtn, 1.0f, 8.0f, 44.0f, 6.0f);
+                styleBtn(st->onlineBtn, 1.0f, 8.0f, 44.0f, 6.0f);
+                styleBtn(st->markBtn, 1.0f, 8.0f, 44.0f, 6.0f);
+                styleBtn(st->folderBtn, 1.0f, 0.0f, 44.0f, 6.0f);
             }
             else
             {
@@ -304,6 +401,7 @@ class CardView : public brls::Box
 
                 moveTo(st->playBtn, actionsRow);
                 moveTo(st->torrentsBtn, actionsRow);
+                moveTo(st->onlineBtn, actionsRow);
                 moveTo(st->markBtn, actionsRow);
                 moveTo(st->folderBtn, actionsRow);
                 if (actionsRow && actionsRow->getParent() == infoBox)
@@ -322,6 +420,7 @@ class CardView : public brls::Box
                 };
                 styleLandBtn(st->playBtn);
                 styleLandBtn(st->torrentsBtn);
+                styleLandBtn(st->onlineBtn);
                 styleLandBtn(st->markBtn);
                 styleLandBtn(st->folderBtn);
             }
@@ -447,6 +546,19 @@ class CardView : public brls::Box
             openSources(s->d.item, season, 0);
         }, true);
         actions->addView(st->torrentsBtn);
+
+        st->onlineBtn = ui::actionButton(tr("Online"), false, [weak]() {
+            auto s = weak.lock();
+            if (!s) return;
+            int season = 0, epCount = 0;
+            if (s->d.item.isSeries() && s->seasonIdx < (int)s->d.seasons.size())
+            {
+                season  = s->d.seasons[s->seasonIdx].number;
+                epCount = s->d.seasons[s->seasonIdx].episodeCount;
+            }
+            openOnline(s->d.item, season, 0, epCount);
+        }, true);
+        actions->addView(st->onlineBtn);
 
         // Bookmark: a status from the library (Watching / Planned / ...).
         st->markBtn = ui::actionButton(markLabel(), false, [weak]() {
@@ -628,8 +740,8 @@ class CardView : public brls::Box
         if (library::find(st->d.item.key(), en) && !en.folders.empty())
         {
             if (en.folders.size() == 1)
-                return "\xF0\x9F\x93\x81 " + en.folders[0];
-            return "\xF0\x9F\x93\x81 " + en.folders[0] + " (+" + std::to_string(en.folders.size() - 1) + ")";
+                return en.folders[0];
+            return en.folders[0] + " (+" + std::to_string(en.folders.size() - 1) + ")";
         }
         return std::string("+  ") + tr("Folder");
     }
@@ -644,22 +756,26 @@ class CardView : public brls::Box
         for (const auto& f : custom)
         {
             bool inThis = hasEntry && en.inFolder(f);
-            labels.push_back((inThis ? "[\xE2\x9C\x93]  " : "[   ]  ") + f);
+            labels.push_back((inThis ? "[x]  " : "[ ]  ") + f);
         }
         labels.push_back(std::string("+  ") + tr("New folder..."));
         if (hasEntry && !en.folders.empty())
             labels.push_back(tr("Remove from all folders"));
 
         std::weak_ptr<CardState> weak = s;
-        auto* dd = new brls::Dropdown(tr("Folders"), labels, [weak, custom](int i) {
-            auto c = weak.lock();
-            if (!c || i < 0) return;
-            if (i < (int)custom.size())
-            {
-                library::toggleFolder(c->d.item, custom[i]);
-            }
-            else if (i == (int)custom.size())
-            {
+        auto* dd = new brls::Dropdown(
+            tr("Folders"), labels,
+            [weak, custom](int i) {
+                auto c = weak.lock();
+                if (!c || i < 0) return;
+                if (i < (int)custom.size())
+                    library::toggleFolder(c->d.item, custom[i]);
+                else if (i > (int)custom.size())
+                    library::setFolders(c->d.item, {});
+            },
+            -1,
+            [weak, custom](int i) {
+                if (i != (int)custom.size()) return;
                 brls::Application::getImeManager()->openForText(
                     [weak](std::string text) {
                         auto c2 = weak.lock();
@@ -672,18 +788,15 @@ class CardView : public brls::Box
                         brls::Application::notify(tr("Folder created"));
                     },
                     tr("New folder"), "", 64, "");
-            }
-            else
-            {
-                library::setFolders(c->d.item, {});
-            }
-        });
+            });
         brls::Application::pushActivity(new brls::Activity(dd));
     }
 
     // Library changes (a status picked, an episode watched): relabel. Polled:
     // the player writes the library from its own screen, on top of this one.
-    uint32_t seenGen = 0;
+    uint32_t seenGen      = 0;
+    bool episodesDirty    = false;
+    bool episodesQueued   = false;
 
     void draw(NVGcontext* vg, float x, float y, float w, float h, brls::Style style,
               brls::FrameContext* ctx) override
@@ -695,7 +808,22 @@ class CardView : public brls::Box
             if (st->playBtn) st->playBtn->setText(playLabel());
             if (st->markBtn) st->markBtn->setText(markLabel());
             if (st->folderBtn) st->folderBtn->setText(folderLabel());
-            refreshEpisodes();
+            episodesDirty = true;
+        }
+        if (episodesDirty && !episodesQueued && ui::isOnTop(this))
+        {
+            episodesQueued = true;
+            auto weak = std::weak_ptr<CardState>(st);
+            brls::sync([this, weak]() {
+                auto s = weak.lock();
+                if (!s || !*s->alive) return;
+                episodesQueued = false;
+                if (episodesDirty && ui::isOnTop(this))
+                {
+                    episodesDirty = false;
+                    refreshEpisodes();
+                }
+            });
         }
         brls::Box::draw(vg, x, y, w, h, style, ctx);
     }
@@ -1075,28 +1203,33 @@ class CardView : public brls::Box
             auto onClick = [weak, season, number, count]() {
                 auto c = weak.lock();
                 if (!c) return;
-                bool jackettOn = !config::get().jackettUrl.empty();
-                bool stremioOn = !stremio::loadAuthKey().empty() && !c->d.item.imdbId.empty();
                 library::Entry en;
-                bool played = library::find(c->d.item.key(), en) &&
-                              ((en.episode(season, number) &&
-                                !en.episode(season, number)->source.empty()) ||
-                               (en.packSeason > 0 && season >= en.packSeason &&
-                                season <= en.packSeasonTo));
-                if (!played && !jackettOn && !stremioOn)
+                bool hasEpSource = library::find(c->d.item.key(), en) &&
+                                   en.episode(season, number) &&
+                                   !en.episode(season, number)->source.empty();
+                if (hasEpSource)
                 {
-                    openSources(c->d.item, season, number, count);  // says what to set up
+                    playEpisode(c->d.item, season, number, count);
                     return;
                 }
-                playEpisode(c->d.item, season, number, count);
+                bool packCovers = library::find(c->d.item.key(), en) &&
+                                  (en.packSeason > 0 && season >= en.packSeason &&
+                                   season <= en.packSeasonTo);
+                if (packCovers && config::get().defaultWatchMode == "torrents")
+                {
+                    playEpisode(c->d.item, season, number, count);
+                    return;
+                }
+                openWithDefaultMode(c->d.item, season, number, count, true, true);
             };
             auto* card = ui::wideCard(title, id, e.stillUrl, "", prog, st->alive, onClick,
                                       236.0f);
-            // X: pick another release for it.
+            // X: pick another release (or choose source when Ask/Online mode is active).
             card->registerAction(tr("Releases"), brls::BUTTON_X,
                                  [weak, season, number, count](brls::View*) {
                                      if (auto c = weak.lock())
-                                         openSources(c->d.item, season, number, count);
+                                         openWithDefaultMode(c->d.item, season, number, count,
+                                                             false, false);
                                      return true;
                                  });
             st->episodes->addView(card);
@@ -1145,17 +1278,16 @@ class CardView : public brls::Box
         }
         if (!s.d.item.isSeries())
         {
-            openSources(s.d.item, 0, 0);
+            openWithDefaultMode(s.d.item, 0, 0, 0, false, false);
             return;
         }
         if (s.d.seasons.empty())
         {
-            // No season list (TMDB has none, or did not answer): every release
-            // of the show, the season packs among them.
-            openSources(s.d.item, 0, 0);
+            openWithDefaultMode(s.d.item, 0, 0, 0, false, false);
             return;
         }
-        openSources(s.d.item, s.d.seasons[0].number, 1, s.d.seasons[0].episodeCount);
+        openWithDefaultMode(s.d.item, s.d.seasons[0].number, 1, s.d.seasons[0].episodeCount,
+                            false, false);
     }
 };
 
@@ -1208,20 +1340,18 @@ void watchContent(const content::Item& item)
     }
     if (!item.imdbId.empty())
     {
-        openSources(item, 0, 0);
+        openWithDefaultMode(item, 0, 0, 0, false, false);
         return;
     }
-    // Only the Stremio addons need the IMDb id: Jackett searches by title, so
-    // without an account there is nothing to wait for.
-    if (stremio::loadAuthKey().empty())
+    if (stremio::loadAuthKey().empty() && !online::hasEnabledPlugins())
     {
-        openSources(item, 0, 0);
+        openWithDefaultMode(item, 0, 0, 0, false, false);
         return;
     }
     // A list item has no IMDb id yet: the details (usually cached) carry it.
     tmdb::fetchDetailsAsync(item.kind, item.tmdbId, [item](tmdb::DetailsResult r) {
         content::Item it = item;
         if (r.ok) it.imdbId = r.details.item.imdbId;
-        openSources(it, 0, 0);
+        openWithDefaultMode(it, 0, 0, 0, false, false);
     });
 }

@@ -372,8 +372,10 @@ class JackettView
         int sel = 0;
         for (size_t i = 0; i < values.size(); i++)
             if (values[i] == cur) sel = (int)i;
+        auto live = alive;
         auto* dd = new brls::Dropdown(tr(f == Facet::Voice ? "Voice-over" : "Tracker"),
-                                      labels, [this, f, values](int i) {
+                                      labels, [this, live, f, values](int i) {
+            if (!*live) return;
             if (i < 0 || i >= (int)values.size()) return;
             if (f == Facet::Voice) filterVoice = values[i];
             else filterTracker = values[i];

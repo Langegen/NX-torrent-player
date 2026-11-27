@@ -64,6 +64,18 @@ $cc -O1 -g -Wall \
     -o "$out/test_httpsrc" \
     -lpthread -lcurl
 
+extra_sock=""
+case "$($cc -dumpmachine 2>/dev/null || true)" in
+    *mingw*) extra_sock="-lws2_32" ;;
+esac
+
+$cc -O1 -g -Wall \
+    -Iengine \
+    engine/hls_proxy.c \
+    pctest/test_hls_proxy.c \
+    -o "$out/test_hls_proxy" \
+    -lpthread -lcurl $extra_sock
+
 ${CXX:-g++} -O1 -g -Wall -std=c++17 \
     -DTORRSERVER_NO_UI -Iapp \
     app/torrserver.cpp \
@@ -110,6 +122,14 @@ ${CXX:-g++} -O1 -g -Wall -std=c++17 \
     pctest/test_sync.cpp \
     -o "$out/test_sync"
 
+${CXX:-g++} -O1 -g -Wall -std=c++17 \
+    -DONLINE_NO_UI -Iapp \
+    app/online/lampac_provider.cpp \
+    app/online/nx_plugin_provider.cpp \
+    app/json.cpp \
+    pctest/test_online.cpp \
+    -o "$out/test_online"
+
 "$out/test_suite"
 echo
 # Streaming: head/tail = mpv's probe (container header, then the index at the
@@ -133,6 +153,8 @@ echo
 echo
 "$out/test_httpsrc"
 echo
+"$out/test_hls_proxy"
+echo
 "$out/test_net"
 echo
 "$out/test_tmdb"
@@ -144,3 +166,5 @@ echo
 "$out/test_jackett"
 echo
 "$out/test_sync"
+echo
+"$out/test_online"

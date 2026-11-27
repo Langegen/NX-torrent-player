@@ -83,11 +83,13 @@ set(ENGINE_SRC
     ${ENGINE_DIR}/engine_services.c
     ${ENGINE_DIR}/udpdiag.c ${ENGINE_DIR}/stream.c ${ENGINE_DIR}/httpsrc.c
     ${ENGINE_DIR}/hls_proxy.c
+    ${ENGINE_DIR}/utp.cpp ${ENGINE_DIR}/utp_utils.cpp ${ENGINE_DIR}/utp_nb.cpp
     ${ROOT_DIR}/pctest/compat/sha1.c
     ${ROOT_DIR}/pctest/nbstub.c
     ${ROOT_DIR}/pctest/utpstub.c)
 
 set_source_files_properties(${ENGINE_SRC} PROPERTIES COMPILE_DEFINITIONS "POSIX")
+set_source_files_properties(${ROOT_DIR}/pctest/nbstub.c PROPERTIES COMPILE_DEFINITIONS "POSIX;ENGINE_HAS_UTP_NB")
 
 list(APPEND MAIN_SRC ${ENGINE_SRC})
 

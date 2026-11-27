@@ -94,6 +94,20 @@
 #define MIN_ACTIVE_UNCHOKED  16     // keep dialing up to MAX_SESS if unchoked peers are below this
 #define REQ_INITIAL          32     // Initial probe window on Switch: 32 blocks (512 KB)
 #define MAX_REQ_PER_CONN     256    // Up to 4.0 MB in flight per fast session on Switch (matching pipensx MAX_PIPELINE)
+#elif defined(__ANDROID__)
+#if defined(__SIZEOF_POINTER__) && __SIZEOF_POINTER__ == 4
+#define MAX_SESS             48
+#define MAX_CONNECTING       24
+#define DIAL_STOP_LIVE       32
+#define MIN_ACTIVE_UNCHOKED  16
+#else
+#define MAX_SESS             64
+#define MAX_CONNECTING       28
+#define DIAL_STOP_LIVE       44
+#define MIN_ACTIVE_UNCHOKED  24
+#endif
+#define REQ_INITIAL          32     // Initial probe window on Android: 32 blocks (512 KB)
+#define MAX_REQ_PER_CONN     256    // Up to 4.0 MB in flight per fast session
 #else
 #define MAX_SESS             80
 #define MAX_CONNECTING       32
@@ -155,7 +169,15 @@
 // RAM for in-flight piece buffers; bounds how many pieces are open at once.
 // 64 MB (TorrentShopNX: 256): mpv's demuxer cache and the RAM window share
 // the heap with it.
+#if defined(__ANDROID__)
+#if defined(__SIZEOF_POINTER__) && __SIZEOF_POINTER__ == 4
+#define RAM_BUDGET       (32LL << 20)
+#else
+#define RAM_BUDGET       (48LL << 20)
+#endif
+#else
 #define RAM_BUDGET       (64LL << 20)
+#endif
 #define AQ_MAX           48
 #define AQ_MIN           4
 // Writer queue capacity. Every queued job owns a whole piece buffer, and an
@@ -182,7 +204,15 @@
 #define TFS_ZONE_BACK    6
 #define BACK_MIN_BACKLOG_MS 12000
 // The back window's ceiling: in RAM mode it is held on top of the RAM window.
+#if defined(__ANDROID__)
+#if defined(__SIZEOF_POINTER__) && __SIZEOF_POINTER__ == 4
+#define BACK_WINDOW_MAX  (48LL << 20)
+#else
+#define BACK_WINDOW_MAX  (96LL << 20)
+#endif
+#else
 #define BACK_WINDOW_MAX  (192LL << 20)
+#endif
 
 // Startup criticals: mpv probes the container head and tail (MP4 moov, MKV
 // cues) first, so both ends are fetched up front. Budgeted in BYTES: one big
@@ -208,7 +238,15 @@
 // are dropped; a read that lands on a dropped piece re-downloads it (the read
 // moves the playhead there, so the streaming window covers it). Sized to leave
 // the forward window plenty of seek-back slack; needs a full-RAM launch.
+#if defined(__ANDROID__)
+#if defined(__SIZEOF_POINTER__) && __SIZEOF_POINTER__ == 4
+#define RAM_STREAM_BUDGET (96LL << 20)
+#else
+#define RAM_STREAM_BUDGET (160LL << 20)
+#endif
+#else
 #define RAM_STREAM_BUDGET (256LL << 20)
+#endif
 
 #define TFS_MAX_PEERS    2048
 // ip:port -> pool slot index (open addressing, linear probing). Finding an
@@ -504,6 +542,8 @@ struct torrentfs {
     int64_t pieces_ever;       // distinct pieces ever completed: monotonic, for UI
     uint8_t *ever;             // one bit per piece, already counted in pieces_ever
     int64_t playhead_piece;    // lock-free (aligned 64-bit store, see below)
+    uint32_t playhead_jump_gen; // bumped on seek (>2 pieces) to flush stale reqs
+    uint32_t last_jump_gen;    // netloop-private last observed jump gen
     int64_t read_blocked_piece;// piece the reader thread is waiting on, -1 = none
     volatile int read_blocked_block; // ...and the block within it
     volatile bool stop;
@@ -3302,7 +3342,11 @@ static void sess_service(torrentfs *t, sess *s, int sid, u64 now) {
 // per packet on the OS core). Under 10 s of backlog nothing is limited.
 static int calm_budget(torrentfs *t) {
     int ms = t->backlog_ms;   // racy read, written by the app thread
+#ifdef __SWITCH__
     int budget = ms >= 30000 ? 1 : ms >= 20000 ? 3 : ms >= 10000 ? 8 : MAX_SESS;
+#else
+    int budget = ms >= 30000 ? 6 : ms >= 20000 ? 12 : MAX_SESS;
+#endif
     if (g_governor && ms >= 10000) {
         // Rate above the backlog-tied target: pause new requests entirely.
         double target = ms >= 25000
@@ -3874,6 +3918,59 @@ static void netloop_main(void *arg) {
                 condvarWakeAll(&t->piece_cv);  // select_file waits on it
                 last_upkeep = 0; // force immediate request_scan for the newly selected file
             }
+        }
+        uint32_t jgen = __atomic_load_n(&t->playhead_jump_gen, __ATOMIC_ACQUIRE);
+        if (jgen != t->last_jump_gen) {
+            t->last_jump_gen = jgen;
+            int64_t rb = t->read_blocked_piece;
+            for (int i = 0; i < MAX_SESS; i++) {
+                sess *s = &t->S[i];
+                if (!s->active || !s->nb.handshaked || s->connecting) continue;
+                int kept = 0;
+                for (int k = 0; k < s->req_n; k++) {
+                    int ep = s->req_piece[k];
+                    int eb = s->req_block[k];
+                    bool drop = (ep >= 0 && ep < t->meta.piece_count &&
+                                 !is_critical(t, ep) &&
+                                 piece_priority_rb(t, ep, rb) == 0);
+                    if (drop) {
+                        aq_entry *ea = aq_find(t, ep);
+                        if (ea && eb >= 0 && eb < ea->nblocks) {
+                            aq_req_dec(ea, eb);
+                            rb_clr(ea, eb, i);
+                        }
+                        send_cancel_one(t, s, ep, eb);
+                    } else {
+                        if (kept != k) {
+                            s->req_piece[kept] = ep;
+                            s->req_block[kept] = eb;
+                            s->req_time[kept]  = s->req_time[k];
+                        }
+                        kept++;
+                    }
+                }
+                s->req_n = kept;
+            }
+            mutexLock(&t->lock);
+            for (int i = 0; i < t->n_aq; i++) {
+                aq_entry *c = &t->aq[i];
+                if (c->idx < 0 || is_critical(t, c->idx)) continue;
+                if (piece_priority_rb(t, c->idx, rb) != 0) continue;
+                if (c->buf) {
+                    if (t->aq_buf_pool_cnt < AQ_MAX)
+                        t->aq_buf_pool[t->aq_buf_pool_cnt++] = c->buf;
+                    else
+                        free(c->buf);
+                    c->buf = NULL;
+                }
+                if (t->aq_of_piece && t->aq_of_piece[c->idx] == (int16_t)i)
+                    t->aq_of_piece[c->idx] = -1;
+                c->idx = -1;
+                if (t->n_active_aq > 0) t->n_active_aq--;
+            }
+            mutexUnlock(&t->lock);
+            t->cand_valid = false;
+            last_upkeep = 0;
         }
         u64 now = armGetSystemTick();
 
@@ -4931,12 +5028,17 @@ int64_t torrentfs_size(const torrentfs *tfs) {
 
 void torrentfs_set_playhead(torrentfs *tfs, int64_t offset) {
     if (!tfs) return;
-    int64_t abs = tfs->stream_offset + offset;
-    ((torrentfs *)tfs)->playhead_piece = abs / tfs->meta.piece_len;
-    if (tfs->ram_mode) {
-        mutexLock(&((torrentfs *)tfs)->cache_lock);
-        ram_evict((torrentfs *)tfs);
-        mutexUnlock(&((torrentfs *)tfs)->cache_lock);
+    torrentfs *t = (torrentfs *)tfs;
+    int64_t abs = t->stream_offset + offset;
+    int64_t np  = abs / t->meta.piece_len;
+    int64_t old = __atomic_load_n(&t->playhead_piece, __ATOMIC_RELAXED);
+    __atomic_store_n(&t->playhead_piece, np, __ATOMIC_RELEASE);
+    if (llabs(np - old) > 2)
+        __atomic_fetch_add(&t->playhead_jump_gen, 1, __ATOMIC_RELEASE);
+    if (t->ram_mode) {
+        mutexLock(&t->cache_lock);
+        ram_evict(t);
+        mutexUnlock(&t->cache_lock);
     }
 }
 
