@@ -119,7 +119,7 @@ program_target(${PROJECT_NAME} "${MAIN_SRC}")
 set_target_properties(${PROJECT_NAME} PROPERTIES CXX_STANDARD 17)
 
 target_compile_definitions(${PROJECT_NAME} PRIVATE
-    APP_VERSION="1.3"
+    APP_VERSION="1.4"
     UPDATE_API_URL="${UPDATE_API_URL}"
     UPDATE_TAG_URL="${UPDATE_TAG_URL}"
     TMDB_API_KEY="${TMDB_API_KEY}"
