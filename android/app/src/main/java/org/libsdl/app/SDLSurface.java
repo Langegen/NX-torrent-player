@@ -278,15 +278,10 @@ public class SDLSurface extends SurfaceView implements SurfaceHolder.Callback,
                 case MotionEvent.ACTION_CANCEL:
                     for (i = 0; i < pointerCount; i++) {
                         pointerFingerId = event.getPointerId(i);
-                        x = event.getX(i) / mWidth;
-                        y = event.getY(i) / mHeight;
-                        p = event.getPressure(i);
-                        if (p > 1.0f) {
-                            // may be larger than 1.0f on some devices
-                            // see the documentation of getPressure(i)
-                            p = 1.0f;
-                        }
-                        SDLActivity.onNativeTouch(touchDevId, pointerFingerId, MotionEvent.ACTION_UP, x, y, p);
+                        // Send out-of-bounds coordinates so releasing a gesture cancelled by
+                        // Android navigation (e.g. edge Back swipe) clears SDL's finger state
+                        // without triggering a synthetic tap inside Views.
+                        SDLActivity.onNativeTouch(touchDevId, pointerFingerId, MotionEvent.ACTION_UP, -1.0f, -1.0f, 0.0f);
                     }
                     break;
 
@@ -354,9 +349,11 @@ public class SDLSurface extends SurfaceView implements SurfaceHolder.Callback,
                 SDLActivity.onNativeOrientationChanged(newOrientation);
             }
 
-            SDLActivity.onNativeAccel(-x / SensorManager.GRAVITY_EARTH,
-                                      y / SensorManager.GRAVITY_EARTH,
-                                      event.values[2] / SensorManager.GRAVITY_EARTH);
+            if (SDLActivity.nativeGetHintBoolean("SDL_ACCELEROMETER_AS_JOYSTICK", true)) {
+                SDLActivity.onNativeAccel(-x / SensorManager.GRAVITY_EARTH,
+                                          y / SensorManager.GRAVITY_EARTH,
+                                          event.values[2] / SensorManager.GRAVITY_EARTH);
+            }
 
 
         }

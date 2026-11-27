@@ -222,14 +222,21 @@ bool SDLPlatform::processEvent(SDL_Event* event)
             manager->updateControllerSensorsUpdate(event->csensor);
     }
 #if defined(IOS) || defined(ANDROID)
-    else if (event->type == SDL_APP_WILLENTERBACKGROUND)
+    else if (event->type == SDL_APP_WILLENTERBACKGROUND || event->type == SDL_APP_DIDENTERBACKGROUND)
     {
-        brls::Application::getWindowFocusChangedEvent()->fire(false);
+        // LOCAL PATCH (NX-torrent-player): Stop rendering immediately once backgrounded
+        // so we never issue GL/NVG/mpv calls onto a torn-down EGL surface.
+        bool wasBg = brls::Application::isInBackground();
+        brls::Application::setInBackground(true);
+        if (!wasBg)
+            brls::Application::getWindowFocusChangedEvent()->fire(false);
     }
-    else if (event->type == SDL_APP_WILLENTERFOREGROUND)
+    else if (event->type == SDL_APP_WILLENTERFOREGROUND || event->type == SDL_APP_DIDENTERFOREGROUND)
     {
-        brls::Application::getWindowFocusChangedEvent()->fire(true);
-
+        bool wasBg = brls::Application::isInBackground();
+        brls::Application::setInBackground(false);
+        if (wasBg)
+            brls::Application::getWindowFocusChangedEvent()->fire(true);
     }
 #endif
     else if (event->type != SDL_POLLSENTINEL)
@@ -254,6 +261,14 @@ bool SDLPlatform::mainLoopIteration()
             return false;
         }
         hasEvent = true;
+    }
+    if (Application::isInBackground())
+    {
+        if (SDL_WaitEventTimeout(&event, 50) && !processEvent(&event))
+        {
+            return false;
+        }
+        return true;
     }
     if (!hasEvent && !Application::hasActiveEvent())
     {

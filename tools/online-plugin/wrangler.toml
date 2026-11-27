@@ -1,0 +1,7 @@
+name = "nx-online-plugin"
+main = "worker.js"
+compatibility_date = "2025-01-01"
+
+[vars]
+# Optional: require ?token=... or Authorization: Bearer ...
+PLUGIN_TOKEN = ""

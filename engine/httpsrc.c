@@ -8,17 +8,30 @@
 
 #include <curl/curl.h>
 
-// 4 MiB per request: at 10 MB/s that is 0.4 s of transfer for one round-trip
-// of setup, and a seek costs at most this much wasted download.
+// 512 KiB initial probe / post-seek chunk ramps smoothly to 4 MiB for
+// sustained sequential playback, cutting first-frame latency without extra
+// round-trips on large streams.
+#define PROBE_CHUNK (512 * 1024)
 #define CHUNK (4 * 1024 * 1024)
 #define RETRIES 3
 
 static char g_ca[512];
 static char g_proxy[512];
+static char g_headers[16][512];
+static int g_header_count = 0;
 static volatile int64_t g_bytes_total;
 
 void httpsrc_set_ca(const char *p) { snprintf(g_ca, sizeof(g_ca), "%s", p ? p : ""); }
 void httpsrc_set_proxy(const char *p) { snprintf(g_proxy, sizeof(g_proxy), "%s", p ? p : ""); }
+void httpsrc_set_headers(const char *const *headers, int count) {
+    g_header_count = 0;
+    if (!headers || count <= 0) return;
+    for (int i = 0; i < count && g_header_count < 16; i++) {
+        if (!headers[i] || !headers[i][0]) continue;
+        snprintf(g_headers[g_header_count], sizeof(g_headers[0]), "%s", headers[i]);
+        g_header_count++;
+    }
+}
 int64_t httpsrc_bytes_total(void) { return __atomic_load_n(&g_bytes_total, __ATOMIC_RELAXED); }
 
 struct httpsrc {
@@ -32,6 +45,8 @@ struct httpsrc {
     uint8_t *buf;        // the buffered chunk
     int64_t buf_pos;     // its offset in the resource
     int64_t buf_len;
+    int64_t expected_pos;// end of previous buffered read (detects sequential reads)
+    int seq_reads;       // adaptive ramp 0..3 -> 512 KiB .. 4 MiB
 
     // State of the transfer in progress.
     int64_t want;        // bytes asked for
@@ -84,7 +99,15 @@ static int progress_cb(void *ud, curl_off_t dt, curl_off_t dn, curl_off_t ut,
 static void setup(httpsrc *s) {
     CURL *c = s->curl;
     curl_easy_reset(c);
-    curl_easy_setopt(c, CURLOPT_USERAGENT, "NX-torrent-player");
+    bool has_ua = false;
+    for (int i = 0; i < g_header_count; i++) {
+        if (strncasecmp(g_headers[i], "user-agent:", 11) == 0) {
+            has_ua = true;
+            break;
+        }
+    }
+    if (!has_ua)
+        curl_easy_setopt(c, CURLOPT_USERAGENT, "NX-torrent-player");
     curl_easy_setopt(c, CURLOPT_FOLLOWLOCATION, 1L);
     curl_easy_setopt(c, CURLOPT_MAXREDIRS, 8L);
     curl_easy_setopt(c, CURLOPT_CONNECTTIMEOUT, 15L);
@@ -113,6 +136,11 @@ static long fetch(httpsrc *s, const char *url, int64_t pos, int64_t len) {
     char range[64];
     snprintf(range, sizeof(range), "%lld-%lld", (long long)pos,
              (long long)(pos + len - 1));
+    struct curl_slist *hdrs = NULL;
+    for (int i = 0; i < g_header_count; i++)
+        hdrs = curl_slist_append(hdrs, g_headers[i]);
+    if (hdrs)
+        curl_easy_setopt(s->curl, CURLOPT_HTTPHEADER, hdrs);
     curl_easy_setopt(s->curl, CURLOPT_URL, url);
     curl_easy_setopt(s->curl, CURLOPT_RANGE, range);
     s->want = len;
@@ -122,6 +150,10 @@ static long fetch(httpsrc *s, const char *url, int64_t pos, int64_t len) {
     char eb[CURL_ERROR_SIZE] = {0};
     curl_easy_setopt(s->curl, CURLOPT_ERRORBUFFER, eb);
     CURLcode rc = curl_easy_perform(s->curl);
+    if (hdrs) {
+        curl_easy_setopt(s->curl, CURLOPT_HTTPHEADER, NULL);
+        curl_slist_free_all(hdrs);
+    }
     long code = 0;
     curl_easy_getinfo(s->curl, CURLINFO_RESPONSE_CODE, &code);
 
@@ -162,9 +194,9 @@ httpsrc *httpsrc_open_abortable(const char *url, const volatile bool *abort,
         return NULL;
     }
 
-    // Probe with the first chunk itself: the size comes from Content-Range,
-    // and the data is the start of the file mpv is about to ask for anyway.
-    long code = fetch(s, s->url, 0, CHUNK);
+    // Probe with a smaller initial chunk: Content-Range gives the total size,
+    // and the bytes satisfy mpv's initial container probe at low latency.
+    long code = fetch(s, s->url, 0, PROBE_CHUNK);
     if (code < 0) {
         set_err(err, errlen, s->err);
         httpsrc_close(s);
@@ -180,6 +212,8 @@ httpsrc *httpsrc_open_abortable(const char *url, const volatile bool *abort,
     s->size = s->content_range_total;
     s->buf_pos = 0;
     s->buf_len = s->got;
+    s->expected_pos = s->got;
+    s->seq_reads = 0;
 
     // Later requests go straight to where the redirects ended (a debrid link
     // usually bounces to a CDN), saving a round-trip per chunk.
@@ -197,7 +231,14 @@ int64_t httpsrc_read(httpsrc *s, int64_t pos, void *out, int64_t n) {
     if (pos >= s->size) return 0;
 
     if (!(pos >= s->buf_pos && pos < s->buf_pos + s->buf_len)) {
-        int64_t len = s->size - pos < CHUNK ? s->size - pos : CHUNK;
+        if (pos == s->expected_pos) {
+            if (s->seq_reads < 3) s->seq_reads++;
+        } else {
+            s->seq_reads = 0;
+        }
+        int64_t want_chunk = (int64_t)PROBE_CHUNK << s->seq_reads;
+        if (want_chunk > CHUNK) want_chunk = CHUNK;
+        int64_t len = s->size - pos < want_chunk ? s->size - pos : want_chunk;
         long code = -1;
         for (int attempt = 0; attempt < RETRIES && !is_cancelled(s); attempt++) {
             // After a failure, go back through the original URL: a CDN link
@@ -216,6 +257,7 @@ int64_t httpsrc_read(httpsrc *s, int64_t pos, void *out, int64_t n) {
         }
         s->buf_pos = pos;
         s->buf_len = s->got;
+        s->expected_pos = pos + s->got;
     }
 
     int64_t off = pos - s->buf_pos;

@@ -251,8 +251,9 @@ void Dialog::rebuildButtons()
 
 void Dialog::buttonClick(DialogButton* button)
 {
-    dismiss([button] {
-        button->cb();
+    auto cb = button->cb;
+    dismiss([cb] {
+        if (cb) cb();
     });
 }
 

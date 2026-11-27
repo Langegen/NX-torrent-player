@@ -47,6 +47,12 @@ class PosterGrid : public brls::Box
     int page = 0, totalPages = 1;
     bool loading = false;
     brls::View* firstCard = nullptr;  // freed with the grid's rows (load() clears it)
+    std::vector<content::Item> collectedItems;
+    brls::VoidEvent::Subscription resizeSub;
+    bool resizeSubscribed = false;
+
+    void relayout();
+    int computeColumns() const;
 
     void next();
     bool exhausted() const

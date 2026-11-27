@@ -7,6 +7,12 @@
 #elif defined(__SDL2__)
 #include <SDL.h>
 #endif
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#endif
 
 #include <cctype>
 #include <cstdio>
@@ -18,6 +24,7 @@
 #include "appdata.hpp"
 #include "fsutil.hpp"
 #include "i18n.hpp"
+#include "json.hpp"
 #include "platform_ui.hpp"
 
 namespace config
@@ -184,6 +191,18 @@ const UiScale kUiScales[] = {
     { 1600, "80%" },
     { 1760, "73%" },
     { 1920, "67%" },
+    { 2132, "60%" },
+    { 2328, "55%" },
+};
+
+const UiScale kMobileUiScales[] = {
+    { 1112, "115%" },
+    { 1280, "100%" },
+    { 1424, "90%" },
+    { 1600, "80%" },
+    { 1828, "70%" },
+    { 2132, "60%" },
+    { 2560, "50%" },
 };
 
 // A stored width, rejected unless we actually offer it: these go straight into
@@ -193,6 +212,9 @@ int knownWidth(int w, int dflt)
 {
     for (const auto& s : kUiScales)
         if (s.width == w) return w;
+    for (const auto& s : kMobileUiScales)
+        if (s.width == w) return w;
+    if (w == 1504) return 1600;
     return dflt;
 }
 
@@ -230,7 +252,13 @@ std::string consoleLang()
 #else
     const char* l = std::getenv("LANG");
     if (l && std::strlen(l) >= 2) return std::string(l, 2);
-    return "ru";
+#ifdef _WIN32
+    LANGID lid = GetUserDefaultUILanguage();
+    int prim = PRIMARYLANGID(lid);
+    if (prim == LANG_RUSSIAN) return "ru";
+    if (prim == LANG_FRENCH) return "fr";
+#endif
+    return "en";
 #endif
 }
 
@@ -372,21 +400,31 @@ const std::vector<std::string>& langLabels()
 
 const std::vector<int>& uiWidths()
 {
-    static std::vector<int> v = [] {
-        std::vector<int> o;
-        for (const auto& s : kUiScales) o.push_back(s.width);
-        return o;
-    }();
+    static std::vector<int> v;
+    v.clear();
+    if (platform_ui::isMobile())
+    {
+        for (const auto& s : kMobileUiScales) v.push_back(s.width);
+    }
+    else
+    {
+        for (const auto& s : kUiScales) v.push_back(s.width);
+    }
     return v;
 }
 
 const std::vector<std::string>& uiWidthLabels()
 {
-    static std::vector<std::string> v = [] {
-        std::vector<std::string> o;
-        for (const auto& s : kUiScales) o.push_back(s.label);
-        return o;
-    }();
+    static std::vector<std::string> v;
+    v.clear();
+    if (platform_ui::isMobile())
+    {
+        for (const auto& s : kMobileUiScales) v.push_back(s.label);
+    }
+    else
+    {
+        for (const auto& s : kUiScales) v.push_back(s.label);
+    }
     return v;
 }
 
@@ -463,7 +501,7 @@ void load()
     cfg.language     = readStr(body, "language", cfg.language);
     cfg.accent       = readStr(body, "accent", cfg.accent);
     cfg.themeVariant = readStr(body, "themeVariant", cfg.themeVariant);
-    cfg.listStyle    = readStr(body, "listStyle", cfg.listStyle);
+    cfg.builtinKeyboard = readBool(body, "builtinKeyboard", cfg.builtinKeyboard);
     cfg.bufferMode   = readInt(body, "bufferMode", cfg.bufferMode);
     if (cfg.bufferMode < 0 || cfg.bufferMode > 2) cfg.bufferMode = 0;
     cfg.endAction    = readInt(body, "endAction", cfg.endAction);
@@ -489,6 +527,39 @@ void load()
     cfg.handheldUiWidth =
         knownWidth(readInt(body, "handheldUiWidth", cfg.handheldUiWidth),
                    cfg.handheldUiWidth);
+#if defined(__ANDROID__) || defined(ANDROID)
+    if (version < 3)
+    {
+        if (cfg.handheldUiWidth == kDefaultHandheldUiWidth)
+            cfg.handheldUiWidth = kDefaultAndroidUiWidth;
+        cfg.audioBoost = false;
+    }
+#endif
+
+    std::string dwm = readStr(body, "defaultWatchMode", cfg.defaultWatchMode);
+    if (dwm == "torrents" || dwm == "online" || dwm == "ask") cfg.defaultWatchMode = dwm;
+    int pq = readInt(body, "onlinePreferQuality", cfg.onlinePreferQuality);
+    if (pq == 0 || pq == 2160 || pq == 1080 || pq == 720 || pq == 480 || pq == 360)
+        cfg.onlinePreferQuality = pq;
+
+    cfg.onlinePlugins.clear();
+    for (const auto& obj : json::objects(body, "onlinePlugins"))
+    {
+        OnlinePluginConfig p;
+        p.id      = json::str(obj, "id");
+        p.name    = json::str(obj, "name");
+        p.kind    = json::str(obj, "kind");
+        if (p.kind != "lampac" && p.kind != "nx_plugin") p.kind = "lampac";
+        p.url     = json::str(obj, "url");
+        p.token   = json::str(obj, "token");
+        p.enabled = json::boolean(obj, "enabled", true);
+        if (!p.url.empty())
+        {
+            if (p.id.empty()) p.id = "plugin_" + std::to_string(cfg.onlinePlugins.size() + 1);
+            if (p.name.empty()) p.name = p.url;
+            cfg.onlinePlugins.push_back(std::move(p));
+        }
+    }
 
     brls::Logger::info(
         "[config] startupTab={} logging={} hide4k={} checkUpdates={}",
@@ -515,7 +586,7 @@ bool save()
     };
     auto b = [](bool v) { return std::string(v ? "true" : "false"); };
     auto n = [](int v) { return std::to_string(v); };
-    kv("configVersion", "2");
+    kv("configVersion", "3");
     kv("bufferMode", n(cfg.bufferMode));
     kv("endAction", n(cfg.endAction));
     kv("startupTab", jsonStr(sTabStr));
@@ -565,7 +636,22 @@ bool save()
     kv("language", jsonStr(cfg.language));
     kv("accent", jsonStr(cfg.accent));
     kv("themeVariant", jsonStr(cfg.themeVariant));
-    o += "  \"listStyle\": " + jsonStr(cfg.listStyle) + "\n}\n";
+    kv("builtinKeyboard", b(cfg.builtinKeyboard));
+    kv("defaultWatchMode", jsonStr(cfg.defaultWatchMode));
+    kv("onlinePreferQuality", n(cfg.onlinePreferQuality));
+    o += "  \"onlinePlugins\": [";
+    if (!cfg.onlinePlugins.empty()) o += "\n";
+    for (size_t i = 0; i < cfg.onlinePlugins.size(); i++)
+    {
+        const auto& p = cfg.onlinePlugins[i];
+        o += "    {\"id\": " + jsonStr(p.id) + ", \"name\": " + jsonStr(p.name) +
+             ", \"kind\": " + jsonStr(p.kind) + ", \"url\": " + jsonStr(p.url) +
+             ", \"token\": " + jsonStr(p.token) +
+             ", \"enabled\": " + (p.enabled ? "true" : "false") + "}";
+        if (i + 1 < cfg.onlinePlugins.size()) o += ",";
+        o += "\n";
+    }
+    o += cfg.onlinePlugins.empty() ? "]\n}\n" : "  ]\n}\n";
 
     // Atomic: rewritten in place, a power cut mid-save left an empty file --
     // the Jackett address and key, the TMDB key and every setting gone.

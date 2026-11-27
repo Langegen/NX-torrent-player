@@ -29,6 +29,7 @@
 #include <borealis/core/view.hpp>
 #include <borealis/core/notification_manager.hpp>
 #include <borealis/views/label.hpp>
+#include <atomic>
 #include <deque>
 #include <vector>
 
@@ -151,6 +152,10 @@ class Application
 
     static ImeManager* getImeManager();
 
+    // LOCAL PATCH (NX-torrent-player): allow runtime switching between the
+    // platform IME (e.g. Switch swkbd) and the app's built-in OSK.
+    static void setImeOverride(ImeManager* ime);
+
     /**
      * Loads a font from a given file and stores it in the font stash.
      * Returns true if the operation succeeded.
@@ -270,6 +275,11 @@ class Application
     static bool getAutomaticDeactivation();
     static bool hasActiveEvent();
     static void setActiveEvent(bool value);
+
+    // LOCAL PATCH (NX-torrent-player): Track background state on Android/iOS so
+    // Application::frame() never renders into a destroyed EGL surface.
+    static void setInBackground(bool bg) { inBackground.store(bg, std::memory_order_release); }
+    static bool isInBackground() { return inBackground.load(std::memory_order_acquire); }
     static void setDeactivatedTime(int millisecond);
     static void setDeactivatedFPS(int value);
     static int getDeactivatedFPS();
@@ -418,6 +428,8 @@ class Application
 
     inline static bool deactivatedBehavior = false;
     inline static bool activeEvent         = false;
+    inline static std::atomic<bool> inBackground { false };
+    inline static ImeManager* imeOverride = nullptr;
     inline static Time lastActiveTime      = 0;
     inline static int deactivatedFPS       = 5; // FPS 5
     inline static int deactivatedTime      = 5000000; // 5s

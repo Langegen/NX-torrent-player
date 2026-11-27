@@ -20,7 +20,7 @@ include(${BOREALIS_LIBRARY}/cmake/toolchain.cmake)
 
 project(NX-torrent-player)
 set(VERSION_MAJOR "1")
-set(VERSION_MINOR "3")
+set(VERSION_MINOR "4")
 set(VERSION_ALTER "")
 set(PROJECT_AUTHOR "shodowlo")
 # On-device app name shown in the Homebrew Menu.
@@ -46,8 +46,8 @@ set(TMDB_API_KEY "8cf43ad9c085135b9479ad5cf6bbcbda" CACHE STRING "Default TMDB A
 # Default TMDB proxy base URL (empty = built-in fallback)
 set(TMDB_PROXY_URL "" CACHE STRING "Default TMDB proxy URL")
 # Optional default Google Drive OAuth credentials (TVs and Limited Input devices)
-set(GDRIVE_CLIENT_ID "" CACHE STRING "Default Google Drive OAuth Client ID")
-set(GDRIVE_CLIENT_SECRET "" CACHE STRING "Default Google Drive OAuth Client Secret")
+set(GDRIVE_CLIENT_ID "368701728051-fphf1cnob488rv09q5gsjfsjul7ekuid.apps.googleusercontent.com" CACHE STRING "Default Google Drive OAuth Client ID")
+set(GDRIVE_CLIENT_SECRET "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" CACHE STRING "Default Google Drive OAuth Client Secret")
 set(PROJECT_ICON ${CMAKE_CURRENT_SOURCE_DIR}/assets/icon.jpg)
 set(PROJECT_RESOURCES ${CMAKE_CURRENT_SOURCE_DIR}/library/borealis/resources)
 
@@ -80,6 +80,7 @@ set(ENGINE_SRC
     ${ENGINE_DIR}/listen.c ${ENGINE_DIR}/upnp.c ${ENGINE_DIR}/engine_log.c
     ${ENGINE_DIR}/engine_services.c
     ${ENGINE_DIR}/udpdiag.c ${ENGINE_DIR}/stream.c ${ENGINE_DIR}/httpsrc.c
+    ${ENGINE_DIR}/hls_proxy.c
     ${ENGINE_DIR}/utp.cpp ${ENGINE_DIR}/utp_utils.cpp ${ENGINE_DIR}/utpbridge.cpp
     ${ENGINE_DIR}/utp_nb.cpp)
 # libutp needs -DPOSIX for its socket types (SOCKADDR_STORAGE etc) on Switch.
@@ -112,6 +113,7 @@ else ()
 endif ()
 
 target_compile_definitions(${PROJECT_NAME} PRIVATE
+    HLS_PROXY_ENABLE_AES=1
     APP_VERSION="${APP_VERSION}"
     UPDATE_API_URL="${UPDATE_API_URL}"
     UPDATE_TAG_URL="${UPDATE_TAG_URL}"

@@ -179,6 +179,24 @@ bool Application::internalMainLoop()
         return false;
     }
 
+#if defined(__SWITCH__) || defined(ANDROID) || defined(IOS)
+    if (inBackground.load(std::memory_order_acquire))
+    {
+        Threading::performSyncTasks();
+        std::deque<View*> undeletedViews;
+        for (auto view : Application::deletionPool)
+        {
+            if (!view->isPtrLocked())
+                delete view;
+            else
+                undeletedViews.push_back(view);
+        }
+        Application::deletionPool = undeletedViews;
+        std::this_thread::sleep_for(std::chrono::milliseconds(33));
+        return true;
+    }
+#endif
+
     // Mouse and touch
     if (Application::blockInputsTokens == 0)
     {
@@ -201,7 +219,8 @@ bool Application::internalMainLoop()
     Application::frame();
 
     // Run sync functions
-    Threading::performSyncTasks();
+    if (Threading::performSyncTasks())
+        Application::setActiveEvent(true);
 
     // Trigger RunLoop subscribers
     runLoopEvent.fire();
@@ -223,10 +242,19 @@ bool Application::internalMainLoop()
     }
     Application::deletionPool = undeletedViews;
 
-    if (Application::limitedFrameTime > 0)
+    Time targetFrameTime = Application::limitedFrameTime;
+#ifdef __SWITCH__
+    if (!Application::hasActiveEvent() && Application::deactivatedFPS > 0)
+    {
+        Time idleFrameTime = 1000000 / Application::deactivatedFPS;
+        if (idleFrameTime > targetFrameTime)
+            targetFrameTime = idleFrameTime;
+    }
+#endif
+    if (targetFrameTime > 0)
     {
         Time deltaTime = getCPUTimeUsec() - frameStartTime;
-        Time interval  = Application::limitedFrameTime - deltaTime;
+        Time interval  = targetFrameTime - deltaTime;
         if (interval > 0)
         {
             std::this_thread::sleep_for(std::chrono::microseconds(interval));
@@ -313,6 +341,8 @@ void Application::processInput()
 
     for (auto& i : touchState)
     {
+        if (i.phase != TouchPhase::NONE)
+            Application::setActiveEvent(true);
         if (i.phase == TouchPhase::NONE)
         {
             i.view = nullptr;
@@ -349,6 +379,7 @@ void Application::processInput()
 
     if (mouseState.offset.x != 0 || mouseState.offset.y != 0 || mouseState.scroll.x != 0 || mouseState.scroll.y != 0 || mouseState.leftButton != TouchPhase::NONE || mouseState.middleButton != TouchPhase::NONE || mouseState.rightButton != TouchPhase::NONE)
     {
+        Application::setActiveEvent(true);
         Application::setInputType(InputType::TOUCH);
         Application::setDrawCoursor(true);
     }
@@ -387,6 +418,7 @@ void Application::processInput()
     {
         if (controllerState.buttons[i])
         {
+            Application::setActiveEvent(true);
             repeating = controllerState.repeatingButtonStop[i] > 0 && cpuTime > controllerState.repeatingButtonStop[i];
 
             if (repeating)
@@ -399,6 +431,15 @@ void Application::processInput()
                 Application::onControllerButtonPressed((enum ControllerButton)i, repeating);
         } else {
             controllerState.repeatingButtonStop[i] = 0;
+        }
+    }
+
+    for (int i = 0; i < _AXES_MAX; i++)
+    {
+        if (controllerState.axes[i] > 0.15f || controllerState.axes[i] < -0.15f)
+        {
+            Application::setActiveEvent(true);
+            break;
         }
     }
 
@@ -432,6 +473,7 @@ void Application::processInput()
 
         if (watchedKey.pressed)
         {
+            Application::setActiveEvent(true);
             repeating = watchedKey.repeatingStop > 0 && cpuTime > watchedKey.repeatingStop;
 
             if (repeating)
@@ -630,7 +672,8 @@ bool Application::setInputType(InputType type)
     if (type == InputType::GAMEPAD)
     {
         Application::setDrawCoursor(false);
-        Application::currentFocus->onFocusGained();
+        if (Application::currentFocus)
+            Application::currentFocus->onFocusGained();
     }
 
     return true;
@@ -653,25 +696,22 @@ bool Application::getAutomaticDeactivation()
 
 bool Application::hasActiveEvent()
 {
-#ifdef __SWITCH__
-    // Switch does not support waiting for events
-    return true;
-#else
-    if (!Application::deactivatedBehavior || activeEvent || Application::frameStartTime - lastActiveTime < Application::deactivatedTime)
+    // LOCAL PATCH (NX-torrent-player): enable idle FPS throttling on Switch menus too.
+    if (!Application::deactivatedBehavior || activeEvent ||
+        (Application::lastActiveTime > 0 &&
+            Application::frameStartTime >= Application::lastActiveTime &&
+            Application::frameStartTime - lastActiveTime < Application::deactivatedTime))
         return true;
     return false;
-#endif
 }
 
 void Application::setActiveEvent(bool value)
 {
-#ifndef __SWITCH__
     Application::activeEvent = value;
     if (value)
     {
         lastActiveTime = getCPUTimeUsec();
     }
-#endif
 }
 
 void Application::setDeactivatedTime(int millisecond)
@@ -745,6 +785,9 @@ bool Application::handleAction(const ActionType type, const int button, const bo
 
 void Application::frame()
 {
+    if (inBackground.load(std::memory_order_acquire))
+        return;
+
     VideoContext* videoContext = Application::platform->getVideoContext();
 
     // Frame context
@@ -1056,7 +1099,12 @@ ThemeVariant Application::getThemeVariant()
 
 ImeManager* Application::getImeManager()
 {
-    return Application::platform->getImeManager();
+    return Application::imeOverride ? Application::imeOverride : Application::platform->getImeManager();
+}
+
+void Application::setImeOverride(ImeManager* ime)
+{
+    Application::imeOverride = ime;
 }
 
 std::string Application::getLocale()
@@ -1192,11 +1240,9 @@ void Application::setWindowSize(int width, int height)
 
 void Application::onWindowResized(int width, int height)
 {
-#if defined(__SWITCH__) || defined(__ANDROID__)
+#if defined(__SWITCH__)
     // LOCAL PATCH (NX-torrent-player): On Nintendo Switch docking is an instant
-    // hardware mode switch, and on Android rotation/resizing updates the surface
-    // immediately. Applying the new window size at once prevents a 100ms desync
-    // where the EGL surface differs from Application::windowWidth/Height.
+    // hardware mode switch on the main thread.
     Application::setWindowSize(width, height);
     Application::getWindowSizeChangedEvent()->fire();
 
@@ -1204,6 +1250,22 @@ void Application::onWindowResized(int width, int height)
         width, height, contentWidth, contentHeight, Application::windowScale);
     brls::Logger::info("scale factor: {}",
         Application::getPlatform()->getVideoContext()->getScaleFactor());
+#elif defined(__ANDROID__)
+    // LOCAL PATCH (NX-torrent-player): Android's SDL_WINDOWEVENT_RESIZED arrives on
+    // the Java UI thread. Marshal setWindowSize + windowSizeChangedEvent onto the
+    // main SDL thread via brls::sync to prevent Yoga/GL races with Application::frame().
+    brls::sync([width, height]()
+        {
+            if (width <= 0 || height <= 0)
+                return;
+            Application::setWindowSize(width, height);
+            Application::getWindowSizeChangedEvent()->fire();
+
+            Logger::info("Window size changed to {}x{}, content size: {}x{} windowScale: {}",
+                width, height, contentWidth, contentHeight, Application::windowScale);
+            brls::Logger::info("scale factor: {}",
+                Application::getPlatform()->getVideoContext()->getScaleFactor());
+        });
 #else
     // Trigger event when Window size is stable
     static size_t iter = 0;

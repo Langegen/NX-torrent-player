@@ -198,7 +198,7 @@ void Button::draw(NVGcontext* vg, float x, float y, float w, float h, brls::Styl
     // leave "Episodes" and "Audio" to guesswork the first time.
     if (focused && showCaption && !caption.empty())
     {
-        int font = brls::Application::getFont(brls::FONT_REGULAR);
+        int font = brls::Application::getDefaultFont();
         if (font != brls::FONT_INVALID)
         {
             nvgFontFaceId(vg, font);
@@ -232,7 +232,7 @@ float Chip::measureWidth(NVGcontext* vg) const
     if (text.empty()) return 60.0f;
     if (!vg) vg = brls::Application::getNVGContext();
     if (!vg) return 180.0f;
-    int font = brls::Application::getFont(brls::FONT_REGULAR);
+    int font = brls::Application::getDefaultFont();
     if (font == brls::FONT_INVALID) return 180.0f;
     nvgFontFaceId(vg, font);
     nvgFontSize(vg, 16.0f);
@@ -244,7 +244,7 @@ float Chip::measureWidth(NVGcontext* vg) const
 void Chip::draw(NVGcontext* vg, float x, float y, float w, float h, brls::Style style,
                 brls::FrameContext* ctx)
 {
-    int font = brls::Application::getFont(brls::FONT_REGULAR);
+    int font = brls::Application::getDefaultFont();
     if (font == brls::FONT_INVALID || text.empty()) return;
     nvgFontFaceId(vg, font);
     nvgFontSize(vg, 16.0f);
@@ -340,7 +340,7 @@ void Timeline::draw(NVGcontext* vg, float x, float y, float w, float h, brls::St
         double d      = cursor - playing;
         std::string j;
         if (d >= 1.0 || d <= -1.0) j = (d > 0 ? "+" : "-") + fmtTime(d > 0 ? d : -d);
-        int font = brls::Application::getFont(brls::FONT_REGULAR);
+        int font = brls::Application::getDefaultFont();
         if (font != brls::FONT_INVALID)
         {
             nvgFontFaceId(vg, font);
@@ -614,7 +614,7 @@ void SeekRipple::draw(NVGcontext* vg, float x, float y, float w, float h, brls::
     drawIcon(vg, icon, cx, cy - 22.0f, 76.0f,
              nvgRGBA(255, 255, 255, (unsigned char)(245.0f * alpha)));
 
-    int font = brls::Application::getFont(brls::FONT_REGULAR);
+    int font = brls::Application::getDefaultFont();
     if (font != brls::FONT_INVALID)
     {
         nvgFontFaceId(vg, font);
@@ -644,6 +644,129 @@ void SeekRipple::draw(NVGcontext* vg, float x, float y, float w, float h, brls::
             nvgFillColor(vg, nvgRGBA(255, 255, 255, (unsigned char)(235.0f * alpha)));
             nvgText(vg, cx, cy + 18.0f, targetText.c_str(), nullptr);
         }
+    }
+
+    nvgRestore(vg);
+}
+
+GestureHud::GestureHud()
+{
+    setFocusable(false);
+}
+
+void GestureHud::show(Kind k, float value01, const std::string& label, int holdMs)
+{
+    auto now = std::chrono::steady_clock::now();
+    if (!active) showAt = now;
+    active = true;
+    kind   = k;
+    value  = std::max(0.0f, std::min(1.0f, value01));
+    text   = label;
+    hideAt = now + std::chrono::milliseconds(holdMs);
+}
+
+void GestureHud::hide()
+{
+    active = false;
+    kind   = Kind::None;
+}
+
+void GestureHud::draw(NVGcontext* vg, float x, float y, float w, float h, brls::Style,
+                      brls::FrameContext*)
+{
+    if (!active || kind == Kind::None || w <= 0.0f || h <= 0.0f) return;
+
+    auto now = std::chrono::steady_clock::now();
+    if (now >= hideAt)
+    {
+        active = false;
+        kind   = Kind::None;
+        return;
+    }
+
+    auto msSince =
+        std::chrono::duration_cast<std::chrono::milliseconds>(now - showAt).count();
+    auto msLeft =
+        std::chrono::duration_cast<std::chrono::milliseconds>(hideAt - now).count();
+
+    float fadeIn  = std::min(1.0f, (float)(msSince + 25) / 80.0f);
+    float fadeOut = (msLeft < 220) ? std::max(0.0f, (float)msLeft / 220.0f) : 1.0f;
+    float alpha   = fadeIn * fadeOut;
+
+    const float pw = 252.0f;
+    const float ph = 78.0f;
+    const float px = x + (w - pw) * 0.5f;
+    const float py = y + std::max(72.0f, h * 0.16f);
+
+    nvgSave(vg);
+    nvgBeginPath(vg);
+    nvgRoundedRect(vg, px, py, pw, ph, 12.0f);
+    nvgFillColor(vg, nvgRGBA(0, 0, 0, (unsigned char)(175.0f * alpha)));
+    nvgFill(vg);
+
+    nvgBeginPath(vg);
+    nvgRoundedRect(vg, px, py, pw, ph, 12.0f);
+    nvgStrokeColor(vg, nvgRGBA(255, 255, 255, (unsigned char)(28.0f * alpha)));
+    nvgStrokeWidth(vg, 1.0f);
+    nvgStroke(vg);
+
+    NVGcolor fg = nvgRGBA(255, 255, 255, (unsigned char)(245.0f * alpha));
+    float iconCx = px + 34.0f;
+    float iconCy = py + 29.0f;
+
+    if (kind == Kind::Volume)
+    {
+        drawIcon(vg, Icon::Audio, iconCx, iconCy, 44.0f, fg);
+    }
+    else
+    {
+        // Sun glyph for brightness
+        nvgFillColor(vg, fg);
+        nvgStrokeColor(vg, fg);
+        nvgStrokeWidth(vg, 1.9f);
+        nvgLineCap(vg, NVG_ROUND);
+        nvgBeginPath(vg);
+        nvgCircle(vg, iconCx, iconCy, 5.2f);
+        nvgFill(vg);
+        for (int k = 0; k < 8; k++)
+        {
+            float a = (float)k * (NVG_PI / 4.0f);
+            float cs = std::cos(a);
+            float sn = std::sin(a);
+            nvgBeginPath(vg);
+            nvgMoveTo(vg, iconCx + cs * 8.2f, iconCy + sn * 8.2f);
+            nvgLineTo(vg, iconCx + cs * 11.4f, iconCy + sn * 11.4f);
+            nvgStroke(vg);
+        }
+    }
+
+    int font = brls::Application::getDefaultFont();
+    if (font != brls::FONT_INVALID)
+    {
+        nvgFontFaceId(vg, font);
+        nvgFontSize(vg, 18.0f);
+        nvgTextAlign(vg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
+        nvgFillColor(vg, fg);
+        nvgText(vg, px + 58.0f, iconCy, text.c_str(), nullptr);
+    }
+
+    const float barX = px + 22.0f;
+    const float barY = py + ph - 20.0f;
+    const float barW = pw - 44.0f;
+    const float barH = 6.0f;
+
+    nvgBeginPath(vg);
+    nvgRoundedRect(vg, barX, barY, barW, barH, 3.0f);
+    nvgFillColor(vg, nvgRGBA(255, 255, 255, (unsigned char)(55.0f * alpha)));
+    nvgFill(vg);
+
+    if (value > 0.005f)
+    {
+        float fillW = std::max(barH, barW * value);
+        nvgBeginPath(vg);
+        nvgRoundedRect(vg, barX, barY, fillW, barH, 3.0f);
+        nvgFillColor(vg, fg);
+        nvgFill(vg);
     }
 
     nvgRestore(vg);

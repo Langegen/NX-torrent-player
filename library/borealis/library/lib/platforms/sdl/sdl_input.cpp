@@ -19,6 +19,9 @@
 #include <borealis/core/logger.hpp>
 #include <borealis/platforms/sdl/sdl_input.hpp>
 
+#include <algorithm>
+#include <mutex>
+
 namespace brls
 {
 
@@ -329,9 +332,13 @@ static const size_t SDL_AXIS_MAPPING[SDL_GAMEPAD_AXIS_MAX] = {
 
 std::vector<std::pair<SDL_JoystickID, SDL_GameController*>> controllers;
 
+// LOCAL PATCH (NX-torrent-player): sdlEventWatcher fires on the event-pushing
+// thread (Java UI thread on Android), while getters run on the render thread.
+static std::mutex s_inputMutex;
+
 static int mouseButtons[3] = { 0 };
 
-static inline int getMouseButtonState(int buttonIndex)
+static inline int getMouseButtonStateLocked(int buttonIndex)
 {
     if (mouseButtons[buttonIndex - 1] == SDL_STICKY)
     {
@@ -344,7 +351,7 @@ static inline int getMouseButtonState(int buttonIndex)
     }
 }
 
-static inline int getKeyboardKeys(SDL_Scancode code)
+static inline int getKeyboardKeysLocked(SDL_Scancode code)
 {
     if (keyboardKeys.find(code) == keyboardKeys.end())
         return SDL_RELEASED;
@@ -365,34 +372,58 @@ static int sdlEventWatcher(void* data, SDL_Event* event)
 {
     if (event->type == SDL_CONTROLLERDEVICEADDED)
     {
-        SDL_GameController* controller = SDL_GameControllerOpen(event->cdevice.which);
-        if (controller)
+        if (SDL_IsGameController(event->cdevice.which))
         {
-            SDL_JoystickID jid = SDL_JoystickGetDeviceInstanceID(event->cdevice.which);
-            Logger::info("Controller connected: {}/{}", jid, SDL_GameControllerName(controller));
-            controllers.push_back({ jid, controller });
+            SDL_GameController* controller = SDL_GameControllerOpen(event->cdevice.which);
+            if (controller)
+            {
+                SDL_JoystickID jid = SDL_JoystickGetDeviceInstanceID(event->cdevice.which);
+                Logger::info("Controller connected: {}/{}", jid, SDL_GameControllerName(controller));
+                std::lock_guard<std::mutex> lock(s_inputMutex);
+                controllers.push_back({ jid, controller });
+            }
         }
     }
     else if (event->type == SDL_CONTROLLERDEVICEREMOVED)
     {
-        Logger::info("Controller disconnected: {}", event->cdevice.which);
-        SDL_JoystickID jid = SDL_JoystickGetDeviceInstanceID(event->cdevice.which);
-        controllers.erase(std::remove_if(controllers.begin(), controllers.end(), [jid](auto x) {
-            return x.first == jid;
-        }), controllers.end());
+        // LOCAL PATCH (NX-torrent-player): event->cdevice.which is already the
+        // SDL_JoystickID for REMOVED events, and the controller handle must be closed.
+        SDL_JoystickID jid = event->cdevice.which;
+        Logger::info("Controller disconnected: {}", jid);
+        SDL_GameController* toClose = nullptr;
+        {
+            std::lock_guard<std::mutex> lock(s_inputMutex);
+            auto it = std::find_if(controllers.begin(), controllers.end(), [jid](const auto& x) {
+                return x.first == jid;
+            });
+            if (it != controllers.end())
+            {
+                toClose = it->second;
+                controllers.erase(it);
+            }
+        }
+        if (toClose)
+            SDL_GameControllerClose(toClose);
     }
     else if (event->type == SDL_MOUSEBUTTONDOWN)
     {
-        if (event->button.button <= 3)
+        if (event->button.button >= 1 && event->button.button <= 3)
+        {
+            std::lock_guard<std::mutex> lock(s_inputMutex);
             mouseButtons[event->button.button - 1] = SDL_PRESSED;
+        }
     }
     else if (event->type == SDL_MOUSEBUTTONUP)
     {
-        if (event->button.button <= 3)
+        if (event->button.button >= 1 && event->button.button <= 3)
+        {
+            std::lock_guard<std::mutex> lock(s_inputMutex);
             mouseButtons[event->button.button - 1] = SDL_STICKY;
+        }
     }
     else if (event->type == SDL_KEYDOWN || event->type == SDL_KEYUP)
     {
+        std::lock_guard<std::mutex> lock(s_inputMutex);
         keyboardKeys[event->key.keysym.scancode] = event->type == SDL_KEYDOWN ? SDL_PRESSED : SDL_STICKY;
     }
     Application::setActiveEvent(true);
@@ -419,9 +450,15 @@ SDLInputManager::SDLInputManager(SDL_Window* window)
 
     for (int i = 0; i < controllersCount; i++)
     {
+        if (!SDL_IsGameController(i))
+            continue;
+        SDL_GameController* gc = SDL_GameControllerOpen(i);
+        if (!gc)
+            continue;
         SDL_JoystickID jid = SDL_JoystickGetDeviceInstanceID(i);
         Logger::info("sdl: joystick {}: \"{}\"", jid, SDL_JoystickNameForIndex(i));
-        controllers.push_back({ jid, SDL_GameControllerOpen(i) });
+        std::lock_guard<std::mutex> lock(s_inputMutex);
+        controllers.push_back({ jid, gc });
     }
 
     SDL_AddEventWatch(sdlEventWatcher, this->window);
@@ -439,81 +476,25 @@ SDLInputManager::SDLInputManager(SDL_Window* window)
 
 SDLInputManager::~SDLInputManager()
 {
-    for (auto i : controllers)
+    SDL_DelEventWatch(sdlEventWatcher, this->window);
+    std::lock_guard<std::mutex> lock(s_inputMutex);
+    for (auto& i : controllers)
     {
-        SDL_GameControllerClose(i.second);
+        if (i.second)
+            SDL_GameControllerClose(i.second);
     }
+    controllers.clear();
 }
 
 short SDLInputManager::getControllersConnectedCount()
 {
-    return controllers.size();
+    std::lock_guard<std::mutex> lock(s_inputMutex);
+    return (short)controllers.size();
 }
 
-void SDLInputManager::updateUnifiedControllerState(ControllerState* state)
+static void readGameControllerState(ControllerState* state, SDL_GameController* c)
 {
-    for (bool& button : state->buttons)
-        button = false;
-
-    for (float& axe : state->axes)
-        axe = 0;
-
-    for (auto& c : controllers)
-    {
-        ControllerState localState {};
-        updateControllerState(&localState, c.first);
-
-        for (size_t i = 0; i < _BUTTON_MAX; i++)
-            state->buttons[i] |= localState.buttons[i];
-
-        for (size_t i = 0; i < _AXES_MAX; i++)
-        {
-            state->axes[i] += localState.axes[i];
-
-            if (state->axes[i] < -1)
-                state->axes[i] = -1;
-            else if (state->axes[i] > 1)
-                state->axes[i] = 1;
-        }
-    }
-
-    // Add keyboard keys on top of gamepad buttons
-    if (Application::isSwapInputKeys())
-    {
-        state->buttons[BUTTON_B] |= getKeyboardKeys(SDL_SCANCODE_KP_ENTER);
-        state->buttons[BUTTON_B] |= getKeyboardKeys(SDL_SCANCODE_RETURN);
-        state->buttons[BUTTON_B] |= getKeyboardKeys(SDL_SCANCODE_SELECT);
-        state->buttons[BUTTON_A] |= getKeyboardKeys(SDL_SCANCODE_ESCAPE);
-        state->buttons[BUTTON_A] |= getKeyboardKeys(SDL_SCANCODE_AC_BACK);
-    }
-    else
-    {
-        state->buttons[BUTTON_A] |= getKeyboardKeys(SDL_SCANCODE_KP_ENTER);
-        state->buttons[BUTTON_A] |= getKeyboardKeys(SDL_SCANCODE_RETURN);
-        state->buttons[BUTTON_A] |= getKeyboardKeys(SDL_SCANCODE_SELECT);
-        state->buttons[BUTTON_B] |= getKeyboardKeys(SDL_SCANCODE_ESCAPE);
-        state->buttons[BUTTON_B] |= getKeyboardKeys(SDL_SCANCODE_AC_BACK);
-    }
-
-    // Android tv remote control
-    state->buttons[BUTTON_X] |= getKeyboardKeys(SDL_SCANCODE_MENU);
-
-    state->buttons[BUTTON_UP] |= getKeyboardKeys(SDL_SCANCODE_UP);
-    state->buttons[BUTTON_RIGHT] |= getKeyboardKeys(SDL_SCANCODE_RIGHT);
-    state->buttons[BUTTON_DOWN] |= getKeyboardKeys(SDL_SCANCODE_DOWN);
-    state->buttons[BUTTON_LEFT] |= getKeyboardKeys(SDL_SCANCODE_LEFT);
-
-    state->buttons[BUTTON_NAV_UP] |= state->buttons[BUTTON_UP];
-    state->buttons[BUTTON_NAV_RIGHT] |= state->buttons[BUTTON_RIGHT];
-    state->buttons[BUTTON_NAV_DOWN] |= state->buttons[BUTTON_DOWN];
-    state->buttons[BUTTON_NAV_LEFT] |= state->buttons[BUTTON_LEFT];
-}
-
-void SDLInputManager::updateControllerState(ControllerState* state, int controller)
-{
-    if (controllers.size() <= controller) return;
-
-    SDL_GameController* c = controllers[controller].second;
+    if (!c) return;
 
     for (size_t i = 0; i < SDL_GAMEPAD_BUTTON_MAX; i++)
     {
@@ -536,9 +517,77 @@ void SDLInputManager::updateControllerState(ControllerState* state, int controll
     }
 }
 
+void SDLInputManager::updateUnifiedControllerState(ControllerState* state)
+{
+    for (bool& button : state->buttons)
+        button = false;
+
+    for (float& axe : state->axes)
+        axe = 0;
+
+    std::lock_guard<std::mutex> lock(s_inputMutex);
+    for (auto& c : controllers)
+    {
+        ControllerState localState {};
+        readGameControllerState(&localState, c.second);
+
+        for (size_t i = 0; i < _BUTTON_MAX; i++)
+            state->buttons[i] |= localState.buttons[i];
+
+        for (size_t i = 0; i < _AXES_MAX; i++)
+        {
+            state->axes[i] += localState.axes[i];
+
+            if (state->axes[i] < -1)
+                state->axes[i] = -1;
+            else if (state->axes[i] > 1)
+                state->axes[i] = 1;
+        }
+    }
+
+    // Add keyboard keys on top of gamepad buttons
+    if (Application::isSwapInputKeys())
+    {
+        state->buttons[BUTTON_B] |= getKeyboardKeysLocked(SDL_SCANCODE_KP_ENTER);
+        state->buttons[BUTTON_B] |= getKeyboardKeysLocked(SDL_SCANCODE_RETURN);
+        state->buttons[BUTTON_B] |= getKeyboardKeysLocked(SDL_SCANCODE_SELECT);
+        state->buttons[BUTTON_A] |= getKeyboardKeysLocked(SDL_SCANCODE_ESCAPE);
+        state->buttons[BUTTON_A] |= getKeyboardKeysLocked(SDL_SCANCODE_AC_BACK);
+    }
+    else
+    {
+        state->buttons[BUTTON_A] |= getKeyboardKeysLocked(SDL_SCANCODE_KP_ENTER);
+        state->buttons[BUTTON_A] |= getKeyboardKeysLocked(SDL_SCANCODE_RETURN);
+        state->buttons[BUTTON_A] |= getKeyboardKeysLocked(SDL_SCANCODE_SELECT);
+        state->buttons[BUTTON_B] |= getKeyboardKeysLocked(SDL_SCANCODE_ESCAPE);
+        state->buttons[BUTTON_B] |= getKeyboardKeysLocked(SDL_SCANCODE_AC_BACK);
+    }
+
+    // Android tv remote control
+    state->buttons[BUTTON_X] |= getKeyboardKeysLocked(SDL_SCANCODE_MENU);
+
+    state->buttons[BUTTON_UP] |= getKeyboardKeysLocked(SDL_SCANCODE_UP);
+    state->buttons[BUTTON_RIGHT] |= getKeyboardKeysLocked(SDL_SCANCODE_RIGHT);
+    state->buttons[BUTTON_DOWN] |= getKeyboardKeysLocked(SDL_SCANCODE_DOWN);
+    state->buttons[BUTTON_LEFT] |= getKeyboardKeysLocked(SDL_SCANCODE_LEFT);
+
+    state->buttons[BUTTON_NAV_UP] |= state->buttons[BUTTON_UP];
+    state->buttons[BUTTON_NAV_RIGHT] |= state->buttons[BUTTON_RIGHT];
+    state->buttons[BUTTON_NAV_DOWN] |= state->buttons[BUTTON_DOWN];
+    state->buttons[BUTTON_NAV_LEFT] |= state->buttons[BUTTON_LEFT];
+}
+
+void SDLInputManager::updateControllerState(ControllerState* state, int controller)
+{
+    std::lock_guard<std::mutex> lock(s_inputMutex);
+    if (controller < 0 || (size_t)controller >= controllers.size()) return;
+    readGameControllerState(state, controllers[controller].second);
+}
+
 bool SDLInputManager::getKeyboardKeyState(BrlsKeyboardScancode key)
 {
-    return getKeyboardKeys(brlsToSdlKeyboardScancode(key));
+    std::lock_guard<std::mutex> lock(s_inputMutex);
+    return getKeyboardKeysLocked(brlsToSdlKeyboardScancode(key));
 }
 
 void SDLInputManager::updateTouchStates(std::vector<RawTouchState>* states)
@@ -554,6 +603,8 @@ void SDLInputManager::updateTouchStates(std::vector<RawTouchState>* states)
         for (int touchID = 0; touchID < touchesCount; touchID++)
         {
             SDL_Finger* finger = SDL_GetTouchFinger(device, touchID);
+            if (!finger)
+                continue;
 
             RawTouchState state;
             state.pressed    = true;
@@ -570,9 +621,12 @@ void SDLInputManager::updateMouseStates(RawMouseState* state)
     int x, y;
     SDL_GetMouseState(&x, &y);
 
-    state->leftButton   = getMouseButtonState(SDL_BUTTON_LEFT);
-    state->middleButton = getMouseButtonState(SDL_BUTTON_MIDDLE);
-    state->rightButton  = getMouseButtonState(SDL_BUTTON_RIGHT);
+    {
+        std::lock_guard<std::mutex> lock(s_inputMutex);
+        state->leftButton   = getMouseButtonStateLocked(SDL_BUTTON_LEFT);
+        state->middleButton = getMouseButtonStateLocked(SDL_BUTTON_MIDDLE);
+        state->rightButton  = getMouseButtonStateLocked(SDL_BUTTON_RIGHT);
+    }
 
 #ifdef BOREALIS_USE_D3D11
     // d3d11 scaleFactor 不计算在点击事件里
@@ -604,10 +658,11 @@ void SDLInputManager::runloopStart()
 
 void SDLInputManager::sendRumble(unsigned short controller, unsigned short lowFreqMotor, unsigned short highFreqMotor)
 {
+    std::lock_guard<std::mutex> lock(s_inputMutex);
     if (controllers.size() <= controller) return;
     SDL_GameController* c = controllers[controller].second;
-
-    SDL_GameControllerRumble(c, lowFreqMotor, highFreqMotor, 30000);
+    if (c)
+        SDL_GameControllerRumble(c, lowFreqMotor, highFreqMotor, 30000);
 }
 
 void SDLInputManager::updateMouseMotion(SDL_MouseMotionEvent event)

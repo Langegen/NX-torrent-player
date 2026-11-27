@@ -20,6 +20,8 @@
 #include "i18n.hpp"
 #include "jackett.hpp"
 #include "library.hpp"
+#include "online/online_manager.hpp"
+#include "online_view.hpp"
 #include "platform_ui.hpp"
 #include "player.hpp"        // startPlaybackPrompt
 #include "release.hpp"
@@ -629,14 +631,14 @@ class SourcesView : public brls::Box
             labels.push_back(tr("Season ") + std::to_string(s));
             values.push_back(s);
         }
-        auto* dd = new brls::Dropdown(tr("Season"), labels, [this, values](int i) {
-            if (i < 0 || i >= (int)values.size()) return;
+        auto* dd = new brls::Dropdown(tr("Season"), labels, [this, live = alive, values](int i) {
+            if (!*live || i < 0 || i >= (int)values.size()) return;
             filterSeason = values[i];
             want.season  = filterSeason;
             want.episode = (filterSeason > 0 && filterSeason == season) ? episode : 0;
             rescoreAll();
             restyleFilters();
-            rebuild();
+            refresh();
         }, sel);
         brls::Application::pushActivity(new brls::Activity(dd));
     }
@@ -673,14 +675,14 @@ class SourcesView : public brls::Box
                             : f == Facet::Source ? "Source"
                             : f == Facet::Hdr    ? "Picture"
                                                  : "Tracker";
-        auto* dd = new brls::Dropdown(tr(title), labels, [this, f, values](int i) {
-            if (i < 0 || i >= (int)values.size()) return;
+        auto* dd = new brls::Dropdown(tr(title), labels, [this, live = alive, f, values](int i) {
+            if (!*live || i < 0 || i >= (int)values.size()) return;
             if (f == Facet::Voice) filterVoice = values[i];
             else if (f == Facet::Source) filterSource = values[i];
             else if (f == Facet::Tracker) filterTracker = values[i];
             else filterHdr = i;
             restyleFilters();
-            rebuild();
+            refresh();
         }, sel);
         brls::Application::pushActivity(new brls::Activity(dd));
     }
@@ -1466,6 +1468,15 @@ void playEpisode(const content::Item& item, int season, int episode, int episode
         if (const library::EpisodeProgress* p = en.episode(season, episode))
             if (!p->source.empty())
             {
+                online::OnlineRef ref;
+                if ((p->sourceType == "Online" || p->source.rfind("online://", 0) == 0) &&
+                    online::parseOnlineSourceUri(p->source, ref))
+                {
+                    content::Item it = item;
+                    if (it.imdbId.empty()) it.imdbId = en.item.imdbId;
+                    online::resumeOnlineAsync(it, ref, season, episode, -1.0, episodesInSeason);
+                    return;
+                }
                 // Played before: the same release again. The player's prompt
                 // offers the saved position when it is part-way through.
                 brls::Logger::info("[sources] S{}E{} from its last source", season, episode);
@@ -1485,6 +1496,16 @@ void openNextEpisode(const content::Item& item, int season, int episode, int epi
     bool have = library::find(item.key(), en);
     content::Item it = item;
     if (have && it.imdbId.empty()) it.imdbId = en.item.imdbId;
+
+    if (have && (en.sourceType == "Online" || en.source.rfind("online://", 0) == 0))
+    {
+        online::OnlineRef ref;
+        if (online::parseOnlineSourceUri(en.source, ref))
+        {
+            online::resumeOnlineAsync(it, ref, season, episode, -1.0, episodesInSeason);
+            return;
+        }
+    }
 
     // The last episode came from a season pack that holds this one too: open
     // the same torrent and let torrent_play find the episode's file.
@@ -1512,6 +1533,36 @@ void openNextEpisode(const content::Item& item, int season, int episode, int epi
         }
         return;
     }
+    if (config::get().defaultWatchMode == "ask")
+    {
+        bool torrentsOn = !config::get().jackettUrl.empty() ||
+                          (!stremio::loadAuthKey().empty() && !it.imdbId.empty());
+        bool onlineOn   = online::hasEnabledPlugins();
+        if (torrentsOn && onlineOn)
+        {
+            std::vector<std::string> labels = { tr("Online"), tr("Torrents") };
+            auto* dd = new brls::Dropdown(
+                tr("Choose source"), labels, [](int) {}, -1,
+                [it, season, episode, episodesInSeason](int sel) {
+                    if (sel == 0) openOnlineScreen(it, season, episode, episodesInSeason);
+                    else if (sel == 1) openSourcesScreen(it, season, episode, episodesInSeason);
+                });
+            brls::Application::pushActivity(new brls::Activity(dd));
+            return;
+        }
+        if (onlineOn)
+        {
+            openOnlineScreen(it, season, episode, episodesInSeason);
+            return;
+        }
+        openSourcesScreen(it, season, episode, episodesInSeason);
+        return;
+    }
+    if (config::get().defaultWatchMode == "online" && online::hasEnabledPlugins())
+    {
+        openOnlineScreen(it, season, episode, episodesInSeason);
+        return;
+    }
     openSourcesScreen(it, season, episode, episodesInSeason);
 }
 
@@ -1537,10 +1588,49 @@ void continueContent(const library::Entry& en)
                 idx  = p->fileIndex;
                 type = p->sourceType;
             }
+        online::OnlineRef ref;
+        if ((type == "Online" || src.rfind("online://", 0) == 0) &&
+            online::parseOnlineSourceUri(src, ref))
+        {
+            online::resumeOnlineAsync(en.item, ref, n.season, n.episode, -1.0, 0);
+            return;
+        }
         PlayHint hint = hintFor(en.item, n.season, n.episode, 0, 1);
         startPlaybackPrompt(src, hint.art, hint.title, idx, hint.watch, type);
         return;
     }
     // Nothing to resume from: the sources for it.
+    if (config::get().defaultWatchMode == "ask")
+    {
+        bool torrentsOn = !config::get().jackettUrl.empty() ||
+                          (!stremio::loadAuthKey().empty() && !en.item.imdbId.empty());
+        bool onlineOn   = online::hasEnabledPlugins();
+        if (torrentsOn && onlineOn)
+        {
+            content::Item it = en.item;
+            int s = n.season, e = n.episode;
+            std::vector<std::string> labels = { tr("Online"), tr("Torrents") };
+            auto* dd = new brls::Dropdown(
+                tr("Choose source"), labels, [](int) {}, -1,
+                [it, s, e](int sel) {
+                    if (sel == 0) openOnlineScreen(it, s, e, 0);
+                    else if (sel == 1) openSourcesScreen(it, s, e, 0);
+                });
+            brls::Application::pushActivity(new brls::Activity(dd));
+            return;
+        }
+        if (onlineOn)
+        {
+            openOnlineScreen(en.item, n.season, n.episode, 0);
+            return;
+        }
+        openSourcesScreen(en.item, n.season, n.episode, 0);
+        return;
+    }
+    if (config::get().defaultWatchMode == "online" && online::hasEnabledPlugins())
+    {
+        openOnlineScreen(en.item, n.season, n.episode, 0);
+        return;
+    }
     openSourcesScreen(en.item, n.season, n.episode, 0);
 }

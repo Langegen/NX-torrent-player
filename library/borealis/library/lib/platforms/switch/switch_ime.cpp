@@ -17,6 +17,9 @@ limitations under the License.
 */
 
 #include <switch.h>
+#ifdef BOREALIS_USE_OPENGL
+#include <glad/glad.h>
+#endif
 
 #include <borealis/platforms/switch/switch_ime.hpp>
 #include <cstring>
@@ -88,31 +91,40 @@ bool SwitchImeManager::openForText(std::function<void(std::string)> f, std::stri
     std::string subText, int maxStringLength, std::string initialText,
     int kbdDisableBitmask)
 {
-    // LOCAL PATCH (NX-torrent-player). The stock version froze the console on
-    // the server-address fields -- the only calls passing a sub text, and the
-    // only ones that hung. Above 32 characters swkbd draws the input as a box
-    // and shows no header or sub text anyway (libnx, SwkbdTextDrawType), so
-    // the hint goes in as the guide text, shown in the empty field: the way
-    // the app's own magnet prompt has always called it. Also: a failed
-    // swkbdCreate is no longer used, and the answer has room for a full
-    // maxStringLength of UTF-8 (it was a fixed 256 bytes).
-    SwkbdConfig config;
+    // LOCAL PATCH (NX-torrent-player). Zero-init SwkbdConfig, clamp to HOS limit
+    // (500), disable BlurBackground (avoids live OpenGL framebuffer snapshot),
+    // skip header/sub text above 32 chars (swkbd uses box mode), and flush GL
+    // before swkbdShow() to avoid 4IFIR/SaltyNX nwindow/nvdrv deadlocks/aborts.
+    SwkbdConfig config = {};
     if (R_FAILED(swkbdCreate(&config, 0)))
         return false;
 
+    if (maxStringLength <= 0)
+        maxStringLength = 64;
+    if (maxStringLength > 500)
+        maxStringLength = 500;
+
     swkbdConfigMakePresetDefault(&config);
     swkbdConfigSetType(&config, SwkbdType_All);  // Cyrillic in a search
-    swkbdConfigSetHeaderText(&config, headerText.c_str());
-    if (maxStringLength > 0 && maxStringLength <= 32)
-        swkbdConfigSetSubText(&config, subText.c_str());
+    swkbdConfigSetBlurBackground(&config, false);
+    if (maxStringLength <= 32)
+    {
+        if (!headerText.empty())
+            swkbdConfigSetHeaderText(&config, headerText.c_str());
+        if (!subText.empty())
+            swkbdConfigSetSubText(&config, subText.c_str());
+    }
     swkbdConfigSetGuideText(&config, (subText.empty() ? headerText : subText).c_str());
-    if (maxStringLength > 0)
-        swkbdConfigSetStringLenMax(&config, maxStringLength);
+    swkbdConfigSetStringLenMax(&config, maxStringLength);
     if (!initialText.empty())
         swkbdConfigSetInitialText(&config, initialText.c_str());
     swkbdConfigSetKeySetDisableBitmask(&config, getSwkbdKeyDisableBitmask(kbdDisableBitmask));
 
-    std::vector<char> buffer((maxStringLength > 64 ? maxStringLength : 64) * 4 + 1, 0);
+#ifdef BOREALIS_USE_OPENGL
+    glFinish();
+#endif
+
+    std::vector<char> buffer((size_t)maxStringLength * 4 + 1, 0);
     Result rc = swkbdShow(&config, buffer.data(), buffer.size());
     swkbdClose(&config);
 
@@ -128,24 +140,52 @@ bool SwitchImeManager::openForNumber(std::function<void(long)> f, std::string he
     std::string leftButton, std::string rightButton,
     int kbdDisableBitmask)
 {
-    SwkbdConfig config = createSwkbdBaseConfig(headerText, subText, maxStringLength, initialText);
+    // LOCAL PATCH (NX-torrent-player): safe init, unchecked swkbdCreate guard,
+    // disabled background blur, and glFinish() before swkbdShow().
+    SwkbdConfig config = {};
+    if (R_FAILED(swkbdCreate(&config, 0)))
+        return false;
 
+    if (maxStringLength <= 0)
+        maxStringLength = 18;
+    if (maxStringLength > 20)
+        maxStringLength = 20;
+
+    swkbdConfigMakePresetDefault(&config);
     swkbdConfigSetType(&config, SwkbdType_NumPad);
+    swkbdConfigSetBlurBackground(&config, false);
+    if (!headerText.empty())
+        swkbdConfigSetHeaderText(&config, headerText.c_str());
+    if (!subText.empty())
+        swkbdConfigSetSubText(&config, subText.c_str());
+    swkbdConfigSetGuideText(&config, (subText.empty() ? headerText : subText).c_str());
+    swkbdConfigSetStringLenMax(&config, maxStringLength);
+    if (!initialText.empty())
+        swkbdConfigSetInitialText(&config, initialText.c_str());
     swkbdConfigSetLeftOptionalSymbolKey(&config, leftButton.c_str());
     swkbdConfigSetRightOptionalSymbolKey(&config, rightButton.c_str());
     swkbdConfigSetKeySetDisableBitmask(&config, getSwkbdKeyDisableBitmask(kbdDisableBitmask));
 
-    char buffer[0x100];
+#ifdef BOREALIS_USE_OPENGL
+    glFinish();
+#endif
 
-    if (R_SUCCEEDED(swkbdShow(&config, buffer, 0x100)) && strcmp(buffer, "") != 0)
-    {
-        f(std::stoll(buffer));
-
-        swkbdClose(&config);
-        return true;
-    }
-
+    char buffer[0x100] = { 0 };
+    Result rc          = swkbdShow(&config, buffer, sizeof(buffer));
     swkbdClose(&config);
+
+    if (R_SUCCEEDED(rc) && buffer[0] != '\0')
+    {
+        try
+        {
+            f(std::stoll(buffer));
+            return true;
+        }
+        catch (...)
+        {
+            return false;
+        }
+    }
 
     return false;
 }

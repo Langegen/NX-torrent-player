@@ -22,6 +22,7 @@ namespace player_ui
 class Battery;
 class Button;
 class Chip;
+class GestureHud;
 class SeekRipple;
 class Timeline;
 }
@@ -53,6 +54,50 @@ struct PlayerArt
     // Blur the background. A poster is one big image behind text, so it has to
     // be pushed back; an episode still is already a busy, low-contrast frame.
     bool blurBg = false;
+};
+
+// Forward-declared for MpvView::hlsProxy
+struct hls_proxy;
+
+struct PlayerOnlineQuality
+{
+    std::string label;
+    std::string url;
+    int height = 0;
+};
+
+struct PlayerOnlineSubtitle
+{
+    std::string label;
+    std::string lang;
+    std::string url;
+};
+
+struct PlayerOnlineEpisode
+{
+    int season  = 0;
+    int episode = 0;
+    std::string title;
+    std::string voiceName;
+    std::string url;
+    bool isCall = false;
+    std::vector<PlayerOnlineQuality> qualities;
+    std::vector<PlayerOnlineSubtitle> subtitles;
+    std::vector<std::string> headers;
+};
+
+struct OnlinePlaybackInfo
+{
+    bool active = false;
+    std::string pluginId;
+    std::string balancerId;
+    std::string voiceName;
+    std::string currentQuality;
+    std::vector<std::string> httpHeaders;
+    std::vector<PlayerOnlineQuality> qualities;
+    std::vector<PlayerOnlineSubtitle> subtitles;
+    std::vector<PlayerOnlineEpisode> episodes;
+    int currentEpisodeIdx = -1;
 };
 
 // Ties a playback to its Stremio library entry, so the player can resume where
@@ -93,6 +138,9 @@ struct WatchInfo
     // Activities to pop before opening the next episode: the player, plus the
     // sources screen it was started from (the next episode brings its own).
     int nextPop = 1;
+
+    // Non-torrent online playback context (Lampa/Lampac or NX Online Plugin).
+    OnlinePlaybackInfo online;
 };
 
 // Formats seconds into "M:SS" or "H:MM:SS"
@@ -132,6 +180,8 @@ class MpvView : public brls::Box
     void pumpEvents();
     void startEngine(const std::string& source, int fileIndex);
     bool startMpv();
+    void loadDirectUrl(const std::string& rawUrl, double seekToSec = -1.0);
+    void switchOnlineQuality(int idx);
 
     // ---- Input ------------------------------------------------------------
     // Every input source -- the Joy-Cons, a Pro controller, a USB or Bluetooth
@@ -168,6 +218,7 @@ class MpvView : public brls::Box
     std::chrono::steady_clock::time_point backArmedUntil;
 
     void buildLoadingOverlay(const std::string& title);
+    void updateLoadingOverlayLayout();
     void setBackgroundArt(const std::string& path);
     PlayerArt art;
     brls::Image* bgImage = nullptr;  // filled in once the full-size art lands
@@ -292,6 +343,15 @@ class MpvView : public brls::Box
     double dtStartPos     = 0.0;
     std::chrono::steady_clock::time_point dtLastTapAt;
     player_ui::SeekRipple* seekRipple = nullptr;
+    player_ui::GestureHud* gestureHud = nullptr;
+    enum class SwipeSide
+    {
+        None,
+        Brightness,
+        Volume,
+    };
+    SwipeSide swipeSide = SwipeSide::None;
+    float swipeStartVal = 0.0f;
 
     // ---- The control panel (modelled on Lampa's player) -------------------
     // A title bar on top (title, episode, clock, when it ends) and at the
@@ -348,6 +408,8 @@ class MpvView : public brls::Box
     brls::Label* timeTotal   = nullptr;
     std::chrono::steady_clock::time_point clockLast;
     bool clockValid = false;
+    std::chrono::steady_clock::time_point batteryLast;
+    bool batteryValid = false;
     brls::Event<bool>::Subscription focusSub;
     brls::VoidEvent::Subscription resizeSub;
     bool focusSubscribed  = false;
@@ -405,6 +467,7 @@ class MpvView : public brls::Box
     bool softwareDecode      = false;
     bool swDecodeWarned      = false;
     bool swDecodeWarnPending = false;
+    std::string obsVideoCodec;   // mpv "video-codec"
     std::string obsVideoFormat;  // mpv "video-format" (e.g. "av1", "h264", "hevc")
     std::string obsPixFmt;       // mpv "video-params/pixelformat" (e.g. "yuv420p10le")
     int64_t lastVideoWidth = 0;
@@ -468,6 +531,7 @@ class MpvView : public brls::Box
     bool pictureDirty = false;
 
     torrentfs* tfs = nullptr;
+    hls_proxy* hlsProxy = nullptr;
     // Set by the destructor: abandons an nxhttps:// open in progress
     // (stream_register_http). Outlives mpv, which is destroyed first.
     volatile bool httpAbort = false;
@@ -486,15 +550,23 @@ class MpvView : public brls::Box
     mpv_render_context* renderCtx = nullptr;
 
     // Loading screen (borealis views drawn as children, hidden once ready).
-    brls::Box* loadingOverlay = nullptr;
-    brls::Label* statusLabel  = nullptr;
-    brls::Label* statsLabel   = nullptr;
-    brls::Label* percentLabel = nullptr;
-    brls::Box* barFill        = nullptr;
+    brls::Box* loadingOverlay             = nullptr;
+    brls::Box* loadingColumn              = nullptr;
+    brls::View* loadingArt                = nullptr;
+    bool loadingArtIsPoster               = false;
+    brls::Label* loadingTitle             = nullptr;
+    brls::Box* loadingBarTrack            = nullptr;
+    brls::ProgressSpinner* loadingSpinner = nullptr;
+    brls::View* loadingBackView           = nullptr;
+    brls::Label* statusLabel              = nullptr;
+    brls::Label* statsLabel               = nullptr;
+    brls::Label* percentLabel             = nullptr;
+    brls::Box* barFill                    = nullptr;
 
     // Small "buffering" spinner shown mid-playback when the stream stalls.
-    brls::Box* bufferOverlay = nullptr;
-    bool buffering           = false;
+    brls::Box* bufferOverlay          = nullptr;
+    brls::ProgressSpinner* bufSpinner = nullptr;
+    bool buffering                    = false;
 
     // Big play button in the middle, shown with the panel while paused (and a
     // touch target for play/pause).
@@ -579,6 +651,9 @@ class MpvView : public brls::Box
     // core froze the render thread with it (and, through the engine getters'
     // lock, the whole download).
     double obsPos = 0.0, obsDur = 0.0, obsCacheSecs = 0.0;
+    int64_t obsWidth = 0, obsHeight = 0, obsFrameDrops = 0, obsDecDrops = 0;
+    double obsFps = 0.0;
+    std::string obsHwdec;
     bool obsCacheIdle      = false;
     bool obsPausedForCache = false;
     std::chrono::steady_clock::time_point infoLastSample;

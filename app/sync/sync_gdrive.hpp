@@ -82,9 +82,11 @@ public:
 
 private:
     bool ensureAccessToken(const GdriveCredentials& creds, std::string& token, std::string& err);
-    bool findAppDataFile(const std::string& token, const std::string& filename, std::string& fileId, std::string& err);
-    bool downloadAppDataFile(const std::string& token, const std::string& fileId, std::string& content, std::string& err);
-    bool uploadAppDataFile(const std::string& token, const std::string& filename, const std::string& content, std::string& err);
+    bool findSyncFolder(const std::string& token, std::string& folderId, std::string& err);
+    bool ensureSyncFolder(const std::string& token, std::string& folderId, std::string& err);
+    bool findSyncFile(const std::string& token, const std::string& folderId, const std::string& filename, std::string& fileId, std::string& err);
+    bool downloadSyncFile(const std::string& token, const std::string& fileId, std::string& content, std::string& err);
+    bool uploadSyncFile(const std::string& token, const std::string& folderId, const std::string& filename, const std::string& content, std::string& err);
 
     std::mutex m_tokenMutex;
     std::string m_cachedAccessToken;

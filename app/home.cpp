@@ -1,5 +1,6 @@
 #include "home.hpp"
 
+#include <deque>
 #include <memory>
 #include <set>
 #include <string>
@@ -250,13 +251,26 @@ class HomeRoot : public brls::Box
     void draw(NVGcontext* vg, float x, float y, float w, float h, brls::Style style,
               brls::FrameContext* ctx) override
     {
-        // Only while on top: under a dialog or the player, a Continue card may
-        // be the one the focus goes back to when that closes (see ui::isOnTop).
+        // Defer rebuild via brls::sync so clearViews() never runs synchronously inside draw().
         uint32_t gen = library::generation() * 7919u + history::generation();
-        if (gen != seenGen && (!continueRow || ui::isOnTop(this)))
+        if (gen != seenGen)
         {
-            seenGen = gen;
-            if (continueRow) fillContinue();
+            seenGen       = gen;
+            continueDirty = true;
+        }
+        if (continueDirty && !continueQueued && continueRow && ui::isOnTop(this))
+        {
+            continueQueued = true;
+            auto live      = alive;
+            brls::sync([this, live]() {
+                if (!*live) return;
+                continueQueued = false;
+                if (continueDirty && continueRow && ui::isOnTop(this))
+                {
+                    continueDirty = false;
+                    fillContinue();
+                }
+            });
         }
         brls::Box::draw(vg, x, y, w, h, style, ctx);
     }
@@ -288,6 +302,61 @@ class HomeRoot : public brls::Box
     brls::View* continueSection[2] = { nullptr, nullptr };  // heading, strip
     brls::Box* continueRow = nullptr;
     uint32_t seenGen = 0;
+    bool continueDirty  = false;
+    bool continueQueued = false;
+
+    struct PendingRow
+    {
+        brls::Box* row = nullptr;
+        tmdb::ListResult res;
+        RowSpec spec;
+        std::shared_ptr<bool> a;
+    };
+    std::deque<PendingRow> pendingRows;
+    bool drainingRows = false;
+
+    void drainPendingRows()
+    {
+        drainingRows = false;
+        while (!pendingRows.empty())
+        {
+            PendingRow item = std::move(pendingRows.front());
+            pendingRows.pop_front();
+            if (!*item.a) continue;
+            fillRow(item.row, item.res, item.spec);
+            break;
+        }
+        if (!pendingRows.empty())
+        {
+            drainingRows = true;
+            brls::delay(1, [this, a = alive]() {
+                if (*a) drainPendingRows();
+            });
+        }
+    }
+
+    void enqueueRowFill(brls::Box* row, tmdb::ListResult res, const RowSpec& spec,
+                        std::shared_ptr<bool> a)
+    {
+        if (!*a) return;
+        if (!drainingRows && pendingRows.empty())
+        {
+            fillRow(row, res, spec);
+            drainingRows = true;
+            brls::delay(1, [this, a]() {
+                if (*a) drainPendingRows();
+            });
+            return;
+        }
+        pendingRows.push_back({ row, std::move(res), spec, std::move(a) });
+        if (!drainingRows)
+        {
+            drainingRows = true;
+            brls::delay(1, [this, a = alive]() {
+                if (*a) drainPendingRows();
+            });
+        }
+    }
 
     void build()
     {
@@ -368,7 +437,7 @@ class HomeRoot : public brls::Box
             brls::Box* row = addRow(spec);
             tmdb::fetchQueryAsync(spec.query, 1, [this, row, spec, a = alive](tmdb::ListResult res) {
                 if (!*a) return;
-                fillRow(row, res, spec);
+                enqueueRowFill(row, std::move(res), spec, a);
             });
         }
     }

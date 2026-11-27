@@ -5,7 +5,11 @@ import android.content.pm.ActivityInfo;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.SystemClock;
+import android.view.KeyEvent;
 import android.view.WindowManager;
+import android.window.OnBackInvokedCallback;
+import android.window.OnBackInvokedDispatcher;
 
 import org.libsdl.app.BorealisHandler;
 import org.libsdl.app.PlatformUtils;
@@ -14,6 +18,21 @@ import org.libsdl.app.SDLActivity;
 public class MainActivity extends SDLActivity {
 
     private static volatile String pendingIntentUri = null;
+    private long lastBackKeyMs = 0L;
+    private Object backInvokedCallback = null;
+
+    private void dispatchNativeBack() {
+        if (SDLActivity.mBrokenLibraries || SDLActivity.mSDLThread == null) {
+            return;
+        }
+        long now = SystemClock.uptimeMillis();
+        if (now - lastBackKeyMs < 150L) {
+            return;
+        }
+        lastBackKeyMs = now;
+        SDLActivity.onNativeKeyDown(KeyEvent.KEYCODE_BACK);
+        SDLActivity.onNativeKeyUp(KeyEvent.KEYCODE_BACK);
+    }
 
     public static synchronized String consumePendingIntentUri() {
         String uri = pendingIntentUri;
@@ -63,6 +82,46 @@ public class MainActivity extends SDLActivity {
 
         // Capture initial magnet/file intent so native code can consume it after SDL_Init
         recordOrDispatchIntent(getIntent(), true);
+
+        if (Build.VERSION.SDK_INT >= 33) {
+            OnBackInvokedCallback cb = new OnBackInvokedCallback() {
+                @Override
+                public void onBackInvoked() {
+                    if (SDLActivity.nativeGetHintBoolean("SDL_ANDROID_TRAP_BACK_BUTTON", false)) {
+                        dispatchNativeBack();
+                    }
+                }
+            };
+            backInvokedCallback = cb;
+            getOnBackInvokedDispatcher().registerOnBackInvokedCallback(
+                    OnBackInvokedDispatcher.PRIORITY_DEFAULT, cb);
+        }
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        if (getWindow() != null) {
+            getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        }
+    }
+
+    @Override
+    public void onBackPressed() {
+        if (SDLActivity.nativeGetHintBoolean("SDL_ANDROID_TRAP_BACK_BUTTON", false)) {
+            dispatchNativeBack();
+            return;
+        }
+        super.onBackPressed();
+    }
+
+    @Override
+    public boolean dispatchKeyEvent(KeyEvent event) {
+        if (event != null && event.getKeyCode() == KeyEvent.KEYCODE_BACK
+                && event.getAction() == KeyEvent.ACTION_UP) {
+            lastBackKeyMs = SystemClock.uptimeMillis();
+        }
+        return super.dispatchKeyEvent(event);
     }
 
     @Override
@@ -80,8 +139,15 @@ public class MainActivity extends SDLActivity {
 
     @Override
     protected void onDestroy() {
+        if (Build.VERSION.SDK_INT >= 33 && backInvokedCallback != null) {
+            try {
+                getOnBackInvokedDispatcher().unregisterOnBackInvokedCallback(
+                        (OnBackInvokedCallback) backInvokedCallback);
+            } catch (Exception ignored) {
+            }
+            backInvokedCallback = null;
+        }
         super.onDestroy();
-        System.exit(0);
     }
 
     @Override

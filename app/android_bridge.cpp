@@ -26,6 +26,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <cstdint>
+#include <condition_variable>
 #include <mutex>
 
 namespace
@@ -37,8 +38,40 @@ std::mutex g_jniMutex;
 jclass g_platformUtilsClass = nullptr;
 jmethodID g_getWebPSizeMid  = nullptr;
 jmethodID g_decodeWebPMid   = nullptr;
+jmethodID g_isTvMid         = nullptr;
+jmethodID g_getMetricsMid   = nullptr;
+jmethodID g_getSafeInsetsMid = nullptr;
 jclass g_mainActivityClass  = nullptr;
 jmethodID g_consumeIntentMid = nullptr;
+
+bool g_tvCached       = false;
+bool g_isTv           = false;
+float g_density       = 2.0f;
+int g_smallestWidthDp = 360;
+
+// Cap concurrent JVM WebP decodes so worker threads cannot trigger OOM/GC storms.
+std::mutex g_webpSemMtx;
+std::condition_variable g_webpSemCv;
+int g_webpInFlight = 0;
+constexpr int kMaxWebpConcurrent = 2;
+
+struct WebpSlotGuard
+{
+    WebpSlotGuard()
+    {
+        std::unique_lock<std::mutex> lk(g_webpSemMtx);
+        g_webpSemCv.wait(lk, []() { return g_webpInFlight < kMaxWebpConcurrent; });
+        g_webpInFlight++;
+    }
+    ~WebpSlotGuard()
+    {
+        {
+            std::lock_guard<std::mutex> lk(g_webpSemMtx);
+            g_webpInFlight--;
+        }
+        g_webpSemCv.notify_one();
+    }
+};
 
 void clearException(JNIEnv* env)
 {
@@ -69,9 +102,50 @@ void initJniRefs()
                 g_decodeWebPMid = env->GetStaticMethodID(
                     g_platformUtilsClass, "decodeWebP", "([B)[B");
                 clearException(env);
+                g_isTvMid = env->GetStaticMethodID(
+                    g_platformUtilsClass, "isAndroidTv", "()Z");
+                clearException(env);
+                g_getMetricsMid = env->GetStaticMethodID(
+                    g_platformUtilsClass, "getDisplayMetrics", "()[I");
+                clearException(env);
+                g_getSafeInsetsMid = env->GetStaticMethodID(
+                    g_platformUtilsClass, "getSafeInsetsPx", "()[I");
+                clearException(env);
             }
         }
         clearException(env);
+    }
+
+    if (!g_tvCached && g_platformUtilsClass)
+    {
+        g_tvCached = true;
+        if (g_isTvMid)
+        {
+            jboolean v = env->CallStaticBooleanMethod(g_platformUtilsClass, g_isTvMid);
+            if (!env->ExceptionCheck()) g_isTv = (bool)v;
+            clearException(env);
+        }
+        if (g_getMetricsMid)
+        {
+            jintArray arr = static_cast<jintArray>(
+                env->CallStaticObjectMethod(g_platformUtilsClass, g_getMetricsMid));
+            if (!env->ExceptionCheck() && arr)
+            {
+                if (env->GetArrayLength(arr) >= 4)
+                {
+                    jint buf[4] = { 0, 0, 2000, 360 };
+                    env->GetIntArrayRegion(arr, 0, 4, buf);
+                    if (!env->ExceptionCheck())
+                    {
+                        if (buf[2] > 0) g_density = (float)buf[2] / 1000.0f;
+                        if (buf[3] > 0) g_smallestWidthDp = buf[3];
+                    }
+                    clearException(env);
+                }
+            }
+            clearException(env);
+            if (arr) env->DeleteLocalRef(arr);
+        }
     }
 
     if (!g_mainActivityClass)
@@ -200,6 +274,55 @@ std::string androidConsumePendingIntentUri()
     return out;
 }
 
+bool androidIsTv()
+{
+    initJniRefs();
+    return g_isTv;
+}
+
+float androidDisplayDensity()
+{
+    initJniRefs();
+    return g_density > 0.25f ? g_density : 2.0f;
+}
+
+int androidSmallestWidthDp()
+{
+    initJniRefs();
+    return g_smallestWidthDp > 0 ? g_smallestWidthDp : 360;
+}
+
+void androidSafeInsetsPx(int& top, int& right, int& bottom, int& left)
+{
+    top = right = bottom = left = 0;
+    initJniRefs();
+    JNIEnv* env = static_cast<JNIEnv*>(SDL_AndroidGetJNIEnv());
+    if (!env || !g_platformUtilsClass || !g_getSafeInsetsMid) return;
+
+    jintArray arr = static_cast<jintArray>(
+        env->CallStaticObjectMethod(g_platformUtilsClass, g_getSafeInsetsMid));
+    if (env->ExceptionCheck() || !arr)
+    {
+        clearException(env);
+        if (arr) env->DeleteLocalRef(arr);
+        return;
+    }
+    if (env->GetArrayLength(arr) >= 4)
+    {
+        jint buf[4] = { 0, 0, 0, 0 };
+        env->GetIntArrayRegion(arr, 0, 4, buf);
+        if (!env->ExceptionCheck())
+        {
+            top    = buf[0] > 0 ? buf[0] : 0;
+            right  = buf[1] > 0 ? buf[1] : 0;
+            bottom = buf[2] > 0 ? buf[2] : 0;
+            left   = buf[3] > 0 ? buf[3] : 0;
+        }
+        clearException(env);
+    }
+    env->DeleteLocalRef(arr);
+}
+
 extern "C" {
 
 WEBP_EXTERN int WebPGetInfo(const uint8_t* data, size_t data_size,
@@ -256,6 +379,7 @@ WEBP_EXTERN uint8_t* WebPDecodeRGBA(const uint8_t* data, size_t data_size,
     if (!data || data_size == 0 || data_size > 32u * 1024u * 1024u)
         return nullptr;
 
+    WebpSlotGuard slot;
     initJniRefs();
     JNIEnv* env = static_cast<JNIEnv*>(SDL_AndroidGetJNIEnv());
     if (!env || !g_platformUtilsClass || !g_decodeWebPMid)
@@ -355,5 +479,16 @@ void androidInitPlatform() {}
 const char* androidStoragePath() { return "./appdata"; }
 
 std::string androidConsumePendingIntentUri() { return ""; }
+
+bool androidIsTv() { return false; }
+
+float androidDisplayDensity() { return 1.0f; }
+
+int androidSmallestWidthDp() { return 1280; }
+
+void androidSafeInsetsPx(int& top, int& right, int& bottom, int& left)
+{
+    top = right = bottom = left = 0;
+}
 
 #endif

@@ -356,6 +356,8 @@ void SDLVideoContext::beginFrame()
 void SDLVideoContext::endFrame()
 {
 #ifdef BOREALIS_USE_OPENGL
+    if (!SDL_GL_GetCurrentContext())
+        return;
     SDL_GL_SwapWindow(this->window);
 #elif defined(BOREALIS_USE_D3D11)
     D3D11_CONTEXT->endFrame();

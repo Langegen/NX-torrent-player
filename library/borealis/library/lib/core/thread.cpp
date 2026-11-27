@@ -32,6 +32,10 @@
 #include <orbis/libkernel.h>
 #endif
 
+#ifdef __SWITCH__
+#include <switch.h>
+#endif
+
 namespace brls
 {
 
@@ -109,12 +113,16 @@ void Threading::cancelDelay(size_t iter)
     m_delay_cancel_set.insert(iter);
 }
 
-void Threading::performSyncTasks()
+// LOCAL PATCH (NX-torrent-player): return whether any sync/delay task executed
+// so adaptive FPS can keep menus responsive during background completions.
+bool Threading::performSyncTasks()
 {
     m_sync_mutex.lock();
     auto local = m_sync_functions;
     m_sync_functions.clear();
     m_sync_mutex.unlock();
+
+    bool ranAny = !local.empty();
 
     for (auto& f : local)
     {
@@ -154,6 +162,7 @@ void Threading::performSyncTasks()
 
         if (duration >= d.delayMilliseconds)
         {
+            ranAny = true;
             try
             {
                 d.func();
@@ -175,6 +184,7 @@ void Threading::performSyncTasks()
             m_delay_mutex.unlock();
         }
     }
+    return ranAny;
 }
 
 void Threading::start()
@@ -204,6 +214,15 @@ void Threading::std_task_loop() {
 }
 void* Threading::task_loop(void* a)
 {
+#ifdef __SWITCH__
+    // LOCAL PATCH (NX-torrent-player): keep brls::async off Core 0 so the UI
+    // thread and OS appletMainLoop are never starved by async work.
+    u64 coreMask = 0;
+    if (R_SUCCEEDED(svcGetInfo(&coreMask, InfoType_CoreMask, CUR_PROCESS_HANDLE, 0)) &&
+        (coreMask & (1u << 1)))
+        svcSetThreadCoreMask(CUR_THREAD_HANDLE, 1, (1u << 1));
+    svcSetThreadPriority(CUR_THREAD_HANDLE, 0x34);
+#endif
     while (task_loop_active)
     {
         std::vector<std::function<void()>> m_tasks_copy;

@@ -26,9 +26,30 @@ enum class Tab
 
 // The default UI sizes, named so the Options screen can mark them in the list.
 // Docked defaults smaller than handheld: the same logical size that fills a 6"
-// panel leaves most of a TV empty.
+// panel leaves most of a TV empty. Android defaults to 80% (1600) so mobile and
+// TV layouts fit without clipping.
 constexpr int kDefaultDockedUiWidth   = 1600;
 constexpr int kDefaultHandheldUiWidth = 1280;
+constexpr int kDefaultAndroidUiWidth  = 1600;
+
+inline int defaultHandheldUiWidth()
+{
+#if defined(__ANDROID__) || defined(ANDROID)
+    return kDefaultAndroidUiWidth;
+#else
+    return kDefaultHandheldUiWidth;
+#endif
+}
+
+struct OnlinePluginConfig
+{
+    std::string id;
+    std::string name;
+    std::string kind = "lampac";  // "lampac" or "nx_plugin"
+    std::string url;
+    std::string token;
+    bool enabled = true;
+};
 
 struct Config
 {
@@ -50,13 +71,12 @@ struct Config
     bool subtitles = true;
 
     // Lift the loudness of a 5.1 track downmixed to stereo (mpv's dynaudnorm).
-    // On by default -- a 5.1 master folded to stereo sits well below a native
-    // stereo track, and the console's own speakers have no headroom left to
-    // make that up. Only ever applied in handheld for that reason: docked, the
-    // TV or receiver does the amplifying and the compression is just a
-    // flattened dynamic range nobody asked for. Applied live, so docking
-    // mid-film drops it (see MpvView::pumpEvents).
+    // On by default on Switch handheld (see MpvView::pumpEvents).
+#ifdef __SWITCH__
     bool audioBoost = true;
+#else
+    bool audioBoost = false;
+#endif
 
     // The picture in handheld: mpv's video equalizer and color shader
     // (brightness, contrast, gamma, saturation, red, green, blue), each
@@ -99,7 +119,7 @@ struct Config
     // *smaller* UI. Stored per mode because the right answer differs -- 1280
     // (borealis' own default) fills a 6" panel but wastes most of a TV.
     int dockedUiWidth   = kDefaultDockedUiWidth;
-    int handheldUiWidth = kDefaultHandheldUiWidth;
+    int handheldUiWidth = defaultHandheldUiWidth();
 
     // Colour scheme, as a theme::Scheme id. Purple is what the app has always
     // looked like. An id we do not know falls back to it at read time (see
@@ -162,6 +182,10 @@ struct Config
     // the local network (Jackett, TorrServer) never go through it.
     std::string proxyUrl = "";
 
+    // Use the app's built-in Borealis keyboard instead of the platform IME
+    // (helps if system swkbd crashes under 4IFIR/mods on Switch).
+    bool builtinKeyboard = false;
+
     // TMDB: the key (v3 key or v4 token; empty = the build's default, if
     // any), and optional mirrors for the API and the images (empty = TMDB's
     // own). See tmdb.hpp.
@@ -191,6 +215,11 @@ struct Config
     std::string syncGdriveClientSecret = "";
     std::string syncGdriveRefreshToken = "";
     std::string syncGdriveUserEmail = "";
+
+    // Online streaming plugins (Lampa/Lampac or NX Online Plugin v1)
+    std::vector<OnlinePluginConfig> onlinePlugins;
+    std::string defaultWatchMode = "torrents";  // "torrents", "online", or "ask"
+    int onlinePreferQuality      = 1080;        // 0 = max/auto, 2160, 1080, 720, 480
 };
 
 // The numbers behind Config::bufferMode.

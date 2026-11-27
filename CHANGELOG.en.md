@@ -6,6 +6,29 @@ The text under a version heading is the GitHub release description, which the
 app also shows in About → View changelog. So a section holds plain text and
 lists only, no headings or emphasis.
 
+## 1.4 — 27 November 2026
+
+Torrent-free online streaming via plugins (Lampa/Lampac/BWA and NX Online Plugin v1), a built-in on-screen keyboard, major Switch UI responsiveness improvements, plus finalized cloud sync (WebDAV and Google Drive) and universal Android / Android TV builds.
+
+Online Streaming & Plugins
+- Added torrent-free online streaming via server-side Lampa / Lampac / BWA plugins (e.g. `app.bwa.ad/online.js` or a self-hosted Lampac server) and the open NX Online Plugin v1 HTTP JSON format.
+- Added Options -> Online settings: add and verify plugins (with or without an access token), choose the default watch source (Torrents, Online, or Ask), and set preferred stream quality.
+- Added balancer, voice-over, and quality selection screen, live quality switching inside the player preserving playback position, remembered balancer/voice per series, ZL episode list with auto-next, external subtitles, and persistent `online://` references for Continue Watching.
+- Added a built-in local loopback HLS proxy supporting custom HTTP headers and AES-128-CBC segment decryption (via mbedTLS on Switch).
+
+Built-in Keyboard & Input Stability
+- Added a modal built-in on-screen keyboard (EN, RU, symbols, and numpad layouts) with an Options -> General -> Built-in keyboard toggle to replace the system keyboard when needed.
+- Hardened the Switch system keyboard (swkbd): GPU synchronization before display, background blur disabled, safe numeric input, and text length clamping; fixed navigation callbacks from dropdown pickers in Sources and Jackett.
+
+Switch Responsiveness & Performance
+- Pinned worker and async threads to Core 1 on Switch; replaced UI-thread poster cache filesystem checks with an in-memory directory index; added stale generation cancellation, GPU texture upload rate-limiting/pruning, and staggered Home row population.
+- Added adaptive idle FPS in menus (60 -> 20 FPS when idle, locked 60 FPS in the player), rendering pause when backgrounded/out of focus, GLsync fence pacing, cached video modes on dock/undock, removal of unused 60 Hz sensor polling, and removal of periodic 60s `dht_cache` SD writes — noticeably reducing UI and Capture screenshot latency.
+
+Cloud Sync, Android & Fixes
+- Finalized two-way cloud sync for watch history and bookmarks via WebDAV (Yandex Disk, Mail.ru Cloud, Nextcloud) and Google Drive (QR-code OAuth Device Flow using the `drive.file` scope and built-in default OAuth credentials).
+- Built universal Android APK (`arm64-v8a` + `armeabi-v7a`) for phones, tablets, and Android TV: TV mode detection, display cutout safe insets, background EGL pause, JNI cleanup, and Borealis focus/dialog safety fixes.
+- UI cleanup: removed broken folder emojis and unsafe checkmark glyphs in Bookmarks and Cards, and removed the obsolete List style setting.
+
 ## 1.3 — 25 November 2026
 
 Overhauled torrent search and Switch codec compatibility ranking (AV1 and Hi10P protection), playback freeze and artifact fixes, and double-tap seeking.

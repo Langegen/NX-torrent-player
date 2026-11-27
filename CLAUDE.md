@@ -173,6 +173,19 @@ The entry point is `int main()` in `app/main.cpp`.
   `getJson`) and treat non-2xx as a failure before caching anything.
 - `http::get`/`postJson` reuse one curl handle per thread (kept connections);
   `http::shutdown()` closes them in `main()` once every thread is joined.
+- **Cross-platform UI (`app/platform_ui.hpp`)**: Distinguish `isTv()` (Android TV
+  via `UiModeManager`/non-touch Leanback, or Desktop TV), `isPhone()`, `isTablet()`,
+  and `isMobile()` (touch phone/tablet only — never Android TV). Apply
+  `platform_ui::safeInsets()` to overlays/headers so notches/cutouts never
+  clip UI chrome.
+- **Safe clearing & focus (`ui::safeClearViews`)**: Never call `container->clearViews()`
+  while focus is inside `container`, and never mutate/clear child lists inside
+  `draw()`. Defer async list rebuilds via `brls::sync` gated on `ui::isOnTop(this)`,
+  and pass a fallback view to `ui::safeClearViews(container, fallback)`.
+- **Dropdown navigation callbacks**: In `brls::Dropdown`, any action that pushes a
+  new Activity, `Dialog`, or IME should run inside the 5th argument `dismissCb`
+  (passing `selected = -1`), because row click (`cb`) runs right before `Dropdown`
+  attempts to pop itself.
 
 ## Debugging on device
 

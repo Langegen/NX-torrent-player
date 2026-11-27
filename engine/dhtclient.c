@@ -499,6 +499,7 @@ static void dht_bg_main(void *arg) {
     u64 last_bootstrap = 0;
     u64 last_log = 0;
     time_t tosleep = 0;
+    bool saved_once = false;
 
     while (!s_bg_stop) {
         tsnx_engine_wd_tick(0);
@@ -669,6 +670,23 @@ static void dht_bg_main(void *arg) {
             }
         }
 
+        if (good >= 10 && !saved_once) {
+            // Persist known good nodes once after initial warmup; avoid rewriting
+            // dht_cache every 60s on SD while idle (dht_stop() also writes on exit).
+            saved_once = true;
+            struct sockaddr_in sins_p[DHT_CACHE_MAX_NODES];
+            int num_p = DHT_CACHE_MAX_NODES, num6_p = 0;
+            dht_get_nodes(sins_p, &num_p, NULL, &num6_p);
+            if (num_p > 0) {
+                uint8_t nodes_p[DHT_CACHE_MAX_NODES][6];
+                for (int i = 0; i < num_p; i++) {
+                    memcpy(nodes_p[i], &sins_p[i].sin_addr, 4);
+                    memcpy(nodes_p[i] + 4, &sins_p[i].sin_port, 2);
+                }
+                dht_cache_write(s_dht_cache_path, s_bg_node_id, nodes_p, num_p);
+            }
+        }
+
         if (now - last_log > (u64)2 * freq) {
             bool changed = (good != s_log_good || dubious != s_log_dubious ||
                             s_last_peers_found != s_log_peers);
@@ -682,24 +700,6 @@ static void dht_bg_main(void *arg) {
                 s_last_change_log = now;
             }
             last_log = now;
-
-            // Periodically persist known good nodes every 60s so a crash/shutdown
-            // does not lose warm DHT routing table.
-            static u64 last_cache_save = 0;
-            if (good >= 10 && (last_cache_save == 0 || now - last_cache_save > (u64)60 * freq)) {
-                last_cache_save = now;
-                struct sockaddr_in sins_p[DHT_CACHE_MAX_NODES];
-                int num_p = DHT_CACHE_MAX_NODES, num6_p = 0;
-                dht_get_nodes(sins_p, &num_p, NULL, &num6_p);
-                if (num_p > 0) {
-                    uint8_t nodes_p[DHT_CACHE_MAX_NODES][6];
-                    for (int i = 0; i < num_p; i++) {
-                        memcpy(nodes_p[i], &sins_p[i].sin_addr, 4);
-                        memcpy(nodes_p[i] + 4, &sins_p[i].sin_port, 2);
-                    }
-                    dht_cache_write(s_dht_cache_path, s_bg_node_id, nodes_p, num_p);
-                }
-            }
         }
     }
 

@@ -94,14 +94,17 @@ void FieldFrame::updateHeaderLayout()
 {
     if (!platform_ui::isMobile()) return;
     bool portrait = platform_ui::isPortrait();
+    float st, sr, sb, sl;
+    platform_ui::safeInsets(st, sr, sb, sl);
     if (auto* header = this->getHeader())
     {
+        float sidePad = portrait ? 12.0f : 16.0f;
         header->setMargins(0.0f, portrait ? 0.0f : 12.0f, 0.0f, portrait ? 0.0f : 12.0f);
-        header->setPadding(0.0f, portrait ? 12.0f : 16.0f, 0.0f, portrait ? 12.0f : 16.0f);
-        header->setHeight(portrait ? 72.0f : 78.0f);
+        header->setPadding(st, sidePad + sr, 0.0f, sidePad + sl);
+        header->setHeight((portrait ? 72.0f : 78.0f) + st);
     }
     if (auto* title = dynamic_cast<brls::Label*>(this->getView("brls/applet_frame/title_label")))
-        title->setFontSize(portrait ? 24.0f : 26.0f);
+        title->setFontSize(portrait ? 22.0f : 26.0f);
 }
 
 namespace
@@ -219,18 +222,21 @@ static void ensureExitSubscribed()
 static void pumpUploads()
 {
     s_uploadPumpScheduled = false;
+#ifdef __SWITCH__
+    constexpr int kMaxUploadsPerTick = 2;
+#else
     constexpr int kMaxUploadsPerTick = 4;
+#endif
     int processed = 0;
 
     while (!s_pendingUploads.empty() && processed < kMaxUploadsPerTick)
     {
         PendingTexture item = std::move(s_pendingUploads.front());
         s_pendingUploads.pop_front();
-        processed++;
 
         if (!item.rgba) continue;
 
-        if (!*item.alive)
+        if (!item.alive || !*item.alive)
         {
             stbi_image_free(item.rgba);
             continue;
@@ -242,6 +248,8 @@ static void pumpUploads()
             item.img->setImageFromFile(item.path);
             continue;
         }
+
+        processed++;
 
         if (item.img->getTexture() > 0 && !item.img->getFreeTexture())
             brls::TextureCache::instance().removeCache(item.img->getTexture());
@@ -266,6 +274,23 @@ static void pumpUploads()
 }
 } // namespace
 
+void prunePendingUploads()
+{
+    std::deque<PendingTexture> kept;
+    while (!s_pendingUploads.empty())
+    {
+        PendingTexture item = std::move(s_pendingUploads.front());
+        s_pendingUploads.pop_front();
+        if (!item.alive || !*item.alive)
+        {
+            if (item.rgba) stbi_image_free(item.rgba);
+            continue;
+        }
+        kept.push_back(std::move(item));
+    }
+    s_pendingUploads = std::move(kept);
+}
+
 void loadImageAsync(brls::Image* img, const std::string& path, std::shared_ptr<bool> alive)
 {
     if (!img || path.empty()) return;
@@ -274,10 +299,17 @@ void loadImageAsync(brls::Image* img, const std::string& path, std::shared_ptr<b
         img->setImageFromFile(path);  // a cache hit: no decoding
         return;
     }
+    uint64_t gen = workers::lowGeneration();
     workers::run(
-        [img, path, alive]() {
+        [img, path, alive, gen]() {
+            if (workers::lowGeneration() != gen) return;
             int w = 0, h = 0, n = 0;
             unsigned char* rgba = stbi_load(path.c_str(), &w, &h, &n, 4);
+            if (rgba && workers::lowGeneration() != gen)
+            {
+                stbi_image_free(rgba);
+                return;
+            }
             if (rgba && (w > 512 || h > 768))
             {
                 int scale = 1;
@@ -320,7 +352,7 @@ void loadImageAsync(brls::Image* img, const std::string& path, std::shared_ptr<b
                 if (!s_uploadPumpScheduled)
                 {
                     s_uploadPumpScheduled = true;
-                    pumpUploads();
+                    brls::delay(1, pumpUploads);
                 }
             });
         },
@@ -727,6 +759,21 @@ bool isOnTop(brls::View* v)
     if (!v) return false;
     auto stack = brls::Application::getActivitiesStack();
     return !stack.empty() && stack.back() == v->getParentActivity();
+}
+
+void safeClearViews(brls::Box* container, brls::View* fallbackFocus)
+{
+    if (!container) return;
+    for (brls::View* v = brls::Application::getCurrentFocus(); v; v = v->getParent())
+    {
+        if (v == container)
+        {
+            if (fallbackFocus && fallbackFocus->isFocusable())
+                brls::Application::giveFocus(fallbackFocus);
+            break;
+        }
+    }
+    container->clearViews();
 }
 
 } // namespace ui

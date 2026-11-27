@@ -177,4 +177,34 @@ class SeekRipple : public brls::Box
     std::chrono::steady_clock::time_point hideAt;
 };
 
+// Centred translucent pill shown during vertical swipe gestures on touch
+// screens (left half = brightness, right half = volume). Click-through.
+class GestureHud : public brls::Box
+{
+  public:
+    enum class Kind
+    {
+        None,
+        Brightness,
+        Volume,
+    };
+
+    GestureHud();
+
+    void show(Kind kind, float value01, const std::string& label, int holdMs = 900);
+    void hide();
+
+    brls::View* hitTest(brls::Point point) override { return nullptr; }
+    void draw(NVGcontext* vg, float x, float y, float width, float height,
+              brls::Style style, brls::FrameContext* ctx) override;
+
+  private:
+    bool active = false;
+    Kind kind   = Kind::None;
+    float value = 0.0f;
+    std::string text;
+    std::chrono::steady_clock::time_point showAt;
+    std::chrono::steady_clock::time_point hideAt;
+};
+
 } // namespace player_ui

@@ -199,6 +199,39 @@ Fixed a fatal Use-After-Free bug in `LRUCache::deleteCache()` where erasing a no
 
 Enabled viewport culling for `Box` children (grid rows, poster cards) when their bounding rect is completely above or below the parent's visible bounds and neither the child nor its subtree holds focus. Previously `Box::draw` skipped culling for any `Box*`, forcing full frame traversal and draw commands for hundreds of off-screen items. Marked `LOCAL PATCH`.
 
+### 16. `library/lib/core/application.{hpp,cpp}` + `sdl_platform.cpp` + `sdl_video.cpp` — thread-safe Android resize & background EGL guard
+
+- On `__ANDROID__`, `Application::onWindowResized()` marshals `setWindowSize()` and `windowSizeChangedEvent` via `brls::sync()` onto the main SDL thread instead of mutating Yoga/views from the Java UI thread.
+- Added atomic `Application::inBackground` toggled by `SDL_APP_WILLENTERBACKGROUND`/`SDL_APP_DIDENTERBACKGROUND` and `SDL_APP_WILLENTERFOREGROUND`/`SDL_APP_DIDENTERFOREGROUND`; `Application::frame()` returns early and `SDLPlatform::mainLoopIteration()` waits cleanly while backgrounded, and `SDLVideoContext::endFrame()` checks `SDL_GL_GetCurrentContext()`. Marked `LOCAL PATCH`.
+
+### 17. `library/lib/platforms/sdl/sdl_input.cpp` — mutex-protected input & controller/touch fixes
+
+Protected `keyboardKeys`, `mouseButtons`, and `controllers` with `s_inputMutex` between `sdlEventWatcher` (Java UI thread) and render-thread readers; added null-check for `SDL_GetTouchFinger` and `SDL_IsGameController` + `SDL_GameControllerOpen`; fixed `updateUnifiedControllerState` passing `SDL_JoystickID` as a vector index; fixed `SDL_CONTROLLERDEVICEREMOVED` to match and close `event->cdevice.which` directly. Marked `LOCAL PATCH`.
+
+### 18. `library/lib/views/dropdown.cpp` + `dialog.cpp` — value-copy callbacks before dismiss
+
+`Dropdown::didSelectRowAt()` copies `dismissCb` and `index.row` before `popActivity` and pops only if its activity is still on top; `Dialog::buttonClick()` copies `button->cb` before `dismiss()`. Prevents Use-After-Free if callbacks push new screens or free the dialog. Marked `LOCAL PATCH`.
+
+### 19. `library/lib/platforms/android/android_platform.cpp` — JNI null/exception/ref guards
+
+Guarded all `SDL_AndroidGetJNIEnv()` calls with `env != nullptr`, `ExceptionCheck()`/`ExceptionClear()`, and `DeleteLocalRef` cleanup on every exit path.
+
+### 20. `library/lib/core/application.{hpp,cpp}` + `thread.{hpp,cpp}` — IME override, background pause, Switch idle FPS, and Core 1 async pinning
+
+- Added `Application::setImeOverride(ImeManager*)` / checked `imeOverride` in `getImeManager()` so the app can switch at runtime between the platform keyboard and the built-in OSK.
+- Enabled `hasActiveEvent()` / `setActiveEvent()` on `__SWITCH__`, added adaptive idle frame pacing in `internalMainLoop()`, and paused UI input/rendering when `inBackground` is true (`AppletFocusState_OutOfFocus` / `Background`).
+- Pinned `Threading::task_loop` (`brls::async`) to Core 1 at priority `0x34` on Switch when permitted by `InfoType_CoreMask`, and made `Threading::performSyncTasks()` return whether any task ran. Marked `LOCAL PATCH`.
+
+### 21. `library/lib/platforms/switch/switch_ime.cpp` — `swkbd` 4IFIR/Mesa hardening
+
+Zero-initializes `SwkbdConfig`, clamps `maxStringLength` to the HOS `500` limit, skips `swkbdConfigSetHeaderText` above 32 chars, disables `BlurBackground` (avoids live OpenGL framebuffer snapshot), flushes GL with `glFinish()` before `swkbdShow()`, and fixes `openForNumber()` accordingly. Marked `LOCAL PATCH`.
+
+### 22. `library/lib/platforms/switch/{switch_platform,switch_input}.cpp` + `glfw_video.{hpp,cpp}` — Switch Capture responsiveness
+
+- `SwitchPlatform` (`on_applet_hook`) now toggles `Application::setInBackground` on focus loss/gain.
+- `SwitchInputManager` updates pads once per frame in `runloopStart()` instead of 3x, and skips unused 60 Hz six-axis sensor polling.
+- `GLFWVideoContext` caches `glfwGetVideoMode` across `appletGetOperationMode()` and paces OpenGL submissions on Switch with a `GLsync` frame fence. Marked `LOCAL PATCH`.
+
 ## Updating
 
 Re-cloning upstream **drops the patch** — re-apply it, and check this file's

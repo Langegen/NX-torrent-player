@@ -2,6 +2,7 @@
 
 #include <borealis.hpp>
 
+#include <atomic>
 #include <condition_variable>
 #include <deque>
 #include <exception>
@@ -10,6 +11,11 @@
 #include <vector>
 
 #include "http.hpp"
+#ifdef __SWITCH__
+extern "C" {
+#include "thread_cfg.h"
+}
+#endif
 
 namespace workers
 {
@@ -23,6 +29,7 @@ std::deque<std::function<void()>> high, low;
 std::vector<std::thread*> threads;  // kept to be joined: never detached
 bool started  = false;
 bool stopping = false;
+std::atomic<uint64_t> s_lowGen{ 1 };
 
 void runGuarded(const std::function<void()>& task)
 {
@@ -43,6 +50,9 @@ void runGuarded(const std::function<void()>& task)
 
 void loop()
 {
+#ifdef __SWITCH__
+    tsnx_thread_pin_self(TSNX_CORE_WORK, TSNX_PRIO_IMAGE);
+#endif
     for (;;)
     {
         std::function<void()> task;
@@ -94,6 +104,16 @@ void run(std::function<void()> task, Priority p)
     else
         // No thread of our own: borealis' single task thread still works.
         brls::async([task]() { runGuarded(task); });
+}
+
+uint64_t lowGeneration()
+{
+    return s_lowGen.load(std::memory_order_acquire);
+}
+
+void bumpLowGeneration()
+{
+    s_lowGen.fetch_add(1, std::memory_order_acq_rel);
 }
 
 void stop()
