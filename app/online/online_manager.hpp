@@ -88,7 +88,9 @@ void playOnlineEntry(const content::Item& item,
                      int nextPop,
                      const std::string& preferredQualityUrl = "",
                      const std::string& preferredQualityLabel = "",
-                     bool promptResume = true);
+                     bool promptResume = true,
+                     std::shared_ptr<bool> aliveGuard = nullptr,
+                     std::function<void()> onDone = nullptr);
 
 // Resumes or auto-plays `(season, episode)` using a remembered `OnlineRef`
 // (fetches fresh stream URL from the same plugin/balancer/voice). Falls back

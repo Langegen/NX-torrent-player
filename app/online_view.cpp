@@ -77,8 +77,13 @@ class OnlineView : public brls::Box
         controls->setAxis(brls::Axis::ROW);
         if (mobile) controls->setPadding(4.0f, inset, 4.0f, inset);
 
-        backLevelBtn = ui::actionButton(tr("Back"), false, [this]() { popNav(); });
+        backLevelBtn = ui::actionButton(tr("Back"), false, [this, live = alive]() {
+            brls::sync([this, live]() {
+                if (*live) popNav();
+            });
+        });
         backLevelBtn->setVisibility(brls::Visibility::GONE);
+        backLevelBtn->setFocusable(false);
         controls->addView(backLevelBtn);
 
         voiceBtn = ui::actionButton(tr("Voice-over"), false, [this]() { pickVoice(); });
@@ -91,6 +96,7 @@ class OnlineView : public brls::Box
 
             episodeBtn = ui::actionButton(tr("Episode"), false, [this]() { pickEpisode(); });
             episodeBtn->setVisibility(brls::Visibility::GONE);
+            episodeBtn->setFocusable(false);
             controls->addView(episodeBtn);
         }
 
@@ -137,9 +143,11 @@ class OnlineView : public brls::Box
 
     std::vector<online::BalancerInfo> balancers;
     std::vector<brls::Button*> balancerBtns;
-    int activeBalancer = -1;
-    int fetchGen       = 0;
-    bool loadingPage   = false;
+    int activeBalancer   = -1;
+    int fetchGen         = 0;
+    bool loadingPage     = false;
+    bool autoVoiceTried  = false;
+    bool resolvingCall   = false;
     online::PageResult currentPage;
     std::vector<std::string> navStack;  // override URLs for Link drilldown
     std::string voiceFilter;            // client-side voice filter when page has voices
@@ -224,9 +232,15 @@ class OnlineView : public brls::Box
             s += "  \xC2\xB7  " + balancers[(size_t)activeBalancer].name;
         subtitle->setText(s);
 
-        if (backLevelBtn)
-            backLevelBtn->setVisibility(navStack.empty() ? brls::Visibility::GONE
-                                                         : brls::Visibility::VISIBLE);
+        auto setBtnVisible = [this](brls::Button* btn, bool show) {
+            if (!btn) return;
+            if (!show && brls::Application::getCurrentFocus() == btn && voiceBtn)
+                brls::Application::giveFocus(voiceBtn);
+            btn->setVisibility(show ? brls::Visibility::VISIBLE : brls::Visibility::GONE);
+            btn->setFocusable(show);
+        };
+
+        setBtnVisible(backLevelBtn, !navStack.empty());
 
         std::string activeVoiceLabel;
         for (const auto& v : currentPage.voices)
@@ -244,7 +258,7 @@ class OnlineView : public brls::Box
         if (episodeBtn)
         {
             bool showEp = item.isSeries() && currentPage.perEpisodeMode;
-            episodeBtn->setVisibility(showEp ? brls::Visibility::VISIBLE : brls::Visibility::GONE);
+            setBtnVisible(episodeBtn, showEp);
             episodeBtn->setText(tr("Episode ") + std::to_string(selectedEpisode));
             ui::setPillActive(episodeBtn, showEp);
         }
@@ -300,7 +314,9 @@ class OnlineView : public brls::Box
         {
             auto* b = ui::actionButton(balancers[(size_t)i].name, false,
                                        [this, live, i]() {
-                                           if (*live) selectBalancer(i);
+                                           brls::sync([this, live, i]() {
+                                               if (*live) selectBalancer(i);
+                                           });
                                        });
             balancerBtns.push_back(b);
             balancersBox->addView(b);
@@ -319,6 +335,8 @@ class OnlineView : public brls::Box
         activeBalancer = idx;
         navStack.clear();
         voiceFilter.clear();
+        autoVoiceTried = false;
+        resolvingCall  = false;
         restyleBalancerPills();
         fetchCurrent("");
     }
@@ -344,7 +362,10 @@ class OnlineView : public brls::Box
         loadingPage = true;
         currentPage = online::PageResult();
         updateHeaderAndControls();
-        ui::safeClearViews(list, voiceBtn);
+        if (isOnTop())
+            ui::safeClearViews(list, voiceBtn);
+        else
+            dirty = true;
         status->setText(tr("Loading..."));
         status->setVisibility(brls::Visibility::VISIBLE);
 
@@ -372,8 +393,8 @@ class OnlineView : public brls::Box
                     }
                 }
 
-                // Auto-apply remembered voice if available
-                if (hasRemembered && !remembered.voiceName.empty() &&
+                // Auto-apply remembered voice if available (at most once per balancer).
+                if (!autoVoiceTried && hasRemembered && !remembered.voiceName.empty() &&
                     activeBalancer >= 0 &&
                     balancers[(size_t)activeBalancer].id == remembered.balancerId)
                 {
@@ -385,6 +406,7 @@ class OnlineView : public brls::Box
                                 lowerStr(v.name) == lowerStr(remembered.voiceName) &&
                                 overrideUrl != v.url)
                             {
+                                autoVoiceTried = true;
                                 fetchCurrent(v.url);
                                 return;
                             }
@@ -423,20 +445,22 @@ class OnlineView : public brls::Box
             urls.push_back(v.url);
         }
         auto live = alive;
-        auto* dd = new brls::Dropdown(tr("Voice-over"), labels, [this, live, labels, urls](int i) {
-            if (!*live || i < 0 || i >= (int)labels.size()) return;
-            if (currentPage.perEpisodeMode)
-            {
-                voiceFilter = (i == 0) ? "" : labels[(size_t)i];
-                updateHeaderAndControls();
-                refreshList();
-            }
-            else if (!urls[(size_t)i].empty())
-            {
-                navStack.clear();
-                fetchCurrent(urls[(size_t)i]);
-            }
-        }, sel);
+        auto* dd = new brls::Dropdown(
+            tr("Voice-over"), labels, [](int) {}, sel,
+            [this, live, labels, urls](int i) {
+                if (!*live || i < 0 || i >= (int)labels.size()) return;
+                if (currentPage.perEpisodeMode)
+                {
+                    voiceFilter = (i == 0) ? "" : labels[(size_t)i];
+                    updateHeaderAndControls();
+                    refreshList();
+                }
+                else if (!urls[(size_t)i].empty())
+                {
+                    navStack.clear();
+                    fetchCurrent(urls[(size_t)i]);
+                }
+            });
         brls::Application::pushActivity(new brls::Activity(dd));
     }
 
@@ -467,16 +491,18 @@ class OnlineView : public brls::Box
             labels.push_back(l);
         }
         auto live = alive;
-        auto* dd = new brls::Dropdown(tr("Season"), labels, [this, live, opts](int i) {
-            if (!*live || i < 0 || i >= (int)opts.size()) return;
-            selectedSeason  = opts[(size_t)i].number;
-            selectedEpisode = 1;
-            navStack.clear();
-            if (!opts[(size_t)i].url.empty())
-                pushNav(opts[(size_t)i].url);
-            else
-                fetchCurrent("");
-        }, sel);
+        auto* dd = new brls::Dropdown(
+            tr("Season"), labels, [](int) {}, sel,
+            [this, live, opts](int i) {
+                if (!*live || i < 0 || i >= (int)opts.size()) return;
+                selectedSeason  = opts[(size_t)i].number;
+                selectedEpisode = 1;
+                navStack.clear();
+                if (!opts[(size_t)i].url.empty())
+                    pushNav(opts[(size_t)i].url);
+                else
+                    fetchCurrent("");
+            });
         brls::Application::pushActivity(new brls::Activity(dd));
     }
 
@@ -491,11 +517,13 @@ class OnlineView : public brls::Box
             labels.push_back(tr("Episode ") + std::to_string(e));
         }
         auto live = alive;
-        auto* dd = new brls::Dropdown(tr("Episode"), labels, [this, live](int i) {
-            if (!*live || i < 0) return;
-            selectedEpisode = i + 1;
-            fetchCurrent("");
-        }, sel);
+        auto* dd = new brls::Dropdown(
+            tr("Episode"), labels, [](int) {}, sel,
+            [this, live](int i) {
+                if (!*live || i < 0) return;
+                selectedEpisode = i + 1;
+                fetchCurrent("");
+            });
         brls::Application::pushActivity(new brls::Activity(dd));
     }
 
@@ -507,13 +535,15 @@ class OnlineView : public brls::Box
         for (int i = 0; i < 5; i++)
             if (kVals[i] == preferQuality) sel = i;
         auto live = alive;
-        auto* dd = new brls::Dropdown(tr("Quality"), labels, [this, live](int i) {
-            if (!*live || i < 0 || i >= 5) return;
-            preferQuality = kVals[i];
-            config::get().onlinePreferQuality = preferQuality;
-            config::save();
-            updateHeaderAndControls();
-        }, sel);
+        auto* dd = new brls::Dropdown(
+            tr("Quality"), labels, [](int) {}, sel,
+            [this, live](int i) {
+                if (!*live || i < 0 || i >= 5) return;
+                preferQuality = kVals[i];
+                config::get().onlinePreferQuality = preferQuality;
+                config::save();
+                updateHeaderAndControls();
+            });
         brls::Application::pushActivity(new brls::Activity(dd));
     }
 
@@ -717,7 +747,13 @@ class OnlineView : public brls::Box
     {
         if (e.method == online::OnlineMethod::Link)
         {
-            pushNav(e.url);
+            // Defer navigation until Application::handleAction finishes reading
+            // this row's actions vector and playing its click animation.
+            std::string nextUrl = e.url;
+            auto live = alive;
+            brls::sync([this, live, nextUrl]() {
+                if (*live) pushNav(nextUrl);
+            });
             return;
         }
         if (activeBalancer < 0 || activeBalancer >= (int)balancers.size()) return;
@@ -775,8 +811,17 @@ class OnlineView : public brls::Box
             }
         }
 
+        if (playItem.method == online::OnlineMethod::Call)
+        {
+            if (resolvingCall) return;
+            resolvingCall = true;
+        }
+        auto live = alive;
         online::playOnlineEntry(item, ref, playItem, seasonEps, epIdx, 2,
-                                overrideQUrl, overrideQLabel, true);
+                                overrideQUrl, overrideQLabel, true,
+                                live, [this, live]() {
+                                    if (*live) resolvingCall = false;
+                                });
     }
 };
 

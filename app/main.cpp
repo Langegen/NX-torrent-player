@@ -78,6 +78,7 @@
 
 extern "C" {
 #include "httpsrc.h"
+#include "hlssrc.h"
 #include "hls_proxy.h"
 #include "torrent.h"
 #include "torrentfs.h"
@@ -2260,17 +2261,20 @@ int main(int argc, char* argv[])
     // https:// playback verifies against the same bundle as the app's own
     // requests (app/http.cpp): the console mounts no CA store.
     httpsrc_set_ca("romfs:/cacert.pem");
+    hlssrc_set_ca("romfs:/cacert.pem");
     hls_proxy_set_ca("romfs:/cacert.pem");
 #elif defined(__ANDROID__) || defined(ANDROID)
     if (access(APPDATA_DIR "/cacert.pem", F_OK) == 0)
     {
         httpsrc_set_ca(APPDATA_DIR "/cacert.pem");
+        hlssrc_set_ca(APPDATA_DIR "/cacert.pem");
         hls_proxy_set_ca(APPDATA_DIR "/cacert.pem");
     }
 #else
     if (access("resources/cacert.pem", F_OK) == 0)
     {
         httpsrc_set_ca("resources/cacert.pem");
+        hlssrc_set_ca("resources/cacert.pem");
         hls_proxy_set_ca("resources/cacert.pem");
     }
 #endif
@@ -2455,6 +2459,7 @@ int main(int argc, char* argv[])
     // dropped save is not lost.
     brls::Application::getExitEvent()->subscribe([]() {
         http::abortAll();
+        hls_proxy_abort_all();
         torrent_meta_abort_all();  // magnet fetches on the worker pool
     });
     brls::Application::getExitDoneEvent()->subscribe([]() { library::flush(); });

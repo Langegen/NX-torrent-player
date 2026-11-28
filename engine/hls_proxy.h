@@ -35,6 +35,9 @@ int hls_proxy_make_url(const hls_proxy *p, const char *target_url,
 // BEFORE mpv_terminate_destroy() so mpv doesn't block waiting on a slow socket.
 void hls_proxy_abort(hls_proxy *p);
 
+// Flags every currently running hls_proxy instance to abort (e.g. app exit).
+void hls_proxy_abort_all(void);
+
 // Aborts, shuts down the listening socket, joins worker threads, and frees `p`.
 void hls_proxy_stop(hls_proxy *p);
 

@@ -558,6 +558,7 @@ GLFWVideoContext::~GLFWVideoContext()
         glDeleteSync((GLsync)this->frameFence);
         this->frameFence = nullptr;
     }
+    glFinish();
 #endif
     glfwDestroyWindow(this->window);
     glfwTerminate();

@@ -17,6 +17,7 @@ typedef SOCKET hp_sock_t;
 #else
 #include <arpa/inet.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <netinet/in.h>
 #include <poll.h>
 #include <sys/socket.h>
@@ -216,6 +217,7 @@ struct hls_proxy {
     pthread_mutex_t q_lock;
     pthread_cond_t q_cond;
     hp_sock_t queue[HP_QUEUE_CAP];
+    hp_sock_t active_clients[HP_NUM_WORKERS];
     int q_head;
     int q_tail;
     int q_count;
@@ -224,6 +226,30 @@ struct hls_proxy {
     aes_key_entry keys[HP_MAX_KEYS];
     int key_count;
 };
+
+#define HP_MAX_INSTANCES 8
+static pthread_mutex_t g_inst_lock = PTHREAD_MUTEX_INITIALIZER;
+static hls_proxy *g_instances[HP_MAX_INSTANCES];
+
+static void hp_sock_set_nonblock(hp_sock_t s) {
+#ifdef _WIN32
+    u_long nb = 1;
+    ioctlsocket(s, FIONBIO, &nb);
+#else
+    int fl = fcntl(s, F_GETFL, 0);
+    if (fl >= 0) fcntl(s, F_SETFL, fl | O_NONBLOCK);
+#endif
+}
+
+static void hp_sock_set_blocking(hp_sock_t s) {
+#ifdef _WIN32
+    u_long nb = 0;
+    ioctlsocket(s, FIONBIO, &nb);
+#else
+    int fl = fcntl(s, F_GETFL, 0);
+    if (fl >= 0) fcntl(s, F_SETFL, fl & ~O_NONBLOCK);
+#endif
+}
 
 static bool is_local_url(const char *url) {
     const char *p = strstr(url, "://");
@@ -537,6 +563,7 @@ static void setup_curl(hls_proxy *proxy, CURL *c, const char *url, const char *r
     curl_easy_setopt(c, CURLOPT_SSL_VERIFYHOST, 2L);
     if (g_ca[0]) curl_easy_setopt(c, CURLOPT_CAINFO, g_ca);
     if (g_proxy[0] && !is_local_url(url)) curl_easy_setopt(c, CURLOPT_PROXY, g_proxy);
+    if (url_ends_m3u8(url)) curl_easy_setopt(c, CURLOPT_ACCEPT_ENCODING, "");
     if (range_hdr && range_hdr[0]) {
         // Strip "Range: " prefix if caller passed raw value; CURLOPT_RANGE takes "a-b"
         if (hp_strcasecmp_n(range_hdr, "bytes=", 6) == 0)
@@ -880,58 +907,106 @@ static bool query_param(const char *query, const char *key, char *out, size_t ca
     return false;
 }
 
-static void handle_client(hls_proxy *proxy, hp_sock_t client) {
+typedef struct {
+    char req[8192];
+    char method[16];
+    char path[4096];
+    char u_b64[4096];
+    char target_url[4096];
+    char eff_copy[4096];
+} hp_req_buf;
+
+static void handle_client(hls_proxy *proxy, hp_sock_t client, int worker_slot) {
     hp_sock_set_timeout(client, 30);
 
-    char req[8192];
+    hp_req_buf *rb = (hp_req_buf *)calloc(1, sizeof(*rb));
+    if (!rb) {
+        send_error_resp(client, 500, "Out Of Memory");
+        if (worker_slot >= 0) {
+            pthread_mutex_lock(&proxy->q_lock);
+            proxy->active_clients[worker_slot] = HP_BAD_SOCK;
+            pthread_mutex_unlock(&proxy->q_lock);
+        }
+        hp_sock_close(client);
+        return;
+    }
+
     size_t rlen = 0;
-    while (rlen < sizeof(req) - 1) {
+    while (rlen < sizeof(rb->req) - 1) {
 #ifdef _WIN32
-        int r = recv(client, req + rlen, (int)(sizeof(req) - 1 - rlen), 0);
+        int r = recv(client, rb->req + rlen, (int)(sizeof(rb->req) - 1 - rlen), 0);
 #else
-        ssize_t r = recv(client, req + rlen, sizeof(req) - 1 - rlen, 0);
+        ssize_t r = recv(client, rb->req + rlen, sizeof(rb->req) - 1 - rlen, 0);
 #endif
         if (r <= 0) break;
         rlen += (size_t)r;
-        req[rlen] = 0;
-        if (strstr(req, "\r\n\r\n")) break;
+        rb->req[rlen] = 0;
+        if (strstr(rb->req, "\r\n\r\n")) break;
     }
     if (rlen == 0) {
+        free(rb);
+        if (worker_slot >= 0) {
+            pthread_mutex_lock(&proxy->q_lock);
+            proxy->active_clients[worker_slot] = HP_BAD_SOCK;
+            pthread_mutex_unlock(&proxy->q_lock);
+        }
         hp_sock_close(client);
         return;
     }
 
-    char method[16] = {0}, path[4096] = {0};
-    if (sscanf(req, "%15s %4095s", method, path) != 2) {
+    if (sscanf(rb->req, "%15s %4095s", rb->method, rb->path) != 2) {
         send_error_resp(client, 400, "Bad Request");
+        free(rb);
+        if (worker_slot >= 0) {
+            pthread_mutex_lock(&proxy->q_lock);
+            proxy->active_clients[worker_slot] = HP_BAD_SOCK;
+            pthread_mutex_unlock(&proxy->q_lock);
+        }
         hp_sock_close(client);
         return;
     }
-    bool is_head = (strcmp(method, "HEAD") == 0);
-    if (!is_head && strcmp(method, "GET") != 0) {
+    bool is_head = (strcmp(rb->method, "HEAD") == 0);
+    if (!is_head && strcmp(rb->method, "GET") != 0) {
         send_error_resp(client, 405, "Method Not Allowed");
+        free(rb);
+        if (worker_slot >= 0) {
+            pthread_mutex_lock(&proxy->q_lock);
+            proxy->active_clients[worker_slot] = HP_BAD_SOCK;
+            pthread_mutex_unlock(&proxy->q_lock);
+        }
         hp_sock_close(client);
         return;
     }
 
-    const char *q = strchr(path, '?');
-    if (!q || strncmp(path, "/p?", 3) != 0) {
+    const char *q = strchr(rb->path, '?');
+    if (!q || strncmp(rb->path, "/p?", 3) != 0) {
         send_error_resp(client, 404, "Not Found");
+        free(rb);
+        if (worker_slot >= 0) {
+            pthread_mutex_lock(&proxy->q_lock);
+            proxy->active_clients[worker_slot] = HP_BAD_SOCK;
+            pthread_mutex_unlock(&proxy->q_lock);
+        }
         hp_sock_close(client);
         return;
     }
 
-    char u_b64[4096] = {0}, target_url[4096] = {0};
-    if (!query_param(q + 1, "u", u_b64, sizeof(u_b64)) ||
-        b64url_decode(u_b64, strlen(u_b64), target_url, sizeof(target_url)) <= 0) {
+    if (!query_param(q + 1, "u", rb->u_b64, sizeof(rb->u_b64)) ||
+        b64url_decode(rb->u_b64, strlen(rb->u_b64), rb->target_url, sizeof(rb->target_url)) <= 0) {
         send_error_resp(client, 400, "Invalid Target");
+        free(rb);
+        if (worker_slot >= 0) {
+            pthread_mutex_lock(&proxy->q_lock);
+            proxy->active_clients[worker_slot] = HP_BAD_SOCK;
+            pthread_mutex_unlock(&proxy->q_lock);
+        }
         hp_sock_close(client);
         return;
     }
 
     char range_val[128] = {0};
-    const char *hdr_end = strstr(req, "\r\n\r\n");
-    const char *line = strstr(req, "\r\n");
+    const char *hdr_end = strstr(rb->req, "\r\n\r\n");
+    const char *line = strstr(rb->req, "\r\n");
     while (line && (!hdr_end || line < hdr_end)) {
         line += 2;
         if (hp_strcasecmp_n(line, "range:", 6) == 0) {
@@ -946,6 +1021,9 @@ static void handle_client(hls_proxy *proxy, hp_sock_t client) {
         }
         line = strstr(line, "\r\n");
     }
+
+    bool url_m3u8 = url_ends_m3u8(rb->target_url);
+    if (url_m3u8) range_val[0] = 0;
 
     bool is_aes = false;
 #ifdef HLS_PROXY_ENABLE_AES
@@ -965,6 +1043,12 @@ static void handle_client(hls_proxy *proxy, hp_sock_t client) {
     CURL *curl = curl_easy_init();
     if (!curl) {
         send_error_resp(client, 500, "Internal Error");
+        free(rb);
+        if (worker_slot >= 0) {
+            pthread_mutex_lock(&proxy->q_lock);
+            proxy->active_clients[worker_slot] = HP_BAD_SOCK;
+            pthread_mutex_unlock(&proxy->q_lock);
+        }
         hp_sock_close(client);
         return;
     }
@@ -975,11 +1059,11 @@ static void handle_client(hls_proxy *proxy, hp_sock_t client) {
     x.client = client;
     x.curl = curl;
     x.is_head = is_head;
-    x.url_m3u8 = url_ends_m3u8(target_url);
+    x.url_m3u8 = url_m3u8;
     x.is_aes = is_aes;
     x.content_length = -1;
 
-    setup_curl(proxy, curl, target_url, range_val);
+    setup_curl(proxy, curl, rb->target_url, range_val);
     if (is_head) curl_easy_setopt(curl, CURLOPT_NOBODY, 1L);
     struct curl_slist *hdrs = build_curl_headers(proxy);
     if (hdrs) curl_easy_setopt(curl, CURLOPT_HTTPHEADER, hdrs);
@@ -994,14 +1078,19 @@ static void handle_client(hls_proxy *proxy, hp_sock_t client) {
     CURLcode rc = curl_easy_perform(curl);
     char *eff = NULL;
     curl_easy_getinfo(curl, CURLINFO_EFFECTIVE_URL, &eff);
-    char eff_copy[4096];
-    snprintf(eff_copy, sizeof(eff_copy), "%s", eff ? eff : target_url);
+    snprintf(rb->eff_copy, sizeof(rb->eff_copy), "%s", eff ? eff : rb->target_url);
 
     if (hdrs) curl_slist_free_all(hdrs);
     curl_easy_cleanup(curl);
 
-    if (proxy->stop || x.send_failed) {
+    if (__atomic_load_n(&proxy->stop, __ATOMIC_ACQUIRE) || x.send_failed) {
         free(x.buf);
+        free(rb);
+        if (worker_slot >= 0) {
+            pthread_mutex_lock(&proxy->q_lock);
+            proxy->active_clients[worker_slot] = HP_BAD_SOCK;
+            pthread_mutex_unlock(&proxy->q_lock);
+        }
         hp_sock_close(client);
         return;
     }
@@ -1009,6 +1098,12 @@ static void handle_client(hls_proxy *proxy, hp_sock_t client) {
     if (rc != CURLE_OK) {
         if (!x.headers_sent) send_error_resp(client, 502, "Bad Gateway");
         free(x.buf);
+        free(rb);
+        if (worker_slot >= 0) {
+            pthread_mutex_lock(&proxy->q_lock);
+            proxy->active_clients[worker_slot] = HP_BAD_SOCK;
+            pthread_mutex_unlock(&proxy->q_lock);
+        }
         hp_sock_close(client);
         return;
     }
@@ -1016,6 +1111,12 @@ static void handle_client(hls_proxy *proxy, hp_sock_t client) {
     if (is_head) {
         send_stream_headers(&x);
         free(x.buf);
+        free(rb);
+        if (worker_slot >= 0) {
+            pthread_mutex_lock(&proxy->q_lock);
+            proxy->active_clients[worker_slot] = HP_BAD_SOCK;
+            pthread_mutex_unlock(&proxy->q_lock);
+        }
         hp_sock_close(client);
         return;
     }
@@ -1034,7 +1135,7 @@ static void handle_client(hls_proxy *proxy, hp_sock_t client) {
 
     if (x.mode == MODE_BUFFER_M3U8 && x.buf) {
         size_t out_len = 0;
-        char *rewritten = rewrite_m3u8(proxy, eff_copy, x.buf, x.buf_len, &out_len);
+        char *rewritten = rewrite_m3u8(proxy, rb->eff_copy, x.buf, x.buf_len, &out_len);
         if (!rewritten) {
             send_error_resp(client, 500, "Playlist Rewrite Failed");
         } else {
@@ -1093,6 +1194,12 @@ static void handle_client(hls_proxy *proxy, hp_sock_t client) {
 #endif
 
     free(x.buf);
+    free(rb);
+    if (worker_slot >= 0) {
+        pthread_mutex_lock(&proxy->q_lock);
+        proxy->active_clients[worker_slot] = HP_BAD_SOCK;
+        pthread_mutex_unlock(&proxy->q_lock);
+    }
     hp_sock_close(client);
 }
 
@@ -1105,22 +1212,32 @@ static void *worker_main(void *arg) {
     hls_proxy *proxy = (hls_proxy *)arg;
     for (;;) {
         pthread_mutex_lock(&proxy->q_lock);
-        while (proxy->q_count == 0 && !proxy->stop)
+        while (proxy->q_count == 0 && !__atomic_load_n(&proxy->stop, __ATOMIC_ACQUIRE))
             pthread_cond_wait(&proxy->q_cond, &proxy->q_lock);
-        if (proxy->stop && proxy->q_count == 0) {
+        if (__atomic_load_n(&proxy->stop, __ATOMIC_ACQUIRE) && proxy->q_count == 0) {
             pthread_mutex_unlock(&proxy->q_lock);
             break;
         }
         hp_sock_t client = proxy->queue[proxy->q_head];
         proxy->q_head = (proxy->q_head + 1) % HP_QUEUE_CAP;
         proxy->q_count--;
-        pthread_mutex_unlock(&proxy->q_lock);
 
-        if (proxy->stop) {
+        if (__atomic_load_n(&proxy->stop, __ATOMIC_ACQUIRE)) {
+            pthread_mutex_unlock(&proxy->q_lock);
             hp_sock_close(client);
             continue;
         }
-        handle_client(proxy, client);
+        int slot = -1;
+        for (int i = 0; i < HP_NUM_WORKERS; i++) {
+            if (proxy->active_clients[i] == HP_BAD_SOCK) {
+                proxy->active_clients[i] = client;
+                slot = i;
+                break;
+            }
+        }
+        pthread_mutex_unlock(&proxy->q_lock);
+
+        handle_client(proxy, client, slot);
     }
     return NULL;
 }
@@ -1137,24 +1254,32 @@ static void *accept_main(void *arg) {
         int pr = poll(&pfd, 1, 200);
 #endif
         if (__atomic_load_n(&proxy->stop, __ATOMIC_ACQUIRE)) break;
-        if (pr <= 0 || !(pfd.revents & (POLLIN | POLLERR | POLLHUP))) continue;
-        hp_sock_t c = accept(proxy->listen_fd, NULL, NULL);
-        if (c == HP_BAD_SOCK) {
+        if (pr <= 0) continue;
+        if (pfd.revents & (POLLERR | POLLHUP | POLLNVAL)) break;
+        if (!(pfd.revents & POLLIN)) continue;
+
+        for (;;) {
             if (__atomic_load_n(&proxy->stop, __ATOMIC_ACQUIRE)) break;
-            continue;
-        }
-        pthread_mutex_lock(&proxy->q_lock);
-        if (__atomic_load_n(&proxy->stop, __ATOMIC_ACQUIRE) ||
-            proxy->q_count >= HP_QUEUE_CAP) {
+            hp_sock_t c = accept(proxy->listen_fd, NULL, NULL);
+            if (c == HP_BAD_SOCK) break;
+            hp_sock_set_blocking(c);
+            pthread_mutex_lock(&proxy->q_lock);
+            if (__atomic_load_n(&proxy->stop, __ATOMIC_ACQUIRE) ||
+                proxy->q_count >= HP_QUEUE_CAP) {
+                pthread_mutex_unlock(&proxy->q_lock);
+                hp_sock_close(c);
+                continue;
+            }
+            proxy->queue[proxy->q_tail] = c;
+            proxy->q_tail = (proxy->q_tail + 1) % HP_QUEUE_CAP;
+            proxy->q_count++;
+            pthread_cond_signal(&proxy->q_cond);
             pthread_mutex_unlock(&proxy->q_lock);
-            hp_sock_close(c);
-            continue;
         }
-        proxy->queue[proxy->q_tail] = c;
-        proxy->q_tail = (proxy->q_tail + 1) % HP_QUEUE_CAP;
-        proxy->q_count++;
-        pthread_cond_signal(&proxy->q_cond);
-        pthread_mutex_unlock(&proxy->q_lock);
+    }
+    if (proxy->listen_fd != HP_BAD_SOCK) {
+        hp_sock_close(proxy->listen_fd);
+        proxy->listen_fd = HP_BAD_SOCK;
     }
     return NULL;
 }
@@ -1172,6 +1297,7 @@ hls_proxy *hls_proxy_start(const char *const *headers, int header_count,
         return NULL;
     }
     p->listen_fd = HP_BAD_SOCK;
+    for (int i = 0; i < HP_NUM_WORKERS; i++) p->active_clients[i] = HP_BAD_SOCK;
     pthread_mutex_init(&p->q_lock, NULL);
     pthread_cond_init(&p->q_cond, NULL);
     pthread_mutex_init(&p->key_lock, NULL);
@@ -1212,8 +1338,15 @@ hls_proxy *hls_proxy_start(const char *const *headers, int header_count,
         hls_proxy_stop(p);
         return NULL;
     }
+    hp_sock_set_nonblock(fd);
     p->listen_fd = fd;
     p->port = ntohs(sa.sin_port);
+
+    pthread_mutex_lock(&g_inst_lock);
+    for (int i = 0; i < HP_MAX_INSTANCES; i++) {
+        if (!g_instances[i]) { g_instances[i] = p; break; }
+    }
+    pthread_mutex_unlock(&g_inst_lock);
 
     for (int i = 0; i < HP_NUM_WORKERS; i++) {
         if (pthread_create(&p->workers[i], NULL, worker_main, p) != 0) {
@@ -1250,19 +1383,36 @@ void hls_proxy_abort(hls_proxy *p) {
     if (!p) return;
     __atomic_store_n(&p->stop, true, __ATOMIC_RELEASE);
     pthread_mutex_lock(&p->q_lock);
+    for (int i = 0; i < HP_NUM_WORKERS; i++) {
+        if (p->active_clients[i] != HP_BAD_SOCK)
+            hp_sock_shutdown(p->active_clients[i]);
+    }
     pthread_cond_broadcast(&p->q_cond);
     pthread_mutex_unlock(&p->q_lock);
 }
 
+void hls_proxy_abort_all(void) {
+    pthread_mutex_lock(&g_inst_lock);
+    for (int i = 0; i < HP_MAX_INSTANCES; i++) {
+        if (g_instances[i]) hls_proxy_abort(g_instances[i]);
+    }
+    pthread_mutex_unlock(&g_inst_lock);
+}
+
 void hls_proxy_stop(hls_proxy *p) {
     if (!p) return;
+    pthread_mutex_lock(&g_inst_lock);
+    for (int i = 0; i < HP_MAX_INSTANCES; i++) {
+        if (g_instances[i] == p) g_instances[i] = NULL;
+    }
+    pthread_mutex_unlock(&g_inst_lock);
+
     hls_proxy_abort(p);
+    if (p->accept_started) pthread_join(p->accept_thread, NULL);
     if (p->listen_fd != HP_BAD_SOCK) {
-        hp_sock_shutdown(p->listen_fd);
         hp_sock_close(p->listen_fd);
         p->listen_fd = HP_BAD_SOCK;
     }
-    if (p->accept_started) pthread_join(p->accept_thread, NULL);
     for (int i = 0; i < p->workers_started; i++) pthread_join(p->workers[i], NULL);
 
     while (p->q_count > 0) {

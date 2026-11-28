@@ -7,6 +7,7 @@
 #include <mpv/stream_cb.h>
 
 #include "httpsrc.h"
+#include "hlssrc.h"
 #include "torrentfs.h"
 
 // Per-open-stream state: the shared torrent store plus this stream's cursor.
@@ -69,64 +70,88 @@ int stream_register(mpv_handle *mpv, torrentfs *tfs) {
 }
 
 //---------------------------------------------------------------------------
-// nxhttps:// -- an https:// URL read through curl (httpsrc.c), because this
-// FFmpeg has no https protocol of its own.
+// nxhttps://, nxhttp://, nxhls://, nxhlshttp:// -- read through curl
+// (httpsrc.c / hlssrc.c), with zero loopback sockets on Switch.
 //---------------------------------------------------------------------------
 
 typedef struct {
     httpsrc *src;
+    hlssrc *hls;
     int64_t pos;
 } http_ctx;
 
 static int64_t http_read_cb(void *cookie, char *buf, uint64_t nbytes) {
     http_ctx *h = cookie;
-    int64_t n = httpsrc_read(h->src, h->pos, buf, (int64_t)nbytes);
+    int64_t n = h->hls ? hlssrc_read(h->hls, buf, (int64_t)nbytes)
+                       : httpsrc_read(h->src, h->pos, buf, (int64_t)nbytes);
     if (n > 0) h->pos += n;
     return n;
 }
 
 static int64_t http_seek_cb(void *cookie, int64_t offset) {
     http_ctx *h = cookie;
+    if (h->hls) {
+        int64_t r = hlssrc_seek(h->hls, offset);
+        if (r < 0) return MPV_ERROR_GENERIC;
+        h->pos = r;
+        return r;
+    }
     if (offset < 0 || offset > httpsrc_size(h->src)) return MPV_ERROR_GENERIC;
     h->pos = offset;  // the data is fetched by the next read
     return offset;
 }
 
 static int64_t http_size_cb(void *cookie) {
-    return httpsrc_size(((http_ctx *)cookie)->src);
+    http_ctx *h = cookie;
+    return h->hls ? hlssrc_size(h->hls) : httpsrc_size(h->src);
 }
 
 static void http_close_cb(void *cookie) {
     http_ctx *h = cookie;
-    httpsrc_close(h->src);
+    if (h->hls) hlssrc_close(h->hls);
+    if (h->src) httpsrc_close(h->src);
     free(h);
 }
 
 static void http_cancel_cb(void *cookie) {
-    httpsrc_cancel(((http_ctx *)cookie)->src);
+    http_ctx *h = cookie;
+    if (h->hls) hlssrc_cancel(h->hls);
+    if (h->src) httpsrc_cancel(h->src);
 }
 
-static int http_open_cb(void *user_data, char *uri, mpv_stream_cb_info *info) {
-    const volatile bool *abort = user_data;
-    stream_http_err[0] = 0;   // a previous open's reason is not this one's
-    // "nxhttps://host/path" -> "https://host/path"
-    static const char prefix[] = "nxhttps://";
-    if (strncmp(uri, prefix, sizeof(prefix) - 1) != 0) return MPV_ERROR_LOADING_FAILED;
-    size_t rest = strlen(uri) - (sizeof(prefix) - 1);
-    char *url = malloc(rest + sizeof("https://"));
-    if (!url) return MPV_ERROR_LOADING_FAILED;
-    snprintf(url, rest + sizeof("https://"), "https://%s", uri + sizeof(prefix) - 1);
+static char *map_custom_url(const char *uri) {
+    const char *scheme = NULL;
+    const char *rest = NULL;
+    if (strncmp(uri, "nxhttps://", 10) == 0) {
+        scheme = "https://";
+        rest = uri + 10;
+    } else if (strncmp(uri, "nxhttp://", 9) == 0) {
+        scheme = "http://";
+        rest = uri + 9;
+    } else if (strncmp(uri, "nxhls://", 8) == 0) {
+        scheme = "https://";
+        rest = uri + 8;
+    } else if (strncmp(uri, "nxhlshttp://", 12) == 0) {
+        scheme = "http://";
+        rest = uri + 12;
+    } else {
+        return NULL;
+    }
+    size_t len = strlen(scheme) + strlen(rest) + 1;
+    char *url = malloc(len);
+    if (url) snprintf(url, len, "%s%s", scheme, rest);
+    return url;
+}
 
-    char err[160] = {0};
-    httpsrc *src = httpsrc_open_abortable(url, abort, err, sizeof(err));
-    free(url);
-    if (!src) {
-        snprintf(stream_http_err, sizeof(stream_http_err), "%s", err);
+static int finish_http_open(mpv_stream_cb_info *info, httpsrc *src, hlssrc *hls) {
+    http_ctx *h = calloc(1, sizeof(*h));
+    if (!h) {
+        if (hls) hlssrc_close(hls);
+        if (src) httpsrc_close(src);
         return MPV_ERROR_LOADING_FAILED;
     }
-    http_ctx *h = calloc(1, sizeof(*h));
-    if (!h) { httpsrc_close(src); return MPV_ERROR_LOADING_FAILED; }
     h->src = src;
+    h->hls = hls;
 
     info->cookie = h;
     info->read_fn = http_read_cb;
@@ -137,9 +162,68 @@ static int http_open_cb(void *user_data, char *uri, mpv_stream_cb_info *info) {
     return 0;
 }
 
+static int http_open_cb(void *user_data, char *uri, mpv_stream_cb_info *info) {
+    const volatile bool *abort = user_data;
+    stream_http_err[0] = 0;   // a previous open's reason is not this one's
+    char *url = map_custom_url(uri);
+    if (!url) return MPV_ERROR_LOADING_FAILED;
+
+    char err[160] = {0};
+    httpsrc_hls_probe probe;
+    httpsrc *src = httpsrc_open_ex(url, abort, &probe, err, sizeof(err));
+    if (src) {
+        free(url);
+        return finish_http_open(info, src, NULL);
+    }
+
+    if (probe.eff_url) {
+        hlssrc *hls = (probe.truncated || !probe.data)
+                          ? hlssrc_open_abortable(probe.eff_url, abort, err, sizeof(err))
+                          : hlssrc_open_with_manifest(probe.eff_url, probe.data, probe.len,
+                                                      abort, err, sizeof(err));
+        free(probe.data);
+        free(probe.eff_url);
+        free(url);
+        if (!hls) {
+            snprintf(stream_http_err, sizeof(stream_http_err), "%s", err);
+            return MPV_ERROR_LOADING_FAILED;
+        }
+        return finish_http_open(info, NULL, hls);
+    }
+
+    free(probe.data);
+    free(url);
+    snprintf(stream_http_err, sizeof(stream_http_err), "%s", err);
+    return MPV_ERROR_LOADING_FAILED;
+}
+
+static int hls_open_cb(void *user_data, char *uri, mpv_stream_cb_info *info) {
+    const volatile bool *abort = user_data;
+    stream_http_err[0] = 0;
+    char *url = map_custom_url(uri);
+    if (!url) return MPV_ERROR_LOADING_FAILED;
+
+    char err[160] = {0};
+    hlssrc *hls = hlssrc_open_abortable(url, abort, err, sizeof(err));
+    free(url);
+    if (!hls) {
+        snprintf(stream_http_err, sizeof(stream_http_err), "%s", err);
+        return MPV_ERROR_LOADING_FAILED;
+    }
+    return finish_http_open(info, NULL, hls);
+}
+
 char stream_http_err[160];
 
 int stream_register_http(mpv_handle *mpv, const volatile bool *abort) {
     stream_http_err[0] = 0;
-    return mpv_stream_cb_add_ro(mpv, "nxhttps", (void *)abort, http_open_cb);
+    int r1 = mpv_stream_cb_add_ro(mpv, "nxhttps", (void *)abort, http_open_cb);
+    int r2 = mpv_stream_cb_add_ro(mpv, "nxhttp", (void *)abort, http_open_cb);
+    return r1 != 0 ? r1 : r2;
+}
+
+int stream_register_hls(mpv_handle *mpv, const volatile bool *abort) {
+    int r1 = mpv_stream_cb_add_ro(mpv, "nxhls", (void *)abort, hls_open_cb);
+    int r2 = mpv_stream_cb_add_ro(mpv, "nxhlshttp", (void *)abort, hls_open_cb);
+    return r1 != 0 ? r1 : r2;
 }

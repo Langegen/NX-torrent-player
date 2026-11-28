@@ -71,7 +71,8 @@ void shutdown()
 // is a crash on the Switch (socketExit tears the sockets down under it).
 static std::atomic<bool> g_stopping{ false };
 
-void abortAll() { g_stopping = true; }
+void abortAll() { g_stopping.store(true, std::memory_order_release); }
+bool isStopping() { return g_stopping.load(std::memory_order_acquire); }
 
 static int stopCb(void*, curl_off_t, curl_off_t, curl_off_t, curl_off_t)
 {
@@ -172,6 +173,11 @@ static std::string tlsAwareErr(CURLcode rc, const char* errbuf)
 bool postJson(const char* url, const std::string& body, std::string& resp,
               std::string& err)
 {
+    if (isStopping())
+    {
+        err = "cancelled";
+        return false;
+    }
     CURL* curl = threadHandle();  // reused: see threadHandle
     if (!curl)
     {
@@ -221,6 +227,11 @@ bool get(const std::string& url, std::string& resp, std::string& err,
          const char* accept, long timeoutSec, long* status)
 {
     if (status) *status = 0;
+    if (isStopping())
+    {
+        err = "cancelled";
+        return false;
+    }
     CURL* curl = threadHandle();  // reused: see threadHandle
     if (!curl)
     {
@@ -295,6 +306,11 @@ static int progressCb(void* userdata, curl_off_t total, curl_off_t now,
 bool download(const std::string& url, const std::string& path, std::string& err,
               std::function<bool(int64_t, int64_t)> progress)
 {
+    if (isStopping())
+    {
+        err = "cancelled";
+        return false;
+    }
     DlCtx ctx;
     ctx.progress = std::move(progress);
     ctx.f        = std::fopen(path.c_str(), "wb");
@@ -385,6 +401,11 @@ bool downloadTorrent(const std::string& url, const std::string& path,
                      std::string& magnet, std::string& err)
 {
     magnet.clear();
+    if (isStopping())
+    {
+        err = "cancelled";
+        return false;
+    }
 
     // Into .part, renamed over `path` only when complete: the cached .torrent
     // a history entry or Continue points at must survive a failed refetch
@@ -483,6 +504,11 @@ bool request(const std::string& url, const RequestOptions& opt, std::string& res
 {
     if (status) *status = 0;
     resp.clear();
+    if (isStopping())
+    {
+        err = "cancelled";
+        return false;
+    }
     CURL* curl = threadHandle();
     if (!curl)
     {

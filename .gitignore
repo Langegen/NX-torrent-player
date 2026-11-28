@@ -16,6 +16,12 @@
 /pctest/test_suite.exe
 /pctest/test_httpsrc
 /pctest/test_httpsrc.exe
+/pctest/test_hls_proxy
+/pctest/test_hls_proxy.exe
+/pctest/test_hlssrc
+/pctest/test_hlssrc.exe
+/pctest/test_online
+/pctest/test_online.exe
 /pctest/test_net
 /pctest/test_net.exe
 /pctest/test_tmdb
