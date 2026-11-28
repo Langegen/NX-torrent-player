@@ -671,9 +671,12 @@ brls::View* onlinePane()
 
     auto rebuildPlugins = std::make_shared<std::function<void()>>();
     auto live           = pluginsBox->alive;
+    std::weak_ptr<std::function<void()>> weakRebuild = rebuildPlugins;
 
-    *rebuildPlugins = [pluginsBox, modeCell, live, rebuildPlugins]() {
+    *rebuildPlugins = [pluginsBox, modeCell, live, weakRebuild]() {
         if (!*live) return;
+        auto selfRebuild = weakRebuild.lock();
+        if (!selfRebuild) return;
         for (brls::View* v = brls::Application::getCurrentFocus(); v; v = v->getParent())
         {
             if (v == pluginsBox)
@@ -702,7 +705,7 @@ brls::View* onlinePane()
                                 (p.enabled ? tr("Enabled") : tr("Disabled")));
             cell->setDetailTextColor(p.enabled ? theme::textGood() : theme::textMuted());
 
-            cell->registerClickAction([i, live, rebuildPlugins](brls::View*) {
+            cell->registerClickAction([i, live, weakRebuild](brls::View*) {
                 if (i >= config::get().onlinePlugins.size()) return true;
                 const auto cur                   = config::get().onlinePlugins[i];
                 std::vector<std::string> actions = {
@@ -714,8 +717,11 @@ brls::View* onlinePane()
                 };
                 auto* dd = new brls::Dropdown(
                     cur.name, actions, [](int) {}, -1,
-                    [i, live, rebuildPlugins](int sel) {
+                    [i, live, weakRebuild](int sel) {
                         if (!*live || i >= config::get().onlinePlugins.size()) return;
+                        auto triggerRebuild = [weakRebuild]() {
+                            if (auto fn = weakRebuild.lock()) (*fn)();
+                        };
                         if (sel == 0)
                         {
                             auto cfgCopy = config::get().onlinePlugins[i];
@@ -732,17 +738,17 @@ brls::View* onlinePane()
                             config::get().onlinePlugins[i].enabled =
                                 !config::get().onlinePlugins[i].enabled;
                             config::save();
-                            (*rebuildPlugins)();
+                            triggerRebuild();
                         }
                         else if (sel == 2)
                         {
                             std::string curTok = config::get().onlinePlugins[i].token;
                             brls::Application::getImeManager()->openForText(
-                                [i, live, rebuildPlugins](std::string text) {
+                                [i, live, triggerRebuild](std::string text) {
                                     if (!*live || i >= config::get().onlinePlugins.size()) return;
                                     config::get().onlinePlugins[i].token = text;
                                     config::save();
-                                    (*rebuildPlugins)();
+                                    triggerRebuild();
                                 },
                                 tr("Access token (optional)"), "", 128, curTok);
                         }
@@ -750,13 +756,13 @@ brls::View* onlinePane()
                         {
                             std::string curName = config::get().onlinePlugins[i].name;
                             brls::Application::getImeManager()->openForText(
-                                [i, live, rebuildPlugins](std::string text) {
+                                [i, live, triggerRebuild](std::string text) {
                                     if (!*live || i >= config::get().onlinePlugins.size()) return;
                                     if (!text.empty())
                                     {
                                         config::get().onlinePlugins[i].name = text;
                                         config::save();
-                                        (*rebuildPlugins)();
+                                        triggerRebuild();
                                     }
                                 },
                                 tr("Plugin name"), "", 64, curName);
@@ -766,7 +772,7 @@ brls::View* onlinePane()
                             auto& vec = config::get().onlinePlugins;
                             vec.erase(vec.begin() + (ptrdiff_t)i);
                             config::save();
-                            (*rebuildPlugins)();
+                            triggerRebuild();
                         }
                     });
                 brls::Application::pushActivity(new brls::Activity(dd));

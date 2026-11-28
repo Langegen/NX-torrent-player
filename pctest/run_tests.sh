@@ -76,6 +76,14 @@ $cc -O1 -g -Wall \
     -o "$out/test_hls_proxy" \
     -lpthread -lcurl $extra_sock
 
+$cc -O1 -g -Wall \
+    -Iengine \
+    engine/hlssrc.c \
+    engine/httpsrc.c \
+    pctest/test_hlssrc.c \
+    -o "$out/test_hlssrc" \
+    -lpthread -lcurl $extra_sock
+
 ${CXX:-g++} -O1 -g -Wall -std=c++17 \
     -DTORRSERVER_NO_UI -Iapp \
     app/torrserver.cpp \
@@ -154,6 +162,8 @@ echo
 "$out/test_httpsrc"
 echo
 "$out/test_hls_proxy"
+echo
+"$out/test_hlssrc"
 echo
 "$out/test_net"
 echo

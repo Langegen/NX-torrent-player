@@ -19,6 +19,15 @@
 
 typedef struct httpsrc httpsrc;
 
+// Returned by httpsrc_open_ex when a URL turned out to be an HLS playlist
+// (#EXTM3U or mpegurl Content-Type), so stream.c can hand it straight to hlssrc.
+typedef struct {
+    char *data;       // heap-allocated manifest body (caller frees), or NULL
+    size_t len;
+    char *eff_url;    // heap-allocated effective URL after redirects (caller frees)
+    bool truncated;   // manifest exceeded the initial probe chunk -> re-fetch full URL
+} httpsrc_hls_probe;
+
 // Process-wide settings, read at every open. NULL/"" = unset.
 // `ca_path`: CA bundle file for TLS verification (the Switch mounts none, the
 // app ships romfs:/cacert.pem). Unset = curl's default store.
@@ -37,6 +46,17 @@ httpsrc *httpsrc_open(const char *url, char *err, size_t errlen);
 // is also polled by every later read, so it must outlive the httpsrc.
 httpsrc *httpsrc_open_abortable(const char *url, const volatile bool *abort,
                                 char *err, size_t errlen);
+
+// Like httpsrc_open_abortable, except if `hls_out` is non-NULL and the
+// server replies with an HLS playlist (#EXTM3U / mpegurl Content-Type), populates
+// `*hls_out` (with `err[0] = 0`) and returns NULL so the caller can hand off
+// without a duplicate probe request.
+httpsrc *httpsrc_open_ex(const char *url, const volatile bool *abort,
+                         httpsrc_hls_probe *hls_out,
+                         char *err, size_t errlen);
+
+// Adds `n` bytes to the shared httpsrc_bytes_total() counter (used by hlssrc).
+void httpsrc_add_bytes(int64_t n);
 
 // Total size in bytes.
 int64_t httpsrc_size(const httpsrc *s);

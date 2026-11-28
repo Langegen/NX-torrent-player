@@ -18,6 +18,8 @@ namespace http
 
 // Stops every transfer in flight, and any started after, as the app quits.
 void abortAll();
+// True once abortAll() has been called during shutdown.
+bool isStopping();
 
 // Closes the connections get() and postJson() keep open. Once, as the app
 // quits, after every thread that made requests has been joined: before

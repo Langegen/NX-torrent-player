@@ -284,6 +284,7 @@ void probePluginAsync(const std::string& rawUrl, const std::string& token,
                       std::function<void(ProbeResult)> cb)
 {
     workers::run([rawUrl, token, cb = std::move(cb)]() {
+        if (http::isStopping()) return;
         ProbeResult res;
         std::string trimmed = rawUrl;
         while (!trimmed.empty() && std::isspace((unsigned char)trimmed.front())) trimmed.erase(0, 1);
@@ -291,7 +292,7 @@ void probePluginAsync(const std::string& rawUrl, const std::string& token,
         if (trimmed.empty())
         {
             res.error = tr("Empty URL");
-            brls::sync([cb, res]() { cb(res); });
+            if (!http::isStopping()) brls::sync([cb, res]() { cb(res); });
             return;
         }
 
@@ -301,6 +302,7 @@ void probePluginAsync(const std::string& rawUrl, const std::string& token,
         std::string nxMsg;
         if (nxProbe.testConnection(nxMsg))
         {
+            if (http::isStopping()) return;
             res.ok             = true;
             res.plugin.id      = makePluginId(nxBase);
             res.plugin.name    = nxProbe.cachedManifest().name;
@@ -312,6 +314,7 @@ void probePluginAsync(const std::string& rawUrl, const std::string& token,
             brls::sync([cb, res]() { cb(res); });
             return;
         }
+        if (http::isStopping()) return;
 
         // 2. Check Lampa / Lampac / BWA protocol
         ParsedLampaUrl parsed = parseLampaPluginUrl(trimmed, token);
@@ -319,6 +322,7 @@ void probePluginAsync(const std::string& rawUrl, const std::string& token,
         std::string lampacMsg;
         if (lampacProbe.testConnection(lampacMsg))
         {
+            if (http::isStopping()) return;
             res.ok             = true;
             res.plugin.id      = makePluginId(parsed.baseUrl);
             res.plugin.name    = hostOfUrl(parsed.baseUrl);
@@ -331,6 +335,7 @@ void probePluginAsync(const std::string& rawUrl, const std::string& token,
             brls::sync([cb, res]() { cb(res); });
             return;
         }
+        if (http::isStopping()) return;
 
         if (parsed.looksLikeJsScript)
         {
@@ -348,10 +353,11 @@ void testPluginAsync(const config::OnlinePluginConfig& cfg,
                      std::function<void(bool ok, const std::string& msg)> cb)
 {
     workers::run([cfg, cb = std::move(cb)]() {
+        if (http::isStopping()) return;
         auto prov = createProvider(cfg);
         std::string msg;
         bool ok = prov->testConnection(msg);
-        brls::sync([cb, ok, msg]() { cb(ok, msg); });
+        if (!http::isStopping()) brls::sync([cb, ok, msg]() { cb(ok, msg); });
     });
 }
 
@@ -362,6 +368,7 @@ void discoverAllAsync(const content::Item& item, std::function<void(DiscoverResu
         if (p.enabled && !p.url.empty()) plugins.push_back(p);
 
     workers::run([item, plugins = std::move(plugins), cb = std::move(cb)]() {
+        if (http::isStopping()) return;
         DiscoverResult res;
         res.kpId = loadCachedKp(item.tmdbId);
 
@@ -370,6 +377,7 @@ void discoverAllAsync(const content::Item& item, std::function<void(DiscoverResu
         {
             for (const auto& p : plugins)
             {
+                if (http::isStopping()) return;
                 if (p.kind == "lampac")
                 {
                     LampacProvider lp(p.id, p.name, p.url, p.token);
@@ -386,6 +394,7 @@ void discoverAllAsync(const content::Item& item, std::function<void(DiscoverResu
 
         for (const auto& p : plugins)
         {
+            if (http::isStopping()) return;
             auto prov = createProvider(p);
             std::vector<BalancerInfo> found;
             std::string err;
@@ -399,7 +408,7 @@ void discoverAllAsync(const content::Item& item, std::function<void(DiscoverResu
             }
         }
 
-        brls::sync([cb, res = std::move(res)]() { cb(res); });
+        if (!http::isStopping()) brls::sync([cb, res = std::move(res)]() { cb(res); });
     });
 }
 
@@ -419,9 +428,10 @@ void fetchPageAsync(const BalancerInfo& balancer, const std::string& overrideUrl
     config::OnlinePluginConfig copyCfg = *cfg;
     workers::run([copyCfg, balancer, overrideUrl, item, kpId, season, episode,
                   cb = std::move(cb)]() {
+        if (http::isStopping()) return;
         auto prov = createProvider(copyCfg);
         PageResult pr = prov->fetch(balancer, overrideUrl, item, kpId, season, episode);
-        brls::sync([cb, pr = std::move(pr)]() { cb(pr); });
+        if (!http::isStopping()) brls::sync([cb, pr = std::move(pr)]() { cb(pr); });
     });
 }
 
@@ -439,11 +449,12 @@ void resolveCallAsync(const std::string& pluginId, const std::string& callUrl,
     }
     config::OnlinePluginConfig copyCfg = *cfg;
     workers::run([copyCfg, callUrl, hint, cb = std::move(cb)]() {
+        if (http::isStopping()) return;
         ResolveResult rr;
         rr.entry = hint;
         auto prov = createProvider(copyCfg);
         rr.ok = prov->resolveCall(callUrl, rr.entry, rr.error);
-        brls::sync([cb, rr = std::move(rr)]() { cb(rr); });
+        if (!http::isStopping()) brls::sync([cb, rr = std::move(rr)]() { cb(rr); });
     });
 }
 
@@ -505,14 +516,19 @@ void playOnlineEntry(const content::Item& item,
                      int nextPop,
                      const std::string& preferredQualityUrl,
                      const std::string& preferredQualityLabel,
-                     bool promptResume)
+                     bool promptResume,
+                     std::shared_ptr<bool> aliveGuard,
+                     std::function<void()> onDone)
 {
     if (entry.method == OnlineMethod::Call)
     {
         brls::Application::notify(tr("Fetching stream link..."));
         resolveCallAsync(ref.pluginId, entry.url, entry,
                          [item, ref, seasonEpisodes, episodeIdx, nextPop,
-                          preferredQualityUrl, preferredQualityLabel, promptResume](ResolveResult rr) {
+                          preferredQualityUrl, preferredQualityLabel, promptResume,
+                          aliveGuard, onDone = std::move(onDone)](ResolveResult rr) {
+                             if (onDone) onDone();
+                             if (http::isStopping() || (aliveGuard && !*aliveGuard)) return;
                              if (!rr.ok)
                              {
                                  auto* d = new brls::Dialog(tr("Failed to get stream: ") + rr.error);
@@ -527,6 +543,7 @@ void playOnlineEntry(const content::Item& item,
         return;
     }
 
+    if (onDone) onDone();
     launchPlayerWithEntry(item, ref, entry, seasonEpisodes, episodeIdx, nextPop,
                           preferredQualityUrl, preferredQualityLabel, promptResume);
 }
@@ -547,6 +564,7 @@ void resumeOnlineAsync(const content::Item& item,
     brls::Application::notify(tr("Connecting to online source..."));
 
     workers::run([cfg, item, ref, season, episode, resumeSec, episodesInSeason]() {
+        if (http::isStopping()) return;
         auto prov = createProvider(cfg);
         std::string kpId = loadCachedKp(item.tmdbId);
         if (kpId.empty() && cfg.kind == "lampac")
@@ -554,6 +572,7 @@ void resumeOnlineAsync(const content::Item& item,
             kpId = static_cast<LampacProvider*>(prov.get())->fetchKpId(item);
             if (!kpId.empty()) saveCachedKp(item.tmdbId, kpId);
         }
+        if (http::isStopping()) return;
 
         std::vector<BalancerInfo> balancers;
         std::string err;
@@ -566,6 +585,7 @@ void resumeOnlineAsync(const content::Item& item,
                 if (b.id == ref.balancerId) { targetBal = b; foundBal = true; break; }
             }
         }
+        if (http::isStopping()) return;
         if (!foundBal)
         {
             brls::sync([item, season, episode, episodesInSeason]() {
@@ -575,6 +595,7 @@ void resumeOnlineAsync(const content::Item& item,
         }
 
         PageResult pr = prov->fetch(targetBal, "", item, kpId, season, episode);
+        if (http::isStopping()) return;
         if (!pr.ok || pr.entries.empty())
         {
             brls::sync([item, season, episode, episodesInSeason]() {
@@ -590,7 +611,10 @@ void resumeOnlineAsync(const content::Item& item,
             for (const auto& s : pr.seasons)
                 if (s.number == season && !s.url.empty()) { seasonUrl = s.url; break; }
             if (!seasonUrl.empty())
+            {
                 pr = prov->fetch(targetBal, seasonUrl, item, kpId, season, episode);
+                if (http::isStopping()) return;
+            }
         }
 
         // Match remembered voice if classic Lampac offers voices.
@@ -608,6 +632,7 @@ void resumeOnlineAsync(const content::Item& item,
             if (!vUrl.empty())
             {
                 PageResult vp = prov->fetch(targetBal, vUrl, item, kpId, season, episode);
+                if (http::isStopping()) return;
                 if (vp.ok && !vp.entries.empty()) pr = std::move(vp);
             }
         }
@@ -711,25 +736,29 @@ void resumeOnlineAsync(const content::Item& item,
             std::string callErr;
             if (!prov->resolveCall(chosen.url, chosen, callErr))
             {
+                if (http::isStopping()) return;
                 brls::sync([item, season, episode, episodesInSeason]() {
                     openOnlineScreen(item, season, episode, episodesInSeason);
                 });
                 return;
             }
+            if (http::isStopping()) return;
         }
 
         if (chosen.method == OnlineMethod::Link)
         {
-            brls::sync([item, season, episode, episodesInSeason]() {
-                openOnlineScreen(item, season, episode, episodesInSeason);
-            });
+            if (!http::isStopping())
+                brls::sync([item, season, episode, episodesInSeason]() {
+                    openOnlineScreen(item, season, episode, episodesInSeason);
+                });
             return;
         }
 
-        brls::sync([item, ref, chosen, playlistEps, epIdx, resumeSec]() {
-            launchPlayerWithEntry(item, ref, chosen, playlistEps, epIdx, 1, "", "",
-                                  resumeSec < 0.0, resumeSec);
-        });
+        if (!http::isStopping())
+            brls::sync([item, ref, chosen, playlistEps, epIdx, resumeSec]() {
+                launchPlayerWithEntry(item, ref, chosen, playlistEps, epIdx, 1, "", "",
+                                      resumeSec < 0.0, resumeSec);
+            });
     });
 }
 

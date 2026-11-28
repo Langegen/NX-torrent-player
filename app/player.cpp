@@ -65,6 +65,7 @@
 extern "C" {
 #include "torrentfs.h"
 #include "httpsrc.h"
+#include "hlssrc.h"
 #include "hls_proxy.h"
 #include "stream.h"
 #include "torrent.h"  // magnet metadata-fetch progress counters
@@ -507,7 +508,7 @@ MpvView::MpvView(const std::string& source, const PlayerArt& art,
     }
     registerPlayerActions();
 
-#if defined(__ANDROID__) || defined(ANDROID)
+#if defined(__ANDROID__) || defined(ANDROID) || defined(__SWITCH__)
     focusSub = brls::Application::getWindowFocusChangedEvent()->subscribe(
         [this, live = alive](bool focused) {
             if (!*live || focused || !mpv) return;
@@ -988,6 +989,10 @@ bool MpvView::startMpv()
     {
         mpv_observe_property(mpv, 0, "cache-speed", MPV_FORMAT_DOUBLE);
         mpv_observe_property(mpv, 0, "file-size", MPV_FORMAT_INT64);
+#ifdef __SWITCH__
+        stream_register_http(mpv, &httpAbort);
+        stream_register_hls(mpv, &httpAbort);
+#endif
         loadDirectUrl(playUrl);
         return true;
     }
@@ -1018,20 +1023,20 @@ void MpvView::loadDirectUrl(const std::string& rawUrl, double seekToSec)
         return false;
     };
 
-    bool useHlsProxy = false;
-    bool isHttps     = (url.rfind("https://", 0) == 0);
-    bool isHttp      = (url.rfind("http://", 0) == 0);
-    bool isSocks     = (proxy.rfind("socks", 0) == 0);
+    bool useHlsProxy   = false;
+    bool useCurlStream = false;
+    bool isHttps       = (url.rfind("https://", 0) == 0);
+    bool isHttp        = (url.rfind("http://", 0) == 0);
+    bool isSocks       = (proxy.rfind("socks", 0) == 0);
 
 #ifdef __SWITCH__
-    // Portlibs FFmpeg has no https or crypto (AES-128) protocols, and nxhttps://
-    // only serves byte-ranged single files. Any HTTPS HLS stream, online balancer
-    // stream, custom-header stream, or SOCKS-proxied HTTP stream goes through
-    // our local loopback hls_proxy.
-    if (isHttps && (looksLikeHls(url) || watch.online.active || !watch.online.httpHeaders.empty()))
-        useHlsProxy = true;
-    else if (isHttp && (isSocks || !watch.online.httpHeaders.empty()))
-        useHlsProxy = true;
+    // Never use 127.0.0.1 loopback (hls_proxy) on Switch: Horizon OS bsd:u
+    // stalls/deadlocks on loopback sockets and Applet Mode caps bsd sessions.
+    // All HTTPS streams, online streams, custom-header streams, and
+    // SOCKS-proxied HTTP streams run in-process through curl (httpsrc/hlssrc)
+    // on mpv's demuxer thread with instant abort on Back.
+    if (isHttps || (isHttp && (isSocks || watch.online.active || !watch.online.httpHeaders.empty())))
+        useCurlStream = true;
 #else
     // PC & Android libmpv natively handle https:// and HLS; use hls_proxy only
     // when routing through a SOCKS proxy (FFmpeg http-proxy only speaks HTTP).
@@ -1062,19 +1067,20 @@ void MpvView::loadDirectUrl(const std::string& rawUrl, double seekToSec)
             }
         }
     }
-    else if (isHttps)
+    else if (useCurlStream)
     {
-#ifdef __SWITCH__
-        httpsrc_set_proxy(proxy.c_str());
         std::vector<const char*> hdrPtrs;
         for (const auto& h : watch.online.httpHeaders) hdrPtrs.push_back(h.c_str());
+        httpsrc_set_proxy(proxy.c_str());
         httpsrc_set_headers(hdrPtrs.empty() ? nullptr : hdrPtrs.data(), (int)hdrPtrs.size());
-        stream_register_http(mpv, &httpAbort);
-        url = "nx" + url;
-#else
-        if (proxy.rfind("http://", 0) == 0)
-            mpv_set_property_string(mpv, "http-proxy", proxy.c_str());
-#endif
+        hlssrc_set_proxy(proxy.c_str());
+        hlssrc_set_headers(hdrPtrs.empty() ? nullptr : hdrPtrs.data(), (int)hdrPtrs.size());
+        hlssrc_set_quality(config::get().onlinePreferQuality, config::get().hide4k);
+        mpv_set_property_string(mpv, "http-proxy", "");
+        if (isHttps)
+            url = (looksLikeHls(url) ? "nxhls://" : "nxhttps://") + url.substr(8);
+        else
+            url = (looksLikeHls(url) ? "nxhlshttp://" : "nxhttp://") + url.substr(7);
     }
     else if (proxy.rfind("http://", 0) == 0)
     {
@@ -1086,8 +1092,7 @@ void MpvView::loadDirectUrl(const std::string& rawUrl, double seekToSec)
                               "stream; connecting directly");
     }
 
-#ifndef __SWITCH__
-    if (!useHlsProxy && !watch.online.httpHeaders.empty())
+    if (!useHlsProxy && !useCurlStream && !watch.online.httpHeaders.empty())
     {
         // Forward custom Referer / User-Agent / headers natively to libmpv.
         std::vector<std::string> extra;
@@ -1126,7 +1131,6 @@ void MpvView::loadDirectUrl(const std::string& rawUrl, double seekToSec)
             mpv_set_property(mpv, "http-header-fields", MPV_FORMAT_NODE, &arr);
         }
     }
-#endif
 
     if (seekToSec >= 0.0)
     {
@@ -1138,8 +1142,11 @@ void MpvView::loadDirectUrl(const std::string& rawUrl, double seekToSec)
     mpvUrl = url;
     const char* cmd[] = { "loadfile", url.c_str(), nullptr };
     mpv_command(mpv, cmd);
-    brls::Logger::info("loadfile direct stream from {}{}", urlHost(rawUrl),
-                       useHlsProxy ? " (via hls_proxy)" : "");
+    const char* via = useHlsProxy                    ? " (via hls_proxy)"
+                    : (url.rfind("nxhls", 0) == 0)   ? " (via nxhls)"
+                    : (url.rfind("nxhttp", 0) == 0)  ? " (via nxhttps)"
+                                                     : "";
+    brls::Logger::info("loadfile direct stream from {}{}", urlHost(rawUrl), via);
 }
 
 void MpvView::switchOnlineQuality(int idx)
@@ -4615,7 +4622,13 @@ void MpvView::updateInfoOverlay()
     if (direct || viaTorrServer)
     {
         infoLastSample = now;
-        bool viaCurl   = playUrl.rfind("https://", 0) == 0;
+        const char* transport = "http (FFmpeg)";
+        if (hlsProxy)
+            transport = "hls_proxy (curl)";
+        else if (mpvUrl.rfind("nxhls", 0) == 0)
+            transport = "hls (curl)";
+        else if (mpvUrl.rfind("nxhttp", 0) == 0)
+            transport = "https (curl, range requests)";
         char m[512];
         std::snprintf(m, sizeof(m),
                       "%s\n"
@@ -4628,7 +4641,7 @@ void MpvView::updateInfoOverlay()
                       : direct       ? "TORRSERVER STREAM"
                                      : "TORRSERVER: waiting for the stream URL",
                       playUrl.empty() ? "-" : urlHost(playUrl).c_str(),
-                      viaCurl ? "https (curl, range requests)" : "http (FFmpeg)",
+                      transport,
                       obsCacheSpeed / (1024.0 * 1024.0), obsCacheSecs,
                       stream_http_err[0] ? stream_http_err : "-");
         infoLabel->setText(m);

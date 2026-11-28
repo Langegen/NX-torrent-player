@@ -80,7 +80,7 @@ set(ENGINE_SRC
     ${ENGINE_DIR}/listen.c ${ENGINE_DIR}/upnp.c ${ENGINE_DIR}/engine_log.c
     ${ENGINE_DIR}/engine_services.c
     ${ENGINE_DIR}/udpdiag.c ${ENGINE_DIR}/stream.c ${ENGINE_DIR}/httpsrc.c
-    ${ENGINE_DIR}/hls_proxy.c
+    ${ENGINE_DIR}/hls_proxy.c ${ENGINE_DIR}/hlssrc.c
     ${ENGINE_DIR}/utp.cpp ${ENGINE_DIR}/utp_utils.cpp ${ENGINE_DIR}/utpbridge.cpp
     ${ENGINE_DIR}/utp_nb.cpp)
 # libutp needs -DPOSIX for its socket types (SOCKADDR_STORAGE etc) on Switch.
